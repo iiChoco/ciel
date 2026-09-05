@@ -68,7 +68,11 @@ class InterviewApp:
         """Loopback development: a ``dev``/``dev`` account exists, cookies
         skip the Secure flag, and the brain is scripted (later phases)."""
         self._dir: Path = self._cfg.dir
-        self._accounts = Accounts(self._dir / ACCOUNTS_FILE)
+        shared = self._cfg.accounts_dir
+        self._accounts = Accounts(shared / "accounts.json" if shared else self._dir / ACCOUNTS_FILE)
+        self._secret_path = shared / "secret" if shared else self._dir / SECRET_FILE
+        """Where the accounts and the cookie secret live: the door's directory
+        when ``[interview].accounts_dir`` is set, the room's own otherwise."""
         self._secret = ""
         self._attempts: dict[str, deque[float]] = {}
         """Failed logins by username and by peer address, for the limiter."""
@@ -102,7 +106,7 @@ class InterviewApp:
         if self._started:
             return
         self._dir.mkdir(parents=True, exist_ok=True)
-        self._secret = mint_secret(self._dir / SECRET_FILE)
+        self._secret = mint_secret(self._secret_path)
         from ciel.interview.speaker import Speaker
 
         self._speaker = Speaker(self._cfg)
@@ -174,7 +178,7 @@ class InterviewApp:
 
     def _user(self, request: Any) -> Account | None:
         """The live account the request's cookie names, or None."""
-        raw = request.cookies.get(COOKIE)
+        raw = request.cookies.get(self._cfg.cookie_name)
         if not raw or not self._secret:
             return None
         username = read_cookie(self._secret, raw)
@@ -275,10 +279,14 @@ class InterviewApp:
         self._accounts.touch(account.username)
         expires = now + self._cfg.cookie_days * 86400
         response = web.json_response(self._me_payload(account))
-        response.set_cookie(
-            COOKIE, sign_cookie(self._secret, account.username, expires),
-            max_age=self._cfg.cookie_days * 86400, path=PREFIX,
+        cookie: dict[str, Any] = dict(
+            max_age=self._cfg.cookie_days * 86400, path=self._cfg.cookie_path,
             httponly=True, samesite="Lax", secure=self._secure(request),
+        )
+        if self._cfg.cookie_domain:
+            cookie["domain"] = self._cfg.cookie_domain
+        response.set_cookie(
+            self._cfg.cookie_name, sign_cookie(self._secret, account.username, expires), **cookie
         )
         log.info("interview login: %s from %s", account.username, peer)
         return response
@@ -287,7 +295,10 @@ class InterviewApp:
         from aiohttp import web
 
         response = web.json_response({"ok": True})
-        response.del_cookie(COOKIE, path=PREFIX)
+        gone: dict[str, Any] = dict(path=self._cfg.cookie_path)
+        if self._cfg.cookie_domain:
+            gone["domain"] = self._cfg.cookie_domain
+        response.del_cookie(self._cfg.cookie_name, **gone)
         return response
 
     def _me_payload(self, account: Account) -> dict[str, Any]:

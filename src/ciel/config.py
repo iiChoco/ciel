@@ -1558,6 +1558,17 @@ class TranscriptConfig:
     something is actually said. Delete a file to forget that conversation;
     nothing reads them back."""
 
+    accounts_dir: Path | None = None
+    """When set, the accounts file and the cookie secret live here instead
+    of ``dir`` — the door's directory (``accounts.json``, ``secret``), so one
+    login covers every yunhan.me surface. Sessions stay under ``dir``."""
+    cookie_name: str = "ciel_iv"
+    """The login cookie's name — ``yh_session`` when sharing the door's."""
+    cookie_domain: str = ""
+    """Cookie domain — ``.yunhan.me`` to share the login across subdomains;
+    empty is host-only, the room alone."""
+    cookie_path: str = "/interview"
+    """Cookie path — ``/`` when shared, so every surface receives it."""
     dir: Path = field(
         default_factory=lambda: Path.home() / ".ciel" / "transcripts"
     )

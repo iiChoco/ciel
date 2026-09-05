@@ -90,7 +90,8 @@ def _config(args: argparse.Namespace) -> Config:
 
 
 def _accounts(config: Config) -> Accounts:
-    return Accounts(config.interview.dir / ACCOUNTS_FILE)
+    shared = config.interview.accounts_dir
+    return Accounts(shared / "accounts.json" if shared else config.interview.dir / ACCOUNTS_FILE)
 
 
 async def _serve(config: Config, args: argparse.Namespace) -> None:

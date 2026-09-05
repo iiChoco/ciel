@@ -618,7 +618,18 @@ piper_voice = "en_US-lessac-medium"
 
 Accounts are the owner's to make. `ciel interview add-user alice` prints
 a generated password once; the admin panel on the page does the same, and
-can reset, disable, or delete. There is no signup. Public reach is the
+can reset, disable, or delete. There is no signup. The accounts can also
+be the door's — yunhan.me's shared login (`yunhan.me/door`), the same
+module and the same cookie scheme, so one sign-in covers the room and
+every other surface on the domain:
+
+```toml
+[interview]
+accounts_dir = "~/.door"       # the door's accounts.json and secret, instead of the room's own
+cookie_name = "yh_session"     # the door's cookie, set on the parent domain
+cookie_domain = ".yunhan.me"
+cookie_path = "/"
+``` Public reach is the
 Chart's Cloudflare Tunnel plus a second Access application on
 `ciel.yunhan.me/interview` with a Bypass policy, so friends reach the
 room's own login while the Chart itself stays behind the owner's PIN.
