@@ -2,10 +2,10 @@
 
 A local-first voice assistant. Speech in, speech out, running on your machine.
 
-The source checkout lives at `~/Projects/ciel`; the Git remote keeps its existing
-name. Deployment and server configuration are maintained in the independent
+The source checkout lives at `~/Projects/ciel`; the Git remote is
+`iiChoco/ciel`. Deployment and server configuration are maintained in the independent
 `~/Projects/infrastructure` repository; see [deployment](deploy/README.md).
-`scripts/push_hub.sh` previews by default; `--apply` performs the deployment.
+`scripts/push_hub.sh` deploys; `--preview` only prints the commands.
 After relocating or rebuilding the Mac environment, use
 `uv sync --locked --all-extras` to retain Piper and speaker verification.
 Fresh environments also need wake-word support assets; see the infrastructure

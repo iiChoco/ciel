@@ -7,8 +7,9 @@ Canonical service definitions and deployment tooling live in the independent
 - Mac templates: `infrastructure/services/launchd/`; render them with
   `python3 ~/Projects/infrastructure/scripts/render_launchagents.py`.
 - `scripts/push_hub.sh` forwards this source checkout to the infrastructure
-  deploy command. It previews by default; use `--dry-run` for a server comparison
-  or `--apply` to deploy. `--sync` adds locked server dependency synchronization.
+  deploy command and deploys by default. `--sync` adds locked server dependency
+  synchronization; `--dry-run` compares with the server; `--preview` only prints.
 
-The server still runs `/home/ciel/jarvis`. Moving the Mac checkout does not
-change server paths. Runtime state stays under `~/.ciel`.
+The server runs `/home/ciel/ciel` (moved from `/home/ciel/jarvis` on
+2026-09-06; a symlink keeps the old name resolving). Runtime state stays
+under `~/.ciel`.

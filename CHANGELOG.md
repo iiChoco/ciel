@@ -2,6 +2,40 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-06 — one name everywhere, and a guide any hand can follow
+
+**Why.** The code has been Ciel for weeks; everything around it still
+said jarvis — the Mac checkout, the GitHub remote, the server's home
+directory. Codex moved the Mac checkout to `~/Projects/ciel` and split
+the service definitions into a sibling `infrastructure` repository, but
+two things came loose in the move: its forwarding script previewed
+instead of deploying, so the old `push_hub.sh --sync` did nothing; and
+its launchers no longer created the log directory launchd must open
+before the program runs. And with two agents now editing one tree, the
+conventions that lived only in the code's own example needed a page.
+
+**What.**
+
+- *The remote is `iiChoco/ciel`; the server runs `/home/ciel/ciel`.*
+  GitHub redirects the old name. On the box the unit is patched, the
+  venv reinstalled at its new path (a plain sync saw the old path still
+  resolving through the symlink and left the editable install pointing
+  at it), and `~/jarvis` stays as a symlink for a stale push. The three
+  "jarvis" values — the pretrained wake model, the persona, the speaker
+  effect — are features and keep their names.
+- *`push_hub.sh` deploys again.* It forwards to the infrastructure
+  repository's deploy script and deploys by default; `--sync` re-syncs
+  the server's locked dependencies, `--dry-run` compares, `--preview`
+  prints. The launchers (in `infrastructure/services/launchd`) run
+  `sh -c 'mkdir -p ~/.ciel/log && exec .venv/bin/python -m ciel …'`.
+- *`AGENTS.md`, read by Codex and imported by `CLAUDE.md`.* How the
+  project is actually built: probes as tests and the check-sentence,
+  the module-docstring essay, commit and changelog shape, the codenames,
+  what is never touched, and what "done" means.
+
+**Probes.** None changed. `probe_spoke` 52, `probe_world` 121,
+`probe_turns` 71 re-run after the move and pass.
+
 ## 2026-09-05 — the screenshot that took the hub down
 
 **Why.** "Take a look at my screen and put these things on the calendar"
