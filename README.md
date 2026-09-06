@@ -2,6 +2,15 @@
 
 A local-first voice assistant. Speech in, speech out, running on your machine.
 
+The source checkout lives at `~/Projects/ciel`; the Git remote keeps its existing
+name. Deployment and server configuration are maintained in the independent
+`~/Projects/infrastructure` repository; see [deployment](deploy/README.md).
+`scripts/push_hub.sh` previews by default; `--apply` performs the deployment.
+After relocating or rebuilding the Mac environment, use
+`uv sync --locked --all-extras` to retain Piper and speaker verification.
+Fresh environments also need wake-word support assets; see the infrastructure
+README for the one-time provisioning command, including custom wake models.
+
 Speech recognition and synthesis are local and free. Only the reasoning goes to
 Claude, through your existing subscription — there is no API key.
 
@@ -288,7 +297,7 @@ correspondingly thorough. Refused anywhere under home:
 | `LaunchAgents`, `LaunchDaemons` | Login persistence |
 
 Everything else under home is fair game, including every repo you have checked
-out — Ciel can edit her own source at `~/jarvis`.
+out — Ciel can edit her own source at `~/Projects/ciel`.
 
 ## Voice identity (Barn Door)
 
