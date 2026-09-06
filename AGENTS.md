@@ -3,9 +3,25 @@
 This file is read by every coding agent that works here (Codex reads it
 directly; Claude Code imports it from `CLAUDE.md`). It describes how the
 project is actually built, so that work from any agent looks like it came
-from the same hand. Where it conflicts with an agent's habits, this file
-wins. Where the repository's own practice is clearer than this file, the
-repository wins — read the neighbouring code before writing new code.
+from the same hand. Read neighbouring code for conventions this guide does not cover.
+
+## Working together
+
+- One writer per checkout. Parallel implementation needs separate worktrees
+  and agreed file ownership.
+- Read status and diffs before starting; re-read each file immediately before
+  editing and reconcile any changes.
+- Preserve other tasks' uncommitted work. Never discard, stash, stage, commit,
+  or reformat it as cleanup.
+- Reviews provide findings, evidence, and proposed fixes; the assigned writer
+  makes the changes.
+- Keep settled decisions unless changed requirements or new evidence justify
+  revisiting them; record the reason.
+
+Follow this repository's conventions and configured checks; otherwise match
+neighbouring code. Google's style guides are optional references, not review
+requirements. Permission covers the user's stated task and scope; it does not
+carry over to unrelated work.
 
 ## What this is
 
@@ -97,6 +113,15 @@ changed. Do not ship a change whose probe you did not run.
 - Every action the user might regret goes through the confirmation broker
   and the action journal. Do not add a side-effecting tool that skips them.
 
+## Visual style: the Instrument
+
+The Chart's `src/ciel/remote/chart.html` `:root` block owns the base tokens.
+Reuse its palette, typography, state colors, and components. Keep the Chart
+self-contained and usable offline. Token changes also affect the website's
+Instrument stylesheet and vendored copies: identify consumers and update their
+version notes together. Check narrow layouts, keyboard focus, and changed UI
+states; say which visual checks were performed.
+
 ## Writing
 
 The project has a voice. Commit titles, changelog entries, docstrings, and
@@ -159,11 +184,20 @@ unless asked. Read-only checks over ssh are fine and expected after a push:
 ssh ciel@172.184.253.239 'journalctl -u ciel-hub --since "10 min ago" --no-pager'
 ```
 
+## Documentation-only work
+
+For guidance, comments, or documentation with no behavior or dependency change,
+verify links and commands against the current files and run `git diff --check`.
+No new probe or live-service check is needed. Update the README and changelog
+when the change is notable. Leave production processes and runtime data alone.
+
 ## Done means
 
-1. The probes for every touched layer pass, with new checks for the change.
+1. Behavior changes pass the probes for every touched layer, with relevant
+   regression checks; documentation-only work passes the checks above.
 2. The changelog entry and README paragraph exist.
-3. If the spoke is running, its log shows `spoke ready` after your last edit.
+3. If edits under `src/ciel` triggered a running spoke to reload, its log shows
+   `spoke ready` after the last edit.
 4. No new dependency, codename, branch, commit, push, or deploy that was
    not asked for.
 5. Your final message says what you verified and what you did not.

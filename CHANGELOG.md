@@ -2,6 +2,24 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-06 — two hands, one set of conventions
+
+**Why.** Two agents wrote to the same checkout and could undo one another's
+work even while following the same code style.
+
+**What.**
+
+- *One writer, a separate reviewer.* Each repository's guide now contains the
+  five coordination rules, so a fresh clone needs no sibling policy file.
+  Local conventions govern style; Google is an optional reference.
+- *The Instrument keeps its shape.* Ciel's guide names the token owner,
+  offline constraint, and checks for interface changes. Documentation-only
+  work has its own verification path.
+
+**Probes.** No runtime behavior changed. Guide links, Claude entry points,
+original Claude notes, and deployment flag descriptions were checked;
+whitespace checks passed in all three repositories.
+
 ## 2026-09-06 — one name everywhere, and a guide any hand can follow
 
 **Why.** The code has been Ciel for weeks; everything around it still
