@@ -7,6 +7,7 @@
     uv run scripts/probe_interview.py session   # a whole scripted interview over the socket
     uv run scripts/probe_interview.py speaker   # piper → WAV (skips when piper is absent)
     uv run scripts/probe_interview.py cases     # the case library and its validator
+    uv run scripts/probe_interview.py brain     # the SDK backend against a fake CLI: the cut-off race
 
 Each subcommand builds the room on a throwaway state directory and drives
 it through aiohttp's test client, so a regression shows up here before it
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import dataclasses
 import sys
 import tempfile
@@ -83,20 +85,63 @@ def probe_accounts(state: Path) -> None:
     accounts.create("owner", "admin")
     check("admin role recorded", accounts.get("owner").is_admin)
     check("list is sorted", [a.username for a in accounts.list()] == ["alice", "owner"])
+    first = accounts.get("alice")
     accounts.delete("alice")
     check("delete removes", accounts.get("alice") is None)
     check("two passwords differ", generate_password() != generate_password())
+    accounts.create("alice")
+    check("a recreated username is a new account: a new id",
+          first.id and accounts.get("alice").id != first.id)
+    check("file still owner-only after every rewrite", (accounts.path.stat().st_mode & 0o777) == 0o600)
+    check("no stray temp files beside it",
+          [p.name for p in accounts.path.parent.iterdir() if ".tmp" in p.name] == [])
+
+    print("\nthe race")
+    import threading
+    from unittest.mock import patch
+
+    import ciel.interview.accounts as accounts_mod
+
+    entered, release = threading.Event(), threading.Event()
+    original = accounts_mod._hash
+
+    def held_hash(password, salt):
+        entered.set()
+        release.wait(5)
+        return original(password, salt)
+
+    with patch.object(accounts_mod, "_hash", held_hash):
+        job = threading.Thread(target=accounts.reset, args=("alice",))
+        job.start()
+        entered.wait(5)
+        accounts.set_disabled("alice", True)  # lands while the reset is in scrypt
+        release.set()
+        job.join(10)
+    check("a reset that paused in scrypt does not undo a disable made meanwhile",
+          accounts.get("alice").disabled)
 
     print("\nthe cookie")
     secret = mint_secret(state / "interview.secret")
     check("secret minted owner-only", (state / "interview.secret").stat().st_mode & 0o777 == 0o600)
     check("secret is stable", mint_secret(state / "interview.secret") == secret)
-    cookie = sign_cookie(secret, "owner", 2_000_000_000)
-    check("signature holds", read_cookie(secret, cookie, now=1_900_000_000) == "owner")
+    owner = accounts.get("owner")
+    cookie = sign_cookie(secret, owner, 2_000_000_000)
+    ticket = read_cookie(secret, cookie, now=1_900_000_000)
+    check("signature holds", ticket is not None and ticket.username == "owner" and ticket.matches(owner))
     check("expired refused", read_cookie(secret, cookie, now=2_000_000_001) is None)
     check("tampered user refused", read_cookie(secret, cookie.replace("owner", "alice"), now=1) is None)
     check("wrong secret refused", read_cookie("nope", cookie, now=1) is None)
     check("garbage refused", read_cookie(secret, "x|y", now=1) is None)
+    check("an old three-part cookie refused", read_cookie(secret, "owner|2000000000|deadbeef", now=1) is None)
+    accounts.reset("owner")
+    check("a reset retires the cookie: the ticket no longer matches",
+          not ticket.matches(accounts.get("owner")))
+    fresh = sign_cookie(secret, accounts.get("owner"), 2_000_000_000)
+    check("a cookie issued after it matches", read_cookie(secret, fresh, now=1).matches(accounts.get("owner")))
+    accounts.delete("owner")
+    accounts.create("owner", "admin")
+    check("a username deleted and recreated is a stranger to every old cookie",
+          not read_cookie(secret, fresh, now=1).matches(accounts.get("owner")))
 
 
 async def probe_door(state: Path) -> None:
@@ -173,9 +218,71 @@ async def probe_door(state: Path) -> None:
         check("a short new password is refused", r.status == 400)
         r = await client.post("/interview/api/password", json={"current": friend_pw, "new": "a-new-long-password"})
         check("the friend changes their own password", r.status == 200 and room.accounts.verify("friend", "a-new-long-password") is not None)
+        check("...and is handed a fresh cookie on the spot", r.cookies.get(COOKIE) is not None)
+        r = await client.get("/interview/api/me")
+        check("...so they keep their seat", r.status == 200)
         room.accounts.set_disabled("friend", True)
         r = await client.get("/interview/api/me")
         check("disabling logs the friend out at once", r.status == 401)
+        room.accounts.set_disabled("friend", False)
+        r = await client.get("/interview/api/me")
+        check("re-enabling admits the same cookie again", r.status == 200)
+        room.accounts.reset("friend")
+        r = await client.get("/interview/api/me")
+        check("an admin's reset (here, the CLI's) logs the friend's browser out", r.status == 401)
+        room.accounts.delete("friend")
+        room.accounts.create("friend", "admin")
+        r = await client.get("/interview/api/admin/accounts")
+        check("the old cookie does not become the recreated (admin) account", r.status == 401)
+        await client.post("/interview/api/logout")
+
+        # A session belongs to the account, not to the username.
+        erin_pw = room.accounts.create("erin")
+        erin = room.accounts.get("erin")
+        brief = {"company": {"name": "Ledgerline"}, "role": {"title": "PM"}}
+        meta = room._store.create("erin", "company", {"mode": "company", "length_min": 15}, brief, owner_id=erin.id)
+        sid = meta["id"]
+        room._store.append_transcript("erin", sid, 1.0, "candidate", "PRIVATE FIXTURE ANSWER")
+        stray = room._store.create("erin", "company", {"mode": "company"}, brief, owner_id="0123456789abcdef")
+        unowned = room._store.create("erin", "company", {"mode": "company"}, brief)
+        r = await client.post("/interview/api/login", json={"username": "erin", "password": erin_pw})
+        check("erin signs in", r.status == 200)
+        r = await client.get("/interview/api/sessions")
+        check("erin's lobby lists her own session and nothing else in her directory",
+              [row["id"] for row in (await r.json())["sessions"]] == [sid])
+        r = await client.get(f"/interview/api/sessions/{sid}")
+        check("...and she can read it", r.status == 200 and "PRIVATE FIXTURE" in await r.text())
+        r = await client.get(f"/interview/api/sessions/{stray['id']}")
+        check("a session in her directory under another account's id is not hers (404)", r.status == 404)
+        r = await client.get(f"/interview/api/sessions/{unowned['id']}")
+        check("a session from before ids is nobody's until claimed (404)", r.status == 404)
+        room._started = False
+        await room.start()
+        r = await client.get(f"/interview/api/sessions/{unowned['id']}")
+        check("the room claims it at startup for the account holding the username", r.status == 200)
+        check("...and the stray keeps its own owner",
+              room._store.load_meta("erin", stray["id"])["owner_id"] == "0123456789abcdef")
+        await client.post("/interview/api/logout")
+        await client.post("/interview/api/login", json={"username": "owner", "password": pw})
+        r = await client.delete("/interview/api/admin/accounts/erin")
+        check("the admin deletes erin", r.status == 200)
+        r = await client.post("/interview/api/admin/accounts", json={"username": "erin"})
+        again_pw = (await r.json())["password"]
+        await client.post("/interview/api/logout")
+        r = await client.post("/interview/api/login", json={"username": "erin", "password": again_pw})
+        check("a new erin signs in under the recreated username", r.status == 200)
+        r = await client.get("/interview/api/sessions")
+        check("the recreated username starts with an empty lobby", (await r.json())["sessions"] == [])
+        r = await client.get(f"/interview/api/sessions/{sid}")
+        check("the first erin's session is not hers (404)", r.status == 404)
+        r = await client.get(f"/interview/api/sessions/{sid}/recording")
+        check("...nor its recording (404)", r.status == 404)
+        r = await client.get("/interview/api/me")
+        check("...and the ledger is fresh", (await r.json())["used_today"]["sessions"] == 0)
+        parked = list((state / "users" / ".retired").glob(f"erin.{erin.id}*"))
+        check("the first erin's directory was kept aside under users/.retired, transcript and all",
+              len(parked) == 1 and (parked[0] / "sessions" / sid / "transcript.jsonl").is_file())
+        check("the retired directory is not a username to the store", "erin" not in list(room._store.usernames()) and ".retired" not in list(room._store.usernames()))
         await client.post("/interview/api/logout")
 
         # The limiter.
@@ -231,6 +338,44 @@ def probe_store(state: Path) -> None:
     check("case title", brief_title("case", {"title": "Greenfield"}) == "Greenfield")
     store.delete("alice", sid)
     check("delete removes the directory", not store.exists("alice", sid))
+
+    # The ledger: a reservation names the day it was taken from.
+    day1, day2 = "2026-09-05", "2026-09-06"
+    slot = store.reserve("alice", day1, "sessions", 4)
+    check("a reservation names its account, day, and kind",
+          slot is not None and (slot.username, slot.day, slot.kind) == ("alice", day1, "sessions"))
+    check("the cap is a cap", all(store.reserve("alice", day1, "sessions", 4) for _ in range(3))
+          and store.reserve("alice", day1, "sessions", 4) is None)
+    later = store.reserve("alice", day2, "sessions", 4)
+    check("the next day starts fresh", later is not None and store.usage("alice", day2, "sessions") == 1)
+    store.release(slot)
+    check("releasing yesterday's reservation after midnight leaves today's count alone",
+          store.usage("alice", day2, "sessions") == 1)
+    store.release(later)
+    check("releasing today's hands today's back", store.usage("alice", day2, "sessions") == 0)
+
+    # Ownership: the account id in the metadata, checked on every read.
+    owned = store.create("alice", "company", {"mode": "company"}, {"company": {"name": "Ledgerline"}}, owner_id="aaaa")
+    check("a session carries its owner", owned["owner_id"] == "aaaa")
+    check("...and loads for that owner", store.load_meta("alice", owned["id"], owner_id="aaaa")["id"] == owned["id"])
+    try:
+        store.load_meta("alice", owned["id"], owner_id="bbbb")
+        ok = False
+    except KeyError:
+        ok = True
+    check("...and is a KeyError to any other account", ok)
+    check("listing by owner filters", [m["id"] for m in store.list("alice", owner_id="aaaa")] == [owned["id"]]
+          and store.list("alice", owner_id="bbbb") == [])
+    unowned = store.create("alice", "company", {"mode": "company"}, {"company": {"name": "Ledgerline"}})
+    check("an ownerless session is nobody's", store.list("alice", owner_id="") == [])
+    check("claim_unowned adopts only the ownerless", store.claim_unowned("alice", "cccc") == 1
+          and store.load_meta("alice", unowned["id"])["owner_id"] == "cccc"
+          and store.load_meta("alice", owned["id"])["owner_id"] == "aaaa")
+    parked = store.retire("alice", "aaaa")
+    check("retire moves the directory aside, ledger included",
+          parked is not None and parked.name == "alice.aaaa" and (parked / "usage.json").is_file()
+          and store.list("alice") == [] and list(store.usernames()) == [])
+    check("retiring nothing is nothing", store.retire("alice", "aaaa") is None)
 
 
 def probe_prompts() -> None:
@@ -298,14 +443,28 @@ async def probe_brief_flow(state: Path) -> None:
         check("regenerate on a prepared session", r.status == 200)
         r = await client.get("/interview/api/sessions/20000101-000000-abcd")
         check("unknown session → 404", r.status == 404)
-        r = await client.post("/interview/api/sessions", json={"mode": "company"})
-        check("fourth session today → 429 (daily cap 4 counts the three plus this one)", r.status == 200)
+        both = await asyncio.gather(
+            client.post("/interview/api/sessions", json={"mode": "company"}),
+            client.post("/interview/api/sessions", json={"mode": "company"}),
+        )
+        check("the last slot of the day, asked for twice at once, is given once (daily cap 4)",
+              sorted(r.status for r in both) == [200, 429])
         r = await client.post("/interview/api/sessions", json={"mode": "company"})
         check("fifth session today → 429", r.status == 429)
+        r = await client.get("/interview/api/me")
+        check("me reports today's usage", (await r.json())["used_today"] == {"sessions": 4, "regenerations": 1})
         r = await client.delete(f"/interview/api/sessions/{sid}")
         check("delete", r.status == 200)
         r = await client.get(f"/interview/api/sessions/{sid}")
         check("deleted → 404", r.status == 404)
+        r = await client.post("/interview/api/sessions", json={"mode": "company"})
+        check("a deleted session does not hand its slot back", r.status == 429)
+        other = tech["session"]["id"]
+        statuses = [
+            (await client.post(f"/interview/api/sessions/{other}/regenerate")).status for _ in range(8)
+        ]
+        check("regeneration has a budget of its own (8): seven more pass, the ninth is refused",
+              statuses == [200] * 7 + [429])
     await room.close()
 
 
@@ -535,9 +694,122 @@ async def probe_session(state: Path) -> None:
     await room.close()
 
 
+async def probe_revocation(state: Path) -> None:
+    from aiohttp import WSMsgType, web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from ciel.interview import app as app_module
+    from ciel.interview.app import InterviewApp
+
+    print("\nthe socket goes with the sign-in")
+    config = _config(state)
+    config = dataclasses.replace(config, interview=dataclasses.replace(config.interview, silence_ms=300, extend_ms=300))
+    room = InterviewApp(config, dev=True)
+    await room.start()
+    owner_pw = room.accounts.create("owner", "admin")
+    alice_pw = room.accounts.create("alice")
+    app = web.Application()
+    room.register(app.router)
+    server = TestServer(app)
+    await server.start_server()
+    alice = TestClient(server)
+    admin = TestClient(server)
+    await alice.start_server()
+    await admin.start_server()
+    origin = {"Origin": "http://127.0.0.1:%d" % server.port}
+    recheck = app_module._RECHECK_S
+
+    async def open_socket(client, *, sid: str | None = None):
+        if sid is None:
+            r = await client.post("/interview/api/sessions", json={"mode": "company", "length_min": 15})
+            sid = (await r.json())["session"]["id"]
+        ws = await client.ws_connect(f"/interview/ws?session={sid}", headers=origin)
+        await ws.send_json({"type": "hello", "v": 1, "caps": {"stt": "browser", "tts": "none", "record": True}})
+        await _frames_until(ws, {"hello"})
+        return sid, ws
+
+    async def closed_with(ws, timeout: float = 5.0) -> int | None:
+        """Drain the socket until the server closes it; the close code."""
+        seen: list[str] = []
+        async with asyncio.timeout(timeout):
+            while True:
+                msg = await ws.receive()
+                if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+                    return ws.close_code
+                if msg.type == WSMsgType.TEXT:
+                    seen.append(msg.data)
+
+    try:
+        r = await alice.post("/interview/api/login", json={"username": "alice", "password": alice_pw})
+        check("alice signs in", r.status == 200)
+        r = await admin.post("/interview/api/login", json={"username": "owner", "password": owner_pw})
+        check("the owner signs in beside her", r.status == 200)
+
+        # Two tabs: the newer one takes the seat.
+        sid, first = await open_socket(alice)
+        await _frames_until(first, {"turn.end"})
+        _, second = await open_socket(alice, sid=sid)
+        check("a second connection to the same interview supersedes the first (4409)", await closed_with(first) == 4409)
+        check("still one live interview", room.live_count == 1)
+
+        # A password change from this browser: every socket opened under
+        # the old password closes, the interview it carried ends.
+        r = await alice.post("/interview/api/password", json={"current": alice_pw, "new": "a-new-long-password"})
+        check("alice changes her password", r.status == 200)
+        code = await closed_with(second)
+        check(f"the socket opened under the old password is closed at once (4401, got {code})", code == 4401)
+        live = [s for s in room._live.values()]
+        for s in live:
+            await asyncio.wait_for(s.finished.wait(), 10)
+        check("the interview it carried is over", room.live_count == 0)
+        r = await alice.get("/interview/api/sessions")
+        check("...and is in the lobby as ended, debriefed from what was said",
+              (await r.json())["sessions"][0]["state"] in ("ended", "debriefed"))
+        r = await alice.get("/interview/api/me")
+        check("the browser that changed it keeps its seat", r.status == 200)
+
+        # Disabled by the admin: the socket closes before the debrief is
+        # written, and the ended interview accepts nothing more.
+        sid, ws = await open_socket(alice)
+        await _frames_until(ws, {"turn.end"})
+        session = next(iter(room._live.values()))
+        r = await admin.post("/interview/api/admin/accounts/alice/disable")
+        check("the admin disables alice", r.status == 200)
+        check("her socket is closed at once (4401)", await closed_with(ws) == 4401)
+        await asyncio.wait_for(session.finished.wait(), 10)
+        path = room._store.recording_path("alice", sid)
+        session.on_audio(1, b"AFTER_DISABLE")
+        session.on_frame({"type": "ping"})
+        check("an ended interview records no audio and queues no frame",
+              (not path.exists() or b"AFTER_DISABLE" not in path.read_bytes()) and session._inbox.empty())
+        r = await alice.get(f"/interview/ws?session={sid}", headers=origin)
+        check("a new socket for the disabled account is refused (401)", r.status == 401)
+
+        # A reset made outside the process (the CLI's): no eviction ran,
+        # so the next frame after the recheck window finds the cookie stale.
+        await admin.post("/interview/api/admin/accounts/alice/enable")
+        sid, ws = await open_socket(alice)
+        await _frames_until(ws, {"turn.end"})
+        app_module._RECHECK_S = 0.0
+        room.accounts.reset("alice")
+        await ws.send_json({"type": "ping"})
+        check("a reset made at the terminal closes the socket on its next frame (4401)", await closed_with(ws) == 4401)
+        check("...the interview itself waits for a fresh sign-in, or idles out", room.live_count == 1)
+        r = await alice.get("/interview/api/me")
+        check("...and the old cookie is out everywhere", r.status == 401)
+    finally:
+        app_module._RECHECK_S = recheck
+        await alice.close()
+        await admin.close()
+        await server.close()
+        await room.close()
+
+
 def cmd_session() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(probe_session(Path(tmp)))
+    with tempfile.TemporaryDirectory() as tmp:
+        asyncio.run(probe_revocation(Path(tmp)))
 
 
 
@@ -610,9 +882,350 @@ def cmd_cases() -> None:
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
+# ── the brain: the SDK backend against a fake CLI ────────────────────────────
+
+
+class _FakeClient:
+    """What the CLI does on the far side of ``ClaudeSDKClient``, in
+    miniature. A query starts a turn that thinks, then streams its reply a
+    word at a time, then posts a ResultMessage. An interrupt aborts the
+    turn — and the aborted turn *still* posts its result: an error one,
+    carrying the CLI's ``[ede_diagnostic]`` line, when the model had not
+    said a word yet. That result is what the room used to read as the
+    reply to the next question (2026-09-05: two interviews ended in
+    'error' three and four turns in, right after a cut-off)."""
+
+    THINK_S = 0.08
+    WORD_S = 0.01
+
+    def __init__(self, options: object = None, **_: object) -> None:
+        self.options = options
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.turns: list[str] = []
+        self.interrupts = 0
+        self._task: asyncio.Task | None = None
+        self._spoken = False
+
+    async def connect(self) -> None:
+        return None
+
+    async def disconnect(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+
+    async def query(self, text: str) -> None:
+        self.turns.append(text)
+        self._spoken = False
+        self._task = asyncio.create_task(self._reply(len(self.turns), text))
+
+    async def _reply(self, n: int, text: str) -> None:
+        from claude_agent_sdk import StreamEvent
+
+        await asyncio.sleep(self.THINK_S)
+        for word in f"Reply {n} to: {text}".split(" "):
+            self._spoken = True
+            self.queue.put_nowait(StreamEvent(
+                uuid="u", session_id="s",
+                event={"type": "content_block_delta", "delta": {"type": "text_delta", "text": word + " "}},
+            ))
+            await asyncio.sleep(self.WORD_S)
+        self.queue.put_nowait(self._result(n, is_error=False))
+        self._task = None
+
+    @staticmethod
+    def _result(n: int, *, is_error: bool, errors: list[str] | None = None, terminal: str = "completed"):
+        from claude_agent_sdk import ResultMessage
+
+        return ResultMessage(
+            subtype="error_during_execution" if is_error else "success",
+            duration_ms=1, duration_api_ms=1, is_error=is_error, num_turns=n, session_id="s",
+            total_cost_usd=round(0.01 * n, 4), errors=errors, terminal_reason=terminal,
+        )
+
+    async def interrupt(self) -> None:
+        self.interrupts += 1
+        task = self._task
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        self._task = None
+        n = len(self.turns)
+        if self._spoken:
+            self.queue.put_nowait(self._result(n, is_error=False, terminal="aborted_streaming"))
+        else:
+            self.queue.put_nowait(self._result(
+                n, is_error=True, terminal="aborted_streaming",
+                errors=["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"],
+            ))
+
+    async def receive_messages(self):
+        while True:
+            yield await self.queue.get()
+
+    async def receive_response(self):
+        from claude_agent_sdk import ResultMessage
+
+        async for message in self.receive_messages():
+            yield message
+            if isinstance(message, ResultMessage):
+                return
+
+
+class _FlakyOnce:
+    """The scripted backend, except that the second question's first
+    attempt fails the way an overloaded API does."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self._asks = 0
+        self.failed = False
+
+    async def start(self, system_prompt: str) -> None:
+        await self._inner.start(system_prompt)
+
+    async def ask(self, text: str):
+        from ciel.interview.brain import BackendError
+
+        self._asks += 1
+        if self._asks == 2 and not self.failed:
+            self.failed = True
+            raise BackendError("529 overloaded")
+        async for delta in self._inner.ask(text):
+            yield delta
+
+    async def ask_json(self, *args, **kwargs):
+        return await self._inner.ask_json(*args, **kwargs)
+
+    async def interrupt(self) -> None:
+        await self._inner.interrupt()
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+    @property
+    def cost_usd(self) -> float:
+        return 0.0
+
+
+async def probe_brain() -> None:
+    import claude_agent_sdk
+
+    from ciel.interview.brain import AgentSdkBackend, BackendError
+
+    print("\nthe SDK backend against a fake CLI")
+    config = load_config().interview
+    real = claude_agent_sdk.ClaudeSDKClient
+    made: list[_FakeClient] = []
+
+    def factory(options=None, **kwargs):
+        client = _FakeClient(options, **kwargs)
+        made.append(client)
+        return client
+
+    claude_agent_sdk.ClaudeSDKClient = factory
+    try:
+        backend = AgentSdkBackend(config)
+        await backend.start("you are the interviewer")
+
+        async def collect(text: str) -> str:
+            return "".join([delta async for delta in backend.ask(text)])
+
+        check("a whole turn streams", (await collect("[begin]")).startswith("Reply 1 to: [begin]"))
+
+        # The cut-off while thinking: the candidate went on before the
+        # model had a word out. The room cancels the reader, then interrupts.
+        reader = asyncio.create_task(collect("answer one"))
+        await asyncio.sleep(_FakeClient.THINK_S / 4)
+        reader.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reader
+        await backend.interrupt()
+        check("the fake CLI saw the interrupt", made[0].interrupts == 1)
+        check("the aborted turn's error result was read out by the interrupt", made[0].queue.empty())
+        try:
+            reply = await collect("answer two")
+        except BackendError as exc:
+            check(f"the next question is answered rather than failed ({exc})", False)
+            return
+        check("the next question gets its own reply", reply.startswith("Reply 3 to: answer two"))
+
+        # The cut-off mid-sentence: a couple of words out, then the interrupt.
+        heard: list[str] = []
+        async with contextlib.aclosing(backend.ask("answer three")) as stream:
+            async for delta in stream:
+                heard.append(delta)
+                if len(heard) == 2:
+                    break
+        await backend.interrupt()
+        reply = await collect("answer four")
+        check("after a mid-sentence cut-off the reply is to the new question", reply.startswith("Reply 5 to: answer four"))
+        check("the cost follows the session total", abs(backend.cost_usd - 0.05) < 1e-9)
+        await backend.close()
+        check("close folds the session cost into the lifetime figure", abs(backend.cost_usd - 0.05) < 1e-9)
+    finally:
+        claude_agent_sdk.ClaudeSDKClient = real
+
+
+class _Wedged(_FakeClient):
+    """A CLI whose interrupt never posts the aborted turn's result: the
+    subprocess died mid-turn. ``late`` is the result it would have posted,
+    for the probe to deliver after the room has given up waiting."""
+
+    def __init__(self, options: object = None, **kwargs: object) -> None:
+        super().__init__(options, **kwargs)
+        self.disconnects = 0
+        self.broken = False
+
+    async def interrupt(self) -> None:
+        self.interrupts += 1
+        task = self._task
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._task = None
+
+    async def disconnect(self) -> None:
+        self.disconnects += 1
+        await super().disconnect()
+
+    async def receive_messages(self):
+        if self.broken:
+            raise RuntimeError("pipe closed")
+        async for message in super().receive_messages():
+            yield message
+
+
+async def probe_drain_failure() -> None:
+    import claude_agent_sdk
+
+    from ciel.interview import brain as brain_module
+    from ciel.interview.brain import AgentSdkBackend, BackendError
+
+    print("\na drain that gives up retires the connection")
+    config = load_config().interview
+    real = claude_agent_sdk.ClaudeSDKClient
+    drain_s = brain_module._DRAIN_S
+    made: list[_Wedged] = []
+
+    def factory(options=None, **kwargs):
+        client = _Wedged(options, **kwargs)
+        made.append(client)
+        return client
+
+    claude_agent_sdk.ClaudeSDKClient = factory
+    brain_module._DRAIN_S = 0.05
+    try:
+        backend = AgentSdkBackend(config)
+        await backend.start("you are the interviewer")
+
+        async def collect(text: str) -> str:
+            return "".join([delta async for delta in backend.ask(text)])
+
+        reader = asyncio.create_task(collect("answer one"))
+        await asyncio.sleep(_FakeClient.THINK_S / 4)
+        reader.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reader
+        await backend.interrupt()
+        client = made[0]
+        check("the drain timed out and retired the connection", backend._client is None and client.disconnects == 1)
+        check("the debt is not forgotten, the connection is", not backend._in_flight and backend._retired is not None)
+        # The result turns up late — after the room stopped waiting.
+        client.queue.put_nowait(client._result(1, is_error=True, errors=["stale aborted turn"]))
+        try:
+            await collect("answer two")
+            ok, why = False, "answered"
+        except BackendError as exc:
+            ok, why = "stopped answering" in str(exc), str(exc)
+        check(f"the next question fails for the right reason, never with the stale result ({why})", ok)
+        check("the stale result was never read as anything", not client.queue.empty())
+        await backend.close()
+        check("close is quiet on a retired backend", backend._client is None)
+
+        # The stream breaking during the drain: the same end.
+        backend = AgentSdkBackend(config)
+        await backend.start("you are the interviewer")
+        reader = asyncio.create_task(collect("answer one"))
+        await asyncio.sleep(_FakeClient.THINK_S / 4)
+        reader.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reader
+        made[-1].broken = True
+        await backend.interrupt()
+        check("a stream that breaks mid-drain retires the connection too",
+              backend._client is None and "gone" in (backend._retired or ""))
+        try:
+            await collect("answer two")
+            ok = False
+        except BackendError:
+            ok = True
+        check("...and nothing more is asked of it", ok)
+        await backend.close()
+    finally:
+        claude_agent_sdk.ClaudeSDKClient = real
+        brain_module._DRAIN_S = drain_s
+
+
+async def probe_flaky_turn(state: Path) -> None:
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from ciel.interview.app import InterviewApp
+    from ciel.interview.brain import ScriptedBackend
+
+    print("\none failed turn is not the end of the interview")
+    config = _config(state)
+    config = dataclasses.replace(config, interview=dataclasses.replace(config.interview, silence_ms=300, extend_ms=300, barge_grace_ms=100))
+    room = InterviewApp(config, dev=True)
+    flaky: list[_FlakyOnce] = []
+
+    def backend():
+        b = _FlakyOnce(ScriptedBackend(config.interview))
+        flaky.append(b)
+        return b
+
+    room._backend = backend  # type: ignore[method-assign]
+    await room.start()
+    app = web.Application()
+    room.register(app.router)
+    async with TestClient(TestServer(app)) as client:
+        await client.post("/interview/api/login", json={"username": "dev", "password": "dev"})
+        r = await client.post("/interview/api/sessions", json={"mode": "company", "length_min": 15})
+        sid = (await r.json())["session"]["id"]
+        ws = await client.ws_connect(f"/interview/ws?session={sid}", headers={"Origin": "http://127.0.0.1:%d" % client.port})
+        await ws.send_json({"type": "hello", "v": 1, "caps": {"stt": "browser", "tts": "none", "record": False}})
+        await _frames_until(ws, {"turn.end"})
+        await _frames_until(ws, {"state"})
+        await ws.send_json({"type": "typed", "text": "I led a migration to a new billing system."})
+        frames = await _frames_until(ws, {"turn.end", "error"}, timeout=10.0)
+        kinds = [f["type"] for f in frames]
+        # The factory also served the brief and will serve the debrief;
+        # the interviewer's backend is whichever one stumbled.
+        check("the second question's first attempt failed", any(b.failed for b in flaky))
+        check("the turn still ended in a turn.end, not an error", kinds[-1] == "turn.end" and "error" not in kinds)
+        check("the interviewer spoke on the retry", any(f["type"] == "say" for f in frames))
+        check("the room is not ended", not any(f.get("state") == "ended" for f in frames if f["type"] == "state"))
+        await ws.send_json({"type": "end"})
+        frames = await _frames_until(ws, {"debrief.ready"}, timeout=10.0)
+        check("the interview ends on request and is debriefed", frames[-1]["type"] == "debrief.ready")
+        await ws.close()
+    await room.close()
+
+
+def cmd_brain() -> None:
+    asyncio.run(probe_brain())
+    asyncio.run(probe_drain_failure())
+    with tempfile.TemporaryDirectory() as tmp:
+        asyncio.run(probe_flaky_turn(Path(tmp)))
+
+
 COMMANDS = {
     "auth": cmd_auth, "brief": cmd_brief, "endpoint": cmd_endpoint,
     "wire": cmd_wire, "session": cmd_session, "speaker": cmd_speaker, "cases": cmd_cases,
+    "brain": cmd_brain,
 }
 
 

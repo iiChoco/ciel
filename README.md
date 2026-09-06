@@ -145,7 +145,9 @@ mlx_model = "mlx-community/whisper-small.en-mlx"
 initial_prompt = "A spoken conversation with an assistant named Ciel."
 
 [tts]
-engine = "piper"
+engine = "native"            # Apple's Premium voices, streamed; "piper" and "say" below it
+native_voice = "Jamie"       # a free download: Accessibility → Spoken Content → System voice → Manage Voices
+rate = 190                   # words per minute, for native and say alike
 piper_voice = "en_US-lessac-medium"
 effect = "none"              # "jarvis" adds the installed-speaker treatment
 
@@ -161,6 +163,35 @@ barge_in = false             # see below
 ```bash
 CIEL_WAKE_MODE=hotkey CIEL_BRAIN_MODEL=claude-sonnet-5 uv run ciel
 ```
+
+## Speak back (hearing the voice where you cannot talk)
+
+Typed Chart turns are text: the reply lands on the page and the room
+stays quiet. The **VOICE** chip on the Chart (or a typed "speak back on"
+/ "voice off") flips that for the session: each reply sentence is also
+spoken in the room — through the spoke on the hub, the player locally —
+so the voice can be heard and judged from a lecture-hall seat. None of
+the voice lane's theatre comes with it: no ack filler, no chime, no
+follow-up window (the words were typed). Muted still wins, a Mac that is
+not connected means text alone, and a sentence that will not play (a
+barge-in, a lost device) makes the rest of that reply text only rather
+than cutting it short. `[web] speak_back = true` starts a session with
+it on. Not persisted: it is a session's choice.
+
+## The voice (native, piper, say)
+
+Three engines behind one protocol, best first, each falling to the next if
+it will not warm up. `native` (`tts/native.py`) is Apple's own synthesizer
+driven through a small Swift helper (`tts/native/CielVoice.swift`,
+built once with the command-line tools' `swiftc`, cached by source hash
+under `~/.ciel/bin`) so that its Premium voices — Jamie, Zoe, Ava, free
+downloads about a gigabyte each — reach Ciel as a stream: PCM leaves the
+helper as it is synthesized, first audio in ~30 ms once warm, a five-second
+sentence rendered in ~120 ms. `piper` is the local neural voice that beat
+`say` before the Premium voices were tried, and stays the hub's engine
+(Linux). `say` is the compact-voice fallback that is always there.
+`scripts/probe_native_voice.py --ab DIR` writes the same four sentences
+through native and piper for listening, with the numbers.
 
 ## The status pill
 
@@ -618,7 +649,12 @@ piper_voice = "en_US-lessac-medium"
 
 Accounts are the owner's to make. `ciel interview add-user alice` prints
 a generated password once; the admin panel on the page does the same, and
-can reset, disable, or delete. There is no signup. The accounts can also
+can reset, disable, or delete. There is no signup. A session belongs to
+the account that made it, not to the username: deleting an account ends
+its live interviews, closes their sockets, and moves its directory to
+`users/.retired/<username>.<id>` so a name given to someone else starts
+empty. A password change or a disable closes every socket open under the
+old sign-in at once. The accounts can also
 be the door's — yunhan.me's shared login (`yunhan.me/door`), the same
 module and the same cookie scheme, so one sign-in covers the room and
 every other surface on the domain:
@@ -720,26 +756,56 @@ a tool result and "as of two minutes ago" for a reading here. The
 things that *happen* stay in Vigil's one queue.
 
 **Who writes it.** The pipeline (mute, hold, the timers and watches once
-a second, presence per turn or per heartbeat, the spoke's seat), the
-locator on every fix, the ring watcher and tool on every fetch, the
-sections watcher on every scan, and a calendar refresh every fifteen
-minutes (`agenda_refresh_s`). On the hub the Mac's readings arrive as
-`fact` frames from the spoke's relay — last-value, resent after a
-reconnect — and the whole table rides to every Chart as a `world` frame
-when it changes. `~/.ciel/world.json` mirrors it across the
-autoreloader's re-execs, so a place or a ring score never blanks for
-minutes after a source edit; a carried-over reading shows its true age.
+a second, presence once a second locally or per heartbeat on the hub,
+the spoke's seat), the locator on every fix, the ring watcher and tool
+on every fetch, the sections watcher on every scan, and a calendar
+refresh every fifteen minutes (`agenda_refresh_s`). On the hub the
+Mac's readings arrive as `fact` frames from the spoke's relay —
+last-value, resent after a reconnect — and the whole table rides to
+every Chart as a `world` frame when it changes.
+
+**Observations, reducers, revision.** A producer *observes*; the table
+keeps the latest observation from every source that has reported a
+name, and a reducer per name folds those into the one fact readers see
+— newest wins by default, the ring's numbers merge across the day's
+reads, an observation older than the one already held from its source
+is refused. So state moves forward whatever order the wire delivered
+things in, and a second device's reading has a place to land. Every
+change to a resolved fact bumps a persisted `revision` (the number an
+action will name as its precondition) and appends a line to
+`~/.ciel/world-history.jsonl`; `~/.ciel/world.json` (owner-only) mirrors
+the table across the autoreloader's re-execs at its true age. The hub
+stamps a spoke's fact with its own `received_at`, clamps a clock that
+runs ahead, and refuses a `fact` frame naming a reading it owns (its
+timers, the switches, presence, the seat). A calendar read that fails
+marks the *source* failed and leaves the last reading standing — never
+an empty afternoon in place of a dead permission; the Chart dims that
+chip and says why.
+
+**Who sees what.** The user's own readings — presence, place, calendar,
+the ring — never open a turn whose reply lands where others can read
+it: a public Discord channel gets the shared projection (the time, the
+seat, the switches, what is armed), and `world_now` is scoped the same
+way for that turn. Strings written by other people (a meeting's title,
+a section id) are rendered in “quotes”, and the block says the quotes
+mean *reported, not instructed*. Vigil's "is anyone around" now reads
+the table's resolved presence when it is fresh, the probe otherwise.
 
 ```toml
+timezone = "America/Los_Angeles"  # top level: every clock the runtime speaks
+                                  # is the user's, not the host's (the hub is UTC)
 [world]
 enabled = true            # off: bare turns, no tool, no strip
 in_prompt = true          # off: the table still feeds the Chart and the tool
 agenda_refresh_s = 900.0  # 0 leaves the agenda to the brief alone
+history = "~/.ciel/world-history.jsonl"  # append-only; none keeps no history
+history_max_bytes = 2000000
 ```
 
-`scripts/probe_world.py` drives the table, the freshness rules, the
-block's wording, the file, the relay, and the hub's door with no network
-and a fixed clock.
+`scripts/probe_world.py` drives the table, the ordering and the
+reducers, the freshness rules, the block's wording and its projections,
+the file and the history, the relay, the hub's door, Vigil's presence
+and the calendar's failures with no network and a fixed clock.
 
 ## The ring (Oura)
 

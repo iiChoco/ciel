@@ -330,10 +330,12 @@ async def run_checks(tmp: Path) -> None:
         ),
     })
     allowed = witness_allowed(wcfg)
-    for name in ("Read", "Glob", "Grep", "mcp__ciel__recall", "mcp__ciel__remember",
+    for name in ("Read", "mcp__ciel__search_files", "mcp__ciel__find_files",
+                 "mcp__ciel__recall", "mcp__ciel__remember",
                  "mcp__ciel__read_messages", "mcp__gcal__list-events"):
         check(f"witness allows {name}", name in allowed)
-    for name in ("Bash", "Write", "Edit", "WebSearch", "mcp__ciel__send_message",
+    for name in ("Bash", "Write", "Edit", "Glob", "Grep", "WebSearch",
+                 "mcp__ciel__send_message",
                  "mcp__ciel__set_timer", "mcp__ciel__look_at_screen",
                  "mcp__gcal__create-event"):
         check(f"witness denies {name}", name not in allowed)

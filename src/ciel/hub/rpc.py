@@ -167,13 +167,17 @@ class RemoteWorkWatcher(_Remote):
 class RemoteCalendar(_Remote):
     """The brief's agenda, from the Mac's EventKit store."""
 
-    async def agenda_today(self) -> list[str]:
+    async def agenda_today(self) -> list[str] | None:
+        """None when the Mac is away or its own read failed — the same
+        contract as the readers it stands in for."""
         try:
             rows = await self.call("calendar.agenda_today")
         except RpcUnavailable as exc:
             log.warning("agenda unavailable: %s", exc)
-            return []
-        return [str(r) for r in rows or []]
+            return None
+        if rows is None:
+            return None
+        return [str(r) for r in rows]
 
 
 class RemoteMac(_Remote):

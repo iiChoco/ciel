@@ -59,6 +59,7 @@ SAMPLES: dict[str, dict] = {
     "hello": {"v": 1, "role": "chart", "token": "t", "client_id": "c",
               "caps": ["acks"], "resume": {"epoch": "e", "seq": 3}},
     "ping": {}, "pong": {"t_wall": 1.5},
+    "speakback.set": {"on": True}, "speakback": {"on": True},
     "say": {"text": "hi", "seq": 1}, "mute": {"muted": True}, "restart": {},
     "turn.cancel": {"turn_id": "t1", "reason": "barge-in"},
     "turn.played": {"turn_id": "t1", "n": 1, "completed": True},
@@ -84,7 +85,8 @@ SAMPLES: dict[str, dict] = {
     "event.ack": {"publish_id": "p-mac-1"},
     "deliver.speak": {"event_id": "e1", "text": "Meeting in ten."},
     "timers.sync": {"timers": []},
-    "world": {"facts": {"muted": {"value": False, "observed_at": 1.0, "source": "hub"}}},
+    "world": {"facts": {"muted": {"value": False, "observed_at": 1.0, "source": "hub"}},
+              "revision": 3, "sources": {"calendar": {"ok": False, "at": 1.0, "error": "x"}}},
 }
 
 

@@ -20,6 +20,10 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _world: "World | None" = None
+_public = False
+"""The projection of the turn under way: set by the pipeline before each
+turn, so a re-read inside a public channel's turn shows the same shared
+readings its opening block did, never the private ones."""
 
 
 def _text(message: str) -> dict[str, Any]:
@@ -44,7 +48,7 @@ def _text(message: str) -> dict[str, Any]:
 async def world_now(args: dict[str, Any]) -> dict[str, Any]:
     if _world is None:
         return _text("The world state is not available right now.")
-    return _text(_world.render())
+    return _text(_world.render(public=_public))
 
 
 def bind_world(world: "World") -> None:
@@ -53,6 +57,12 @@ def bind_world(world: "World") -> None:
     _world = world
 
 
+def set_scope(*, public: bool) -> None:
+    """The projection for the turn about to run (turns are serial)."""
+    global _public
+    _public = bool(public)
+
+
 WORLD_TOOLS = [world_now]
 
-__all__ = ["WORLD_TOOLS", "bind_world", "world_now"]
+__all__ = ["WORLD_TOOLS", "bind_world", "set_scope", "world_now"]

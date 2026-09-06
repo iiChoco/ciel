@@ -276,6 +276,26 @@ async def probe_seat() -> None:
     server._client_left("spoke2")
     check("the spoke leaving empties the seat", not server.spoke_connected)
 
+    # The seat was empty when the timer set changed: the broadcast went
+    # to nobody and the dedupe remembered it as sent.
+    armed = [{"id": "t9", "kind": "timer", "due_at": 1e12, "label": "",
+              "duration_s": 60.0, "pending": False}]
+    server.note_timers(armed)
+    q3 = seat_spoke(server, "spoke3")
+    server.note_timers(armed)  # the unchanged poll that follows the seat
+    got = frames(q3)
+    check(
+        "a spoke seated after the change still gets the timer set, privately, unstamped",
+        [f["type"] for f in got[:2]] == ["hello", "timers.sync"]
+        and got[1]["timers"] == armed and "seq" not in got[1],
+    )
+    server.note_timers([])
+    server._clients.pop("spoke3", None)
+    server._client_left("spoke3")
+    q4 = seat_spoke(server, "spoke4")
+    check("a cancellation made while it was away reaches the next seat too",
+          [f.get("timers") for f in frames(q4) if f["type"] == "timers.sync"] == [[]])
+
 
 async def probe_snapshot_and_ladder() -> None:
     print("\nthe snapshot and the voice rank")

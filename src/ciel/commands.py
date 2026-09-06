@@ -63,6 +63,14 @@ _LIST_TIMERS = re.compile(
 )
 _RELOAD = frozenset({"reload", "reload yourself"})
 
+# The speak-back switch (typed replies spoken in the room too — for hearing
+# the voice somewhere you cannot talk): the Chart has a chip for it, and
+# this is the same switch as words, typed or spoken.
+_SPEAK_BACK = re.compile(
+    r"^(?:speak\s+back|speakback|talk\s+back|read\s+back|voice|speak\s+(?:your\s+)?replies)"
+    r"\s+(?P<on>on|off)$"
+)
+
 # The escape hatch: the user is done with this exchange — woke Ciel by
 # accident, changed their mind mid-request, or is closing a follow-up window.
 # All of these deserve an immediate quiet exit, not a model turn that answers
@@ -90,8 +98,9 @@ _ADDRESS = frozenset({"hey", "okay", "ok", "ciel", "seal", "jarvis"})
 
 @dataclass(frozen=True, slots=True)
 class Command:
-    kind: str  # "reload" | "set_timer" | "cancel_timer" | "list_timers" | "dismiss"
+    kind: str  # "reload" | "set_timer" | "cancel_timer" | "list_timers" | "dismiss" | "speak_back"
     seconds: float = 0.0  # set_timer only
+    on: bool = False  # speak_back only
 
 
 def _seconds(m: re.Match[str]) -> float | None:
@@ -130,6 +139,9 @@ def match(text: str) -> Command | None:
 
     if s in _RELOAD:
         return Command("reload")
+    m = _SPEAK_BACK.fullmatch(s)
+    if m:
+        return Command("speak_back", on=m.group("on") == "on")
     if _CANCEL_TIMER.fullmatch(s):
         return Command("cancel_timer")
     if _DISMISS.fullmatch(s):

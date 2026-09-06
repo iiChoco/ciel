@@ -338,20 +338,29 @@ class STTConfig:
 
 @dataclass(frozen=True, slots=True)
 class TTSConfig:
-    engine: Literal["say", "piper"] = "piper"
-    """``piper`` is a local neural voice; ``say`` is the macOS built-in.
+    engine: Literal["say", "piper", "native"] = "piper"
+    """``piper`` is a local neural voice; ``say`` is the macOS built-in
+    rendered to a file; ``native`` is Apple's synthesizer streamed through
+    a Swift helper (``tts/native.py``), which is how the Premium voices
+    (Jamie, Zoe, Ava — free downloads under Accessibility → Spoken
+    Content) reach Ciel.
 
-    Piper is the default on measurement, not taste: it reached first audio in
-    ~140 ms against ~500 ms for `say` — because it streams chunks as it
-    synthesizes rather than rendering a whole file first — *and* it sounds
-    considerably more human. The only cost is a one-time ~60 MB voice download,
-    after which it is strictly better on both axes.
-
-    Falls back to ``say`` automatically if the voice can't be loaded, so a
-    failed download degrades to a working assistant rather than a broken one."""
+    Piper was the default on measurement against ``say``'s compact voice:
+    first audio in ~140 ms against ~500 ms, and more human. ``native``
+    with a Premium voice beats it on both — first audio ~40 ms once warm,
+    and Apple's neural prosody — but is Mac-only and needs the command-line
+    tools' ``swiftc`` once to build the helper; ``probe_native_voice.py``
+    has the numbers. Falls back native → piper → ``say``, so a missing
+    voice or toolchain degrades quality, never speech."""
 
     voice: str = "Samantha"
-    """A macOS voice name for ``say``; ignored by Piper."""
+    """A macOS voice name for ``say``; ignored by Piper and ``native``."""
+
+    native_voice: str = "Jamie"
+    """The voice for ``native``: a name (the best quality installed under
+    it wins — Premium over Enhanced over compact) or an identifier
+    (``com.apple.voice.premium.en-GB.Malcolm``, which is what Jamie is
+    called inside). Paced by ``rate`` like ``say``."""
 
     rate: int = 190
     """Words per minute for ``say``. macOS default is 175, which drags a little
@@ -1210,6 +1219,12 @@ class WebConfig:
     origins are refused by the Origin check either way."""
 
     port: int = 8765
+
+    speak_back: bool = False
+    """Start with typed replies spoken aloud too. Normally the Chart's
+    replies are text and the room stays quiet; the VOICE chip on the
+    page (or a typed "speak back on") flips this for a session — the
+    way to hear the voice from somewhere you cannot talk."""
     """Where the GUI lives: http://127.0.0.1:8765 by default."""
 
     max_inbound_chars: int = 4000
@@ -1508,6 +1523,14 @@ class InterviewConfig:
     long interview."""
 
     daily_sessions_per_user: int = 4
+    """Interviews a user may start per day. Reserved before the brief is
+    generated (the model call is the expensive part), kept in a ledger of
+    its own — deleting a session does not hand the slot back."""
+
+    daily_regenerations_per_user: int = 8
+    """"Give me a different brief" is a model call too, on a prepared
+    session, so it has a budget of its own rather than riding free."""
+
     max_concurrent: int = 3
     """Live interviews at once — each is an SDK subprocess of a few hundred
     megabytes, and the hub is a small machine. A fourth caller is told the
@@ -1543,6 +1566,17 @@ class InterviewConfig:
 
     cookie_days: int = 30
     """How long a login lasts."""
+    accounts_dir: Path | None = None
+    """When set, the accounts file and the cookie secret live here instead
+    of ``dir`` — the door's directory (``accounts.json``, ``secret``), so one
+    login covers every yunhan.me surface. Sessions stay under ``dir``."""
+    cookie_name: str = "ciel_iv"
+    """The login cookie's name — ``yh_session`` when sharing the door's."""
+    cookie_domain: str = ""
+    """Cookie domain — ``.yunhan.me`` to share the login across subdomains;
+    empty is host-only, the room alone."""
+    cookie_path: str = "/interview"
+    """Cookie path — ``/`` when shared, so every surface receives it."""
 
     reload_max_wait_s: float = 1200.0
     """How long a pending source reload waits for live interviews to end
@@ -1558,17 +1592,6 @@ class TranscriptConfig:
     something is actually said. Delete a file to forget that conversation;
     nothing reads them back."""
 
-    accounts_dir: Path | None = None
-    """When set, the accounts file and the cookie secret live here instead
-    of ``dir`` — the door's directory (``accounts.json``, ``secret``), so one
-    login covers every yunhan.me surface. Sessions stay under ``dir``."""
-    cookie_name: str = "ciel_iv"
-    """The login cookie's name — ``yh_session`` when sharing the door's."""
-    cookie_domain: str = ""
-    """Cookie domain — ``.yunhan.me`` to share the login across subdomains;
-    empty is host-only, the room alone."""
-    cookie_path: str = "/interview"
-    """Cookie path — ``/`` when shared, so every surface receives it."""
     dir: Path = field(
         default_factory=lambda: Path.home() / ".ciel" / "transcripts"
     )
@@ -1842,11 +1865,22 @@ class WorldConfig:
     0 disables the refresh (the brief still reads the agenda itself)."""
 
     file: Path = field(default_factory=lambda: Path.home() / ".ciel" / "world.json")
-    """The table's mirror, written at most once a second when something
-    changed, read at startup — the autoreloader re-execs on every source
-    edit, and a place or a ring score should not blank for minutes each
-    time. Every fact keeps its own timestamp, so a carried-over reading
-    is shown at its true age, never as new."""
+    """The table's mirror, owner-only, written when a fact changed (and
+    at most every five minutes for a mere refresh of an unchanged one),
+    read at startup — the autoreloader re-execs on every source edit,
+    and a place or a ring score should not blank for minutes each time.
+    Every fact keeps its own timestamp, so a carried-over reading is
+    shown at its true age, never as new. Carries the revision."""
+
+    history: Path | None = field(
+        default_factory=lambda: Path.home() / ".ciel" / "world-history.jsonl"
+    )
+    """Append-only: one line per change to a resolved fact, with the
+    revision it made — what "when was I last home" or a post-mortem
+    reads. None keeps no history."""
+
+    history_max_bytes: int = 2_000_000
+    """Past this size the history keeps its newer half."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1887,6 +1921,11 @@ class Config:
 
     state_dir: Path = field(default_factory=lambda: Path.home() / ".ciel")
     log_level: str = "INFO"
+    timezone: str = ""
+    """The user's zone (``America/Los_Angeles``), applied to the process
+    at startup: every clock the runtime speaks — the opening block, an
+    alarm's time, the brief's quiet hours — is the user's, not the
+    host's. Empty leaves the host's zone, which on a cloud hub is UTC."""
 
     @property
     def session_file(self) -> Path:
@@ -2032,7 +2071,7 @@ def load_config(path: Path | None = None) -> Config:
                 for name, entry in raw["mcp"].items()
                 if isinstance(entry, dict)
             }
-        for key in ("state_dir", "log_level"):
+        for key in ("state_dir", "log_level", "timezone"):
             if key in raw:
                 updates[key] = _coerce(raw[key], Path if key == "state_dir" else str)
         cfg = replace(cfg, **updates)

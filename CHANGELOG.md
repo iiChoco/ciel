@@ -2,6 +2,346 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-05 — the screenshot that took the hub down
+
+**Why.** "Take a look at my screen and put these things on the calendar"
+ended the hub twice in a row. Three faults in one line of the journal:
+the screen tool's two displays came back as one tool result the CLI
+echoed as a single JSON line past the Agent SDK's one-megabyte buffer
+(`JSON message exceeded maximum buffer size`); the SDK's reader gave up
+with a bare `Exception` the brain did not recognise as a transport death,
+so the dead client stayed installed; and the apology after the failed
+turn hit `contextlib.suppress` in a module that only imported
+`aclosing` — a NameError inside the failure handling, which the hub loop
+re-raised from the turn task and died of. systemd brought the hub back
+with no memory of the conversation ("this is the start of our
+conversation, sir").
+
+**What.**
+
+- *The line buffer fits a screen.* `ClaudeAgentOptions(max_buffer_size=
+  64 MiB)` for the brain: a bound on memory per line, not a target.
+  Screenshots are re-encoded at a fixed JPEG quality (75) so the payload
+  has a known size rather than sips' unstated default.
+- *A dead reader is a dead client.* `Brain.ask` reads the SDK stream by
+  hand; an exception raised by the stream itself (never by the turn's
+  own body) becomes `StreamDied`, a `ConnectionError`, and the eviction
+  that follows a transport death follows it — the next turn reconnects
+  instead of ending at once with nothing said.
+- *One turn's crash is one turn's crash.* `import contextlib` in
+  `pipeline.py`; and both loops surface a finished turn task's exception
+  through `_turn_crashed()` — logged, marked on the indicator, recorded
+  as an event — rather than re-raising it out of the loop.
+
+**Probes.** `probe_turns.py` 63 → 71: the wire apology on a dead spoke,
+a crashed turn task as an event, and the stream dying under a turn (what
+was heard is kept, the client is evicted, the lock is released, the
+buffer is raised).
+
+## 2026-09-05 — the follow-up review's five (ownership, seats, the deadline)
+
+**Why.** The follow-up review (`reports/2026-09-05-followup-review.md`)
+found five defects left standing after the review's six: the room still
+tied a session to a *username*, so a deleted-and-recreated name inherited
+the old person's interviews; a password change or a disable retired the
+cookie but not the socket already open under it, which went on
+interviewing and recording; the new search ran the model's regex on the
+assistant's own event loop, where one backtracking pattern held every
+socket and timer; a drain that timed out simply forgot its debt, so the
+late result answered the next question anyway; and a slot reserved
+before midnight was released against the new day's ledger. Each was
+reproduced with temporary data (`reports/2026-09-05-review/`); all five
+are fixed here, and the repro scripts now print the fixed values.
+
+**What.**
+
+- *A session belongs to the account.* `meta.json` carries an
+  `owner_id`, the account's immutable id; every read that answers a
+  request — the lobby, a session, its recording, the socket — checks
+  it, and a session under another id in the same directory is a 404.
+  Sessions from before ids existed are claimed once at startup by the
+  account holding the username then. Deleting an account (panel or
+  `ciel interview delete`) moves its directory to
+  `users/.retired/<username>.<id>`, ledger included, so the next holder
+  of the name starts empty.
+- *The socket goes with the sign-in.* Every attached connection is a
+  `Seat`; a newer tab supersedes the older (closed, 4409); the end of
+  the interview closes what is left after the debrief is announced; an
+  eviction — a self-service password change now included, beside admin
+  reset, disable, and delete — closes them at once with 4401, before the
+  debrief is written, and the page does not retry on either code. An
+  ended interview drops every later frame, audio included. A reset made
+  at the terminal, which no eviction sees, is caught by the socket
+  handler re-checking the cookie against the file every fifteen
+  seconds. The close is done by the socket's own handler task, asked
+  through the seat: aiohttp closes a socket from any other task by
+  dropping the transport the moment the close frame is written, and the
+  browser then saw 1006 as often as the code.
+- *The search has a deadline.* `search_files` and `find_files` run
+  their walk and matching in a spawned child with the guard handed
+  over; the parent waits off the loop and kills a child still running
+  at twenty seconds. A coroutine timeout cannot interrupt a match and a
+  thread holds the GIL; a process can be killed. `^(a+)+$` over thirty
+  characters now costs one second and a message, not the room.
+- *A failed drain is the end of the connection.* The in-flight debt is
+  cleared only by reading the result. A drain that times out or finds
+  the stream broken retires the client (bounded disconnect) and every
+  later `ask()` fails with the reason; the room's one retry fails the
+  same way and the interview ends with an `interviewer` error, debriefed
+  from what was said — never answered by the stale result.
+- *A reservation names its day.* `SessionStore.reserve` returns a
+  `Reservation(username, day, kind)` and `release` takes it back
+  against that day; one taken before midnight and released after
+  touches nothing in the new day.
+
+**Probes.** `probe_interview.py auth` 70 → 85 (ownership through the
+API, the claim at startup, the retired directory), `brief` 50 → 63
+(reservations across midnight, ownership and retirement in the store),
+`session` 28 → 44 (a superseded tab, a self-change, a disable, and a
+terminal reset, each over a real loopback socket, with the code the
+browser sees), `brain` 12 → 19 (the drain timing out, the stream
+breaking mid-drain, the stale result never read), `probe_files.py` 17 →
+21 (the runaway pattern killed at the deadline while a heartbeat keeps
+ticking, no child left behind). The repro scripts read: old transcript
+accessible False; socket closed True, audio appended False; midnight
+frees the current day False; connection retired True.
+
+## 2026-09-05 — the interview that ended on its own (the cut-off race)
+
+**Why.** Two interviews on the hub ended in `error` three and four
+questions in, each right after the candidate went on talking while the
+interviewer was still thinking. The room cancels the interviewer's turn
+and sends the SDK an interrupt — but the CLI still posts a ResultMessage
+for the aborted turn (an `error_during_execution` one carrying its
+`[ede_diagnostic]` line when no word had been said yet), and the reader
+that would have taken it was the cancelled turn. So it sat in the
+stream, and the next question's `ask()` read it as its own reply: an
+error result ended the interview; a stale text (a cut-off mid-sentence)
+would have had the interviewer answer the previous question.
+
+**What.**
+
+- *The interrupt reads out the aborted turn.* `AgentSdkBackend` keeps
+  an in-flight flag per query; `interrupt()` drains the stream to the
+  pending ResultMessage (bounded at fifteen seconds), and `ask()` does
+  the same before a query if a debt is still owed. A broken stream
+  surfaces as `BackendError` rather than a crash.
+- *One bad turn is not the end.* A turn that fails before it has said a
+  word is asked once more; a second failure ends the interview as
+  before. `_speak_turn` closes the `ask()` generator on the way out
+  (`aclosing`), so a cancellation landing in `_say` cannot leave the
+  backend's lock held until the collector gets to it.
+- *The page says why.* An `interviewer`/`crash` error frame is no longer
+  a `console.warn`: the closing view says the interviewer hit an error
+  and the debrief covers what was said; the review header shows
+  `end_reason` (now in the session row) for `error` and `idle`.
+- *A probe for the race.* `probe_interview.py brain` drives the real
+  `AgentSdkBackend` against a fake CLI that posts the aborted turn's
+  result the way the real one does (cut-off while thinking, cut-off
+  mid-sentence), and runs a whole scripted interview whose second turn
+  fails once. 12 checks; the same race was reproduced against the real
+  CLI on Haiku before and after.
+
+## 2026-09-04 — the review's six (boundaries, reconciliation, mute)
+
+**Why.** A focused review of the working checkout
+(`reports/2026-09-04-codebase-review.md`) found six defects where the
+protocol, policy, and hardware pieces meet, each reproduced with
+temporary data (`reports/2026-09-04-review-repros.py`). All six are
+fixed here, plus the deterministic-test defect it found in
+`probe_world.py`.
+
+**What.**
+
+- *The search boundary.* `Grep` and `Glob` took a root the guard
+  approved and then walked it themselves — into `credentials.json`,
+  through a symlink out, into `.ssh` — and their output carried the
+  contents before any `Read` could be refused. Both built-ins are now
+  refused outright (hook and `disallowed_tools`, path or no path) and
+  replaced by Ciel's own `search_files` / `find_files`
+  (`brain/tools/files.py`, codename **Sieve**): the same
+  `WorkspaceGuard`, applied to every directory entered and every file
+  opened, symlinks resolved first, no model-supplied exclusions.
+  `WorkspaceGuard.from_config` so the hook and the sieve are built the
+  same way; the Witness lists the two as observers; the prompt names
+  them.
+- *Account writes are transactional.* Every mutation of
+  `interview-accounts.json` holds a lock across the whole
+  read-modify-write — a `threading.Lock` for the room's worker threads
+  and an `flock` on `<file>.lock` for the CLI — with scrypt computed
+  outside it and the account reloaded inside it. A reset that paused
+  in scrypt while an admin disabled the account no longer re-enables
+  it. `atomic_write` (shared by every file-backed store) now uses a
+  unique temp file per call and keeps the target's mode, so the
+  owner-only files stay owner-only and two writers cannot replace each
+  other's half-written temp.
+- *Cookies name the account, not the username.* Each account carries
+  an immutable `id` minted at creation and an `auth` generation that
+  every reset bumps; the cookie is
+  `username|id|auth|expiry|hmac` and is refused unless both still
+  match the live account. A reset logs the old cookies out; a username
+  deleted and recreated is a stranger to them; a friend changing their
+  own password is handed a fresh cookie in the same response and keeps
+  their seat. Accounts from before ids existed are upgraded once, under
+  the lock. Admin reset, disable, and delete also end the user's live
+  interviews (`pause`, with the reason). Every existing cookie is
+  three-part and expires: everyone signs in again once.
+- *A seated spoke gets the timer set.* `note_timers` dedupes against the
+  last set *sent*, so a change broadcast to an empty seat was recorded
+  as delivered and the next spoke never heard it. `_welcome` now sends
+  the authoritative set privately (unstamped: state, not an event) to
+  every spoke it seats, whatever the resume claim did — new timers and
+  cancellations made during a disconnect both arrive.
+- *The mirror holds its tongue while muted.* The offline fallback's poll
+  never looked at the switch, and `_ring_locally` played regardless.
+  Both check now — the poll before scheduling, the ring at the moment
+  of playback and between timers. A due timer in a muted room is held,
+  not marked rung, and rings on the first poll after the unmute.
+- *The daily cap is a ledger.* A session's slot is reserved before the
+  brief is generated (`users/<u>/usage.json`, under the same lock
+  helper), so two requests in the same instant get one slot between
+  them; deleting a session keeps its charge; a failed or cancelled
+  generation hands the slot back. Regeneration has a budget of its own
+  (`[interview] daily_regenerations_per_user`, default 8). `me`
+  reports `used_today`. The dev room is no longer exempt from the cap —
+  `probe_interview.py brief` always expected the 429.
+- *One clock.* `Pipeline._presence_now` judged freshness on the wall
+  clock while the world's facts were stamped by the table's own
+  (injectable) clock; `World.now()` is the one it uses now, and the
+  probe ages a reading by advancing that clock.
+
+**Probes.** New `probe_files.py` (18: the sieve over a fixture with a
+fake secret, a forbidden subtree, a symlink out, the walkers refused).
+`probe_interview.py auth` 57 → 70 (the race, ids, retired cookies, the
+recreated username, the fresh cookie on a self-change), `brief` 47 → 50
+(two at once, a deleted session's slot, the regeneration budget).
+`probe_hub_arbiter.py` 48 → 50, `probe_spoke.py` 50 → 52,
+`probe_vigil.py` observers updated, `probe_world.py` passes again (121).
+The repro script now reads False / [200, 429] / snapshot present /
+nothing played.
+
+## 2026-09-04 — speak back (typed replies, spoken)
+
+**Why.** The new voice can only be judged by ear, and the only lane that
+speaks is the one that needs the user to talk — useless in a lecture
+hall. The Chart's turns were text by design (the page is the delivery),
+with no way to ask for the room as well.
+
+**What.** A speak-back switch: `speakback.set` from a Chart, `speakback`
+broadcast to every client (and in the hello), the **VOICE** chip on the
+page, and the typed/spoken command "speak back on|off" (also "voice",
+"talk back", "read back", "speak your replies"). On, a web-lane turn
+runs through `_SpokenTextSink`: the transcript tap still feeds the page
+and each reply sentence is spoken — on the hub as a `turn.begin` with
+`lane: "web"`, sentences, `turn.end` down the wire; locally through the
+player. The spoke accepts web-lane turns as playback only: no ack
+filler, no BUSY, no follow-up window, the room held (`_delivering`) for
+each sentence so the wake word does not hear the voice. Muted wins; no
+spoke or no player means text alone; a sentence that will not play
+silences the rest of that reply without cutting the text. `[web]
+speak_back` (default off) is the starting state; the switch is not
+persisted.
+
+**Probes.** `probe_turns.py` 51 → 63 (the sink, the command both ways,
+muted, no player, a stopped sentence, the hub's framing); `probe_spoke.py`
+44 → 50 (a web-lane turn end to end); `probe_wire.py` two samples;
+`probe_web.py --live` round-trips the chip.
+
+## 2026-09-04 — Apple's voice, streamed (native TTS)
+
+**Why.** Piper became the default by beating `say` on first-audio latency
+and on sound — but `say` had only ever been heard with a compact voice.
+macOS ships neural Premium voices (free, ~1 GB, under Accessibility →
+Spoken Content) that `say -o` renders no faster than the compact ones,
+because it writes a whole file before the first byte. Driven through
+AVSpeechSynthesizer's buffer callback instead, the same voices stream.
+
+**What.** `tts/native.py` and `tts/native/CielVoice.swift`: a small Swift
+helper, compiled once with `swiftc` (command-line tools suffice), cached
+under `~/.ciel/bin` by source hash, kept alive as a subprocess and driven
+over pipes — JSON lines in, framed PCM out, with begin/pcm/end/error
+frames per utterance and a cancel op for barge-in that drains to the
+utterance's end so the next sentence starts in sync. A voice is named
+(the best quality installed under that name wins) or given by identifier;
+`rate` in words per minute paces it like `say`. `engine = "native"`,
+`native_voice = "Jamie"`; the chain is now native → piper → `say`, and both
+warm-up fallbacks (pipeline and spoke) walk it rather than jumping to
+`say`. The hub and the interview room keep piper.
+
+**Measured** (`probe_native_voice.py --ab`, Jamie Premium vs
+`en_GB-alan-medium`, M-series Mac, warm): first audio 25–49 ms vs 41–100
+ms; a 5.5 s sentence in 117 ms vs 155 ms; the cold first utterance ~480 ms
+(the voice loading), paid once at warm-up. Sound is the user's call; the
+four A/B pairs are the probe's output.
+
+**Probes.** `probe_native_voice.py` (13): the build and its hash reuse,
+the voice and rate handshake, chunking and first-chunk latency, a barge-in
+followed by a clean sentence, the rate mapping, a missing voice as one
+clear error with the installed voices named. The spoke was switched to
+`native` and came back ready with Jamie.
+
+## 2026-09-04 — the spine under the point (Phase Space, second pass)
+
+**Why.** The first Phase Space was a latest-readings cache: `observe`
+replaced whatever was there, so a reading from the past could overwrite
+one from the present; a spoke could name any fact, including the hub's
+own; the ring's activity-only fetch erased the morning's readiness; a
+calendar read that failed became "nothing more today"; the block —
+place, presence, calendar, the ring — opened every turn, public
+channels included, with meeting titles written by whoever sent the
+invite sitting inside a block the prompt called the system's own; the
+file was rewritten every second and world-readable; and a write that
+failed was never retried. A review at `b6c3298` found all of it. This
+is the fix, and the spine the review asked for.
+
+**What.**
+
+- *Observations per source, reducers, ordering.* The table keeps the
+  latest observation from every source that has reported a name and a
+  reducer per name resolves the fact: newest wins by default (a tie
+  keeps the incumbent), the ring merges the day's numbers across reads,
+  an observation older than the one held from its source is refused,
+  and a candidate a day older than the fact is let go. `revision` —
+  changes only, persisted — and `observations(name)` are exposed.
+- *The door.* `RELAYED` names what a spoke may send up (place, sections,
+  the ring); the hub refuses a `fact` frame for anything else, stamps
+  `received_at`, and clamps an `observed_at` that runs ahead of it.
+- *Projections.* `render(public=…)` / `snapshot(public=…)` leave the
+  `PRIVATE` readings (presence, place, agenda, the ring) out of a public
+  channel's turn; `world_now` is scoped per turn. Outside strings
+  (`EXTERNAL`: agenda lines, section ids) render in “quotes” and the
+  block's rule says quotes mean reported, not instructed; the static
+  prompt section says the same and that what a public turn leaves out
+  is not to be repeated there from memory.
+- *Sources apart from facts.* `agenda_today()` answers None on a failed
+  read (EventKit, Google, the RPC, the executor); the refresher marks
+  the calendar source failed and leaves the reading standing, with a
+  ttl of two refreshes; `note_source`/`sources()` ride the `world` frame
+  and the file, and the Chart dims the NEXT chip and says why.
+- *The file and the history.* `world.json` is owner-only, written on a
+  change and at most every five minutes for a steady re-observation
+  (was: every second), carries the revision and the observations, and
+  stays dirty when a write fails. `world-history.jsonl` (owner-only,
+  bounded by `history_max_bytes`) gets one line per change.
+- *Vigil on the table.* Presence is observed once a second locally
+  (10 s ttl) and per heartbeat on the hub; the policy decides on the
+  table's resolved presence when fresh, the probe otherwise — the one
+  place a second device's reading will ever be folded in.
+- *The user's clock.* A top-level `timezone` sets the process zone at
+  startup, and the hub's unit sets `TZ`; the Azure box is UTC, and
+  every clock the hub spoke — the block, alarms, the brief's quiet
+  hours — was the box's.
+
+**Probes.** `probe_world.py` 72 → 121: ordering, the ring's reducer,
+projections and quoting, the file's mode and write cadence and failed
+write, the history and its bound, source health, the hub's ownership
+and clamp, a public Discord turn's block and tool scope, Vigil's
+presence, the calendar's failures. Every other probe unchanged and
+green (`probe_interview.py brief`'s "fifth session → 429" fails on the
+previous commit too). Owed: revision-named preconditions on actions
+(nothing consumes `revision` yet); the deployed hub needs the unit's
+`TZ` (daemon-reload + restart) and `timezone` in its config.
+
 ## 2026-09-04 — one point that says where everything is (Phase Space)
 
 **Why.** What Ciel knew about the world was scattered by producer, each

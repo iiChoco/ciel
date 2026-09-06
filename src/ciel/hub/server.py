@@ -221,6 +221,17 @@ class HubServer(WebLink):
                 self._peers.pop(old, None)
                 asyncio.get_running_loop().create_task(self._drop(old))
             log.info("spoke seated (%s)", verdict.client_id or "-")
+            # The authoritative timer set, straight to the seat. The
+            # broadcast in note_timers is deduped against the last set
+            # *sent* — which a spoke that was away for the change never
+            # received, and the unchanged polls that follow say nothing.
+            # A private frame here owes nothing to that dedupe (and to
+            # the replay ring: it is state, not an event), so a reconnect
+            # is a reconciliation whether or not the resume claim held.
+            if self._timers_sent is not None:
+                self._send_to(ws, wire.validate(
+                    {"type": "timers.sync", "timers": self._timers_sent}, "h2c"
+                ))
             if self.on_spoke_change is not None:
                 self.on_spoke_change(True)
         return queue, resumed

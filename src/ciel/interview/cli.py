@@ -44,7 +44,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
         ("reset", "new password for an account; prints it once"),
         ("disable", "refuse the account's logins"),
         ("enable", "allow them again"),
-        ("delete", "remove the account (its sessions stay on disk)"),
+        ("delete", "remove the account (its sessions are kept aside under users/.retired)"),
     ):
         one = sub.add_parser(name, help=help_)
         one.add_argument("username")
@@ -168,8 +168,16 @@ def main(argv: list[str]) -> int:
             accounts.set_disabled(args.username, False)
             print(f"{args.username} enabled")
         elif args.cmd == "delete":
+            from ciel.interview.store import SessionStore
+
+            account = accounts.get(args.username)
             accounts.delete(args.username)
-            print(f"{args.username} deleted")
+            # The sessions and the ledger go with the account, out of the
+            # way of whoever holds the username next.
+            parked = SessionStore(config.interview.dir).retire(
+                args.username, account.id if account else ""
+            )
+            print(f"{args.username} deleted" + (f" (sessions kept at {parked})" if parked else ""))
         elif args.cmd == "list":
             rows = accounts.list()
             if not rows:

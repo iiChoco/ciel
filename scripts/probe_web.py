@@ -280,6 +280,7 @@ async def live(port: int | None = None, require_token: str | None = None) -> Non
         link.note_row("event", "muted" if value else "unmuted")
 
     link.on_mute = on_mute
+    link.on_speak_back = link.note_speak_back  # the VOICE chip round-trips, like mute
 
     def on_restart() -> None:
         print("  [restart requested]")
@@ -342,7 +343,13 @@ async def live(port: int | None = None, require_token: str | None = None) -> Non
                          "observed_at": now, "source": "sections@mac", "ttl_s": 120.0},
         }
 
-    link.note_world(world_facts())
+    def world_sources() -> dict:
+        # The Mac away is also the calendar unreadable: the NEXT chip dims
+        # and its title says why, while the reading stands.
+        return {"calendar": {"ok": world_on, "at": time.time(),
+                             "error": None if world_on else "agenda unavailable: spoke away"}}
+
+    link.note_world(world_facts(), revision=1, sources=world_sources())
 
     try:
         while True:
@@ -371,7 +378,7 @@ async def live(port: int | None = None, require_token: str | None = None) -> Non
                 link.note_state("idle")
             elif text.lower().startswith("world"):
                 world_on = not world_on
-                link.note_world(world_facts())
+                link.note_world(world_facts(), revision=2, sources=world_sources())
                 link.note_row("event", "spoke connected" if world_on else "spoke disconnected")
                 link.note_state("idle")
             elif text.lower().startswith("confirm"):

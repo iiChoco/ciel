@@ -24,6 +24,10 @@ WorkingDirectory=/home/ciel/jarvis
 Environment=PATH=/home/ciel/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=/home/ciel
 Environment=PYTHONUNBUFFERED=1
+# The user's zone, not the box's: every time the hub speaks or compares
+# (the opening block, an alarm, the brief's quiet hours) is meant here.
+# `timezone` in config.toml does the same from inside; this is the belt.
+Environment=TZ=America/Los_Angeles
 # The brain's login. On Linux the CLI has no keychain: run `claude
 # setup-token` once (it prints a long-lived OAuth token for the
 # subscription — never an API key, which would bill per use) and put it in

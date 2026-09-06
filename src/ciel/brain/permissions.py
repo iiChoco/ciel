@@ -46,10 +46,19 @@ from claude_agent_sdk import HookContext, HookMatcher
 
 log = logging.getLogger(__name__)
 
-# Tools enabled when file access is on. Read/Glob/Grep are included because a
+# Built-in tools enabled when file access is on. Read is included because a
 # write-only assistant is nearly useless — it cannot check whether it already
 # wrote something, or amend a file it produced a minute ago.
-FILE_TOOLS: tuple[str, ...] = ("Read", "Write", "Edit", "Glob", "Grep")
+#
+# Not Glob or Grep. Both take a root and walk it themselves, and this guard
+# only ever sees the root: a search rooted at the workspace was approved and
+# then read every forbidden file beneath it into its own output. Searching
+# is done by Ciel's ``search_files`` / ``find_files`` (``tools/files.py``),
+# which run every candidate through this guard before opening it. The two
+# built-ins are refused below whenever they appear, path or no path.
+FILE_TOOLS: tuple[str, ...] = ("Read", "Write", "Edit")
+
+_WALKERS = frozenset({"Glob", "Grep"})
 
 # Which input field carries the path, per tool. Anything absent from this map
 # passes through untouched — every tool that can name a filesystem path is
@@ -144,9 +153,30 @@ class WorkspaceGuard:
             snapshot_dir.expanduser().resolve() if snapshot_dir is not None else None
         )
 
+    @classmethod
+    def from_config(cls, config: Any) -> "WorkspaceGuard":
+        """The guard the brain builds from ``[files]`` — one constructor
+        so the search tools' sieve and the hook agree to the letter."""
+        return cls(
+            config.files.workspace,
+            config.files.read_only_outside,
+            # The undo carve-out: snapshots live outside any workspace,
+            # and restoring one is an ordinary Read the guard must allow.
+            snapshot_dir=(
+                config.journal.dir.expanduser() / "snapshots"
+                if config.journal.enabled
+                else None
+            ),
+        )
+
     @property
     def workspace(self) -> Path:
         return self._workspace
+
+    def permits(self, raw_path: str, *, write: bool = False) -> str | None:
+        """The verdict a tool call on this path would get: None to allow,
+        else the refusal. For callers that walk a tree themselves."""
+        return self._check(raw_path, is_write=write)
 
     def ensure_workspace(self) -> None:
         self._workspace.mkdir(parents=True, exist_ok=True)
@@ -160,6 +190,21 @@ class WorkspaceGuard:
         """PreToolUse hook. Returning ``{}`` means "no opinion", which allows."""
         tool_name = payload.get("tool_name", "")
         tool_input = payload.get("tool_input") or {}
+
+        if tool_name in _WALKERS:
+            # Refused whole: the walk happens out of this guard's sight.
+            verdict = (
+                f"{tool_name} is not available; use search_files or "
+                "find_files, which stay inside the workspace boundary."
+            )
+            log.warning("denied %s: %s", tool_name, verdict)
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": verdict,
+                }
+            }
 
         # Tools that never touch the filesystem pass through untouched.
         if tool_name not in _PATH_FIELDS:

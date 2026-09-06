@@ -30,6 +30,17 @@ from ciel.config import InterviewConfig
 
 log = logging.getLogger(__name__)
 
+_DRAIN_S = 15.0
+"""How long an interrupt waits for the aborted turn's ResultMessage before
+giving up on it. The CLI posts it within a second of the interrupt; the
+bound is for a subprocess that died mid-turn and will never answer — and
+giving up is terminal: a stream whose result never came cannot be
+trusted to answer the *next* question with the next result, so the
+connection is retired and the interview ends with an error rather than
+carrying on out of step."""
+_RETIRE_S = 5.0
+"""How long retiring a wedged client waits for its disconnect."""
+
 
 class BackendError(RuntimeError):
     """The model could not be reached or refused to answer."""
@@ -80,6 +91,13 @@ class AgentSdkBackend:
         self._cost = 0.0
         self._session_cost = 0.0
         self._lock = asyncio.Lock()
+        self._in_flight = False
+        """A query was sent whose ResultMessage has not been read. Every
+        query gets one — an aborted turn included — and it must be read
+        before the next query, or it becomes that query's reply."""
+        self._retired: str | None = None
+        """Why the connection was given up on, once it has been: the
+        error every later ask() raises."""
 
     @property
     def cost_usd(self) -> float:
@@ -138,33 +156,47 @@ class AgentSdkBackend:
         from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, TextBlock
 
         if self._client is None:
-            raise BackendError("interviewer not started")
+            raise BackendError(self._retired or "interviewer not started")
         async with self._lock:
+            if self._in_flight:
+                # A turn whose reader went away without an interrupt (the
+                # session ended mid-sentence, say): its result is still owed.
+                await self._drain("an unread turn")
+            if self._client is None:
+                # The drain gave up on the stream: nothing to ask.
+                raise BackendError(self._retired or "interviewer not started")
             try:
                 await self._client.query(text)
             except Exception as exc:  # noqa: BLE001
                 raise BackendError(f"the interviewer is gone: {exc}") from exc
+            self._in_flight = True
             streamed = False
             fallback: list[str] = []
-            async for message in self._client.receive_response():
-                if isinstance(message, StreamEvent):
-                    if message.parent_tool_use_id is not None:
-                        continue
-                    piece = _text_delta(message.event)
-                    if piece:
-                        streamed = True
-                        yield piece
-                elif isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, TextBlock) and block.text:
-                            fallback.append(block.text)
-                elif isinstance(message, ResultMessage):
-                    if message.total_cost_usd is not None:
-                        self._session_cost = float(message.total_cost_usd)
-                    if message.is_error and not streamed and not fallback:
-                        raise BackendError(
-                            "; ".join(message.errors or []) or message.subtype or "turn failed"
-                        )
+            try:
+                async for message in self._client.receive_response():
+                    if isinstance(message, StreamEvent):
+                        if message.parent_tool_use_id is not None:
+                            continue
+                        piece = _text_delta(message.event)
+                        if piece:
+                            streamed = True
+                            yield piece
+                    elif isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, TextBlock) and block.text:
+                                fallback.append(block.text)
+                    elif isinstance(message, ResultMessage):
+                        self._in_flight = False
+                        if message.total_cost_usd is not None:
+                            self._session_cost = float(message.total_cost_usd)
+                        if message.is_error and not streamed and not fallback:
+                            raise BackendError(
+                                "; ".join(message.errors or []) or message.subtype or "turn failed"
+                            )
+            except BackendError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - the stream itself broke
+                raise BackendError(f"the interviewer is gone: {exc}") from exc
             if not streamed:
                 for piece in fallback:
                     yield piece
@@ -217,6 +249,61 @@ class AgentSdkBackend:
             await self._client.interrupt()
         except Exception:  # noqa: BLE001 - an interrupt on a dead client is moot
             log.debug("interrupt failed", exc_info=True)
+        # The aborted turn still ends in a ResultMessage — an error one,
+        # carrying the CLI's diagnostic, when the model was cut off before
+        # it had said anything. Its reader (the ask() that was cancelled)
+        # is gone, so the result sits in the stream; left there, the next
+        # ask() reads it as the reply to the next question: an error ends
+        # the interview, a stale text answers the previous question. Read
+        # it out now, while nothing else is waiting on the stream.
+        async with self._lock:
+            if self._in_flight:
+                await self._drain("the interrupted turn")
+
+    async def _drain(self, what: str) -> None:
+        """Read and discard the stream up to the pending ResultMessage.
+        The caller holds the lock. The debt is cleared only by reading the
+        result: a drain that times out or finds the stream broken retires
+        the connection instead, because a result that turns up later
+        would be read as the reply to whatever is asked next."""
+        from claude_agent_sdk import ResultMessage
+
+        client = self._client
+        if client is None:
+            self._in_flight = False
+            return
+        try:
+            async with asyncio.timeout(_DRAIN_S):
+                async for message in client.receive_messages():
+                    if isinstance(message, ResultMessage):
+                        if message.total_cost_usd is not None:
+                            self._session_cost = float(message.total_cost_usd)
+                        self._in_flight = False
+                        return
+        except TimeoutError:
+            reason = f"the interviewer stopped answering (no result for {what} within {_DRAIN_S:.0f}s)"
+        except Exception as exc:  # noqa: BLE001 - the stream itself broke
+            reason = f"the interviewer is gone: {exc}"
+        else:
+            reason = f"the interviewer's stream ended without a result for {what}"
+        log.warning("interviewer: %s — retiring the connection", reason)
+        await self._retire(reason)
+
+    async def _retire(self, reason: str) -> None:
+        """Give the client up: it answers nothing more, and every later
+        ask() fails with ``reason``. The disconnect is bounded — a wedged
+        subprocess may not answer that either."""
+        client, self._client = self._client, None
+        self._retired = reason
+        self._in_flight = False
+        if client is not None:
+            try:
+                async with asyncio.timeout(_RETIRE_S):
+                    await client.disconnect()
+            except Exception:  # noqa: BLE001 - it was already past saving
+                log.debug("retiring the interviewer: disconnect failed", exc_info=True)
+        self._cost += self._session_cost
+        self._session_cost = 0.0
 
     async def close(self) -> None:
         client, self._client = self._client, None

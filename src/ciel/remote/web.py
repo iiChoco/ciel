@@ -320,9 +320,12 @@ class WebLink:
         self._writers: set[asyncio.Task[None]] = set()
         self._state = "idle"
         self._muted = False
+        self._speak_back = False
         self._agents: list[dict[str, Any]] = []
         self._world: dict[str, Any] = {}
         """The last world snapshot broadcast — what the hello claims."""
+        self._world_sources: dict[str, Any] | None = None
+        """The sources' health last broadcast, for the tap's dedupe."""
         self._runner: Any = None
         self._site: Any = None
         self.on_mute: Callable[[bool], None] | None = None
@@ -330,6 +333,9 @@ class WebLink:
         link never owns mute state — it only displays and relays it,
         because the thing being silenced (the speakers, the wake word)
         lives in the pipeline."""
+        self.on_speak_back: Callable[[bool], None] | None = None
+        """Set by the pipeline: the GUI's VOICE chip (speak typed replies
+        aloud) calls here. Relayed and displayed like mute, never owned."""
         self.on_restart: Callable[[], None] | None = None
         """Set by the pipeline: the GUI's restart button calls here.
         The same ownership rule as on_mute — the re-exec belongs to the
@@ -414,6 +420,10 @@ class WebLink:
         self._muted = muted
         self._broadcast({"type": "muted", "muted": muted})
 
+    def note_speak_back(self, on: bool) -> None:
+        self._speak_back = on
+        self._broadcast({"type": "speakback", "on": on})
+
     def note_agents(self, agents: list[dict[str, Any]]) -> None:
         """The active-agent roster tap — everything working on the user's
         behalf right now (a deep-thought pass, watches, timers).
@@ -426,15 +436,29 @@ class WebLink:
         self._agents = agents
         self._broadcast({"type": "agents", "agents": agents})
 
-    def note_world(self, facts: dict[str, Any]) -> None:
+    def note_world(
+        self,
+        facts: dict[str, Any],
+        *,
+        revision: int | None = None,
+        sources: dict[str, Any] | None = None,
+    ) -> None:
         """The world table tap (``world.py``): the pipeline polls the
         table's version once a second and hands the whole snapshot here
         when it moved; deduplicated again at this door for the callers
-        that don't."""
-        if facts == self._world:
+        that don't. The revision and the sources' health ride along
+        when given — a chip can dim on a failing source, and a client
+        can name the revision it acted on."""
+        frame: dict[str, Any] = {"type": "world", "facts": facts}
+        if revision is not None:
+            frame["revision"] = revision
+        if sources is not None:
+            frame["sources"] = sources
+        if facts == self._world and frame.get("sources") == self._world_sources:
             return
         self._world = facts
-        self._broadcast({"type": "world", "facts": facts})
+        self._world_sources = sources
+        self._broadcast(frame)
 
     def _broadcast(self, payload: dict[str, Any]) -> None:
         """Every client, in order — and the ring, always: a frame said
@@ -692,6 +716,7 @@ class WebLink:
             "acks": True,
             "resumed": replay is not None,
             "muted": self._muted,
+            "speakback": self._speak_back,
             "state": self._state,
             "agents": self._agents,
             "world": self._world,
@@ -754,6 +779,9 @@ class WebLink:
             elif kind == "mute":
                 if self.on_mute is not None:
                     self.on_mute(frame["muted"])
+            elif kind == "speakback.set":
+                if self.on_speak_back is not None:
+                    self.on_speak_back(bool(frame["on"]))
             elif kind == "restart":
                 if self.on_restart is not None:
                     self.on_restart()

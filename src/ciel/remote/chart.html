@@ -123,6 +123,8 @@
 
   #mute:hover { border-color: rgba(140, 240, 255, .45); color: var(--text); }
   body.muted #mute { background: rgba(143, 168, 179, .12); border-color: rgba(143, 168, 179, .45); color: #b6c6cd; }
+  #speakback:hover { border-color: rgba(140, 240, 255, .45); color: var(--text); }
+  body.speakback #speakback { border-color: rgba(232, 201, 138, .5); color: var(--gold); }
 
   /* the restart chip: quiet until armed, gold while it wants a second click */
   #restart:hover { border-color: rgba(232, 201, 138, .5); color: var(--gold); }
@@ -423,6 +425,9 @@
   <button class="chip" id="mute" title="While muted, Ciel neither speaks nor listens for its name">
     <span>MIC</span><span class="long" id="mutelabel"> · ON</span>
   </button>
+  <button class="chip" id="speakback" aria-pressed="false" title="Speak typed replies aloud in the room too — to hear the voice from somewhere you can't talk">
+    <span>VOICE</span><span class="long" id="speakbacklabel"> · OFF</span>
+  </button>
   <button class="chip" id="restart" style="display: none" aria-pressed="false" title="Restart Ciel — waits for the current exchange to finish, then relaunches">
     <span aria-hidden="true">↻</span><span class="long" id="restartlabel">RESTART</span>
   </button>
@@ -475,6 +480,8 @@ const rows = document.getElementById("rows");
 const logEl = document.getElementById("log");
 const statelabel = document.getElementById("statelabel");
 const muteBtn = document.getElementById("mute");
+const speakBtn = document.getElementById("speakback");
+const speakLabel = document.getElementById("speakbacklabel");
 const muteLabel = document.getElementById("mutelabel");
 const unmuteBtn = document.getElementById("unmute");
 const connLabel = document.getElementById("connlabel");
@@ -513,6 +520,7 @@ const ROLES = {
 
 let ws = null;
 let muted = false;
+let speakBack = false;
 let retryMs = 500;
 let attempts = 0;
 
@@ -626,6 +634,13 @@ function setState(s) {
   document.body.dataset.state = KNOWN_STATES.has(s) ? s : "idle";
 }
 
+function setSpeakBack(on) {
+  speakBack = !!on;
+  document.body.classList.toggle("speakback", speakBack);
+  speakBtn.setAttribute("aria-pressed", speakBack ? "true" : "false");
+  speakLabel.textContent = speakBack ? " · ON" : " · OFF";
+}
+
 function setMuted(m) {
   muted = m;
   document.body.classList.toggle("muted", m);
@@ -650,6 +665,7 @@ let agents = [];
 // Fact names not listed are simply not shown; a new producer adds a
 // line here, the same rule as unknown transcript labels.
 let world = {};
+let worldSources = {};
 
 function ago(s) {
   s = Math.max(0, Math.round(s));
@@ -700,10 +716,15 @@ const READINGS = {
   hold: (v) => v ? ["VIGIL", "held", true] : null,
 };
 
-function setWorld(facts) {
+function setWorld(facts, sources) {
   world = facts && typeof facts === "object" ? facts : {};
+  if (sources && typeof sources === "object") worldSources = sources;
   renderWorld();
 }
+
+// The source a chip's reading comes from — so a source whose last read
+// failed dims its chip and says so, while the reading itself stands.
+const SOURCE_OF = { agenda: "calendar" };
 
 function renderWorld() {
   const now = Date.now() / 1000;
@@ -715,7 +736,9 @@ function renderWorld() {
     let spec;
     try { spec = READINGS[name](f.value, f, now); } catch { spec = null; }
     if (!spec) continue;
-    const stale = f.ttl_s != null && now - f.observed_at > f.ttl_s;
+    const src = worldSources[SOURCE_OF[name] || f.source];
+    const failing = !!(src && src.ok === false);
+    const stale = (f.ttl_s != null && now - f.observed_at > f.ttl_s) || failing;
     // A place's own reading time is the honest age, not when it was folded in.
     const at = name === "place" && f.value && typeof f.value.at === "number" ? f.value.at : f.observed_at;
     const chip = document.createElement("span");
@@ -734,7 +757,8 @@ function renderWorld() {
       a.textContent = ago(age);
       chip.appendChild(a);
     }
-    chip.title = name + " · " + (f.source || "?") + " · " + new Date(f.observed_at * 1000).toLocaleTimeString();
+    chip.title = name + " · " + (f.source || "?") + " · " + new Date(f.observed_at * 1000).toLocaleTimeString()
+      + (failing ? " · source failing" + (src.error ? ": " + src.error : "") : "");
     worldEl.appendChild(chip);
     shown += 1;
   }
@@ -952,6 +976,7 @@ function connect() {
       }
       setState(f.state || "idle");
       setMuted(!!f.muted);
+      setSpeakBack(!!f.speakback);
       setAgents(f.agents);
       setWorld(f.world);
     } else if (f.type === "row") {
@@ -962,10 +987,12 @@ function connect() {
       if (f.state === "idle") clearAsk(); // the question expired with its turn
     } else if (f.type === "muted") {
       setMuted(!!f.muted);
+    } else if (f.type === "speakback") {
+      setSpeakBack(!!f.on);
     } else if (f.type === "agents") {
       setAgents(f.agents);
     } else if (f.type === "world") {
-      setWorld(f.facts);
+      setWorld(f.facts, f.sources);
     } else if (f.type === "confirm") {
       askQ.textContent = f.text;
       document.body.classList.add("asking");
@@ -1019,6 +1046,7 @@ text.addEventListener("input", () => {
   text.style.height = Math.min(text.scrollHeight, 160) + "px";
 });
 muteBtn.addEventListener("click", () => sendFrame({ type: "mute", muted: !muted }));
+speakBtn.addEventListener("click", () => sendFrame({ type: "speakback.set", on: !speakBack }));
 unmuteBtn.addEventListener("click", () => sendFrame({ type: "mute", muted: false }));
 
 // The restart chip arms on the first click and fires on the second — a

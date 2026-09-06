@@ -27,7 +27,9 @@ from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server
 
+from ciel.brain.permissions import WorkspaceGuard
 from ciel.brain.tools.actions import ACTION_TOOLS, bind_journal
+from ciel.brain.tools.files import FILE_SEARCH_TOOLS, bind_files
 from ciel.brain.tools.grants import GRANT_TOOLS
 from ciel.brain.tools.grants import bind_config as bind_grants
 from ciel.brain.tools.location import LOCATION_TOOLS, bind_locator
@@ -59,7 +61,7 @@ SERVER_NAME = "ciel"
 TOOLS = [
     *MEMORY_TOOLS, *MESSAGE_TOOLS, *ACTION_TOOLS, *PROJECT_TOOLS,
     *SCREEN_TOOLS, *TIMER_TOOLS, *WATCH_TOOLS, *GRANT_TOOLS, *OURA_TOOLS,
-    *LOCATION_TOOLS, *MAIL_TOOLS, *WORLD_TOOLS,
+    *LOCATION_TOOLS, *MAIL_TOOLS, *WORLD_TOOLS, *FILE_SEARCH_TOOLS,
 ]
 
 
@@ -242,6 +244,13 @@ def build_tool_server(
             tools = [t for t in tools if t not in SEND_TOOLS]
     else:
         tools = [t for t in tools if t not in MESSAGE_TOOLS]
+
+    if config.files.enabled:
+        # The search half of file access: the same guard the brain's
+        # hook holds, applied to every file a search would open.
+        bind_files(WorkspaceGuard.from_config(config))
+    else:
+        tools = [t for t in tools if t not in FILE_SEARCH_TOOLS]
 
     if remote is not None and (config.shell.enabled or config.files.enabled):
         # The user's Mac from the hub: the shell when the shell is on,

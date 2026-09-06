@@ -29,7 +29,7 @@ from ciel.interview import prompt as prompts
 from ciel.interview import wire
 from ciel.interview.brain import Backend, BackendError, make_backend
 from ciel.interview.session import InterviewSession
-from ciel.interview.store import SessionStore
+from ciel.interview.store import Reservation, SessionStore
 from ciel.interview.accounts import (
     ACCOUNTS_FILE,
     SECRET_FILE,
@@ -52,6 +52,10 @@ _SCRIPT = _REMOTE / "interview.js"
 
 _LOGIN_WINDOW_S = 900.0
 _LOGIN_LIMIT = 5
+_RECHECK_S = 15.0
+"""How often a live socket's cookie is checked against the account file
+again. A change made in this process closes the socket at once; this is
+for one made elsewhere (``ciel interview reset`` at the terminal)."""
 
 Handler = Callable[[Any], Awaitable[Any]]
 
@@ -78,7 +82,7 @@ class InterviewApp:
         """Failed logins by username and by peer address, for the limiter."""
         self._store = SessionStore(self._dir)
         self._live: dict[tuple[str, str], InterviewSession] = {}
-        """Interviews in progress, by (username, session id)."""
+        """Interviews in progress, by (account id, session id)."""
         self._speaker: Any = None
         """The interviewer's voice — piper, when it loads (phase 3)."""
         self._started = False
@@ -114,6 +118,13 @@ class InterviewApp:
         if self._dev and self._accounts.get("dev") is None:
             self._accounts.create("dev", "admin", password="dev")
             log.info("interview dev account: dev / dev")
+        # Sessions from before ids existed belong to whoever holds the
+        # username now — decided once, here, not by whoever holds it next.
+        for account in self._accounts.list():
+            claimed = self._store.claim_unowned(account.username, account.id)
+            if claimed:
+                log.info("interview: %d older session(s) of %s claimed by account %s",
+                         claimed, account.username, account.id)
         self._started = True
         log.info(
             "interview room at %s (%d account%s, voice: %s)",
@@ -181,13 +192,38 @@ class InterviewApp:
         raw = request.cookies.get(self._cfg.cookie_name)
         if not raw or not self._secret:
             return None
-        username = read_cookie(self._secret, raw)
-        if username is None:
+        ticket = read_cookie(self._secret, raw)
+        if ticket is None:
             return None
-        account = self._accounts.get(username)
-        if account is None or account.disabled:
+        account = self._accounts.get(ticket.username)
+        # The account the cookie was issued for, at the password it was
+        # issued under: a reset, or a delete-and-recreate of the same
+        # username, makes every older cookie a stranger.
+        if account is None or account.disabled or not ticket.matches(account):
             return None
         return account
+
+    def _set_cookie(self, response: Any, request: Any, account: Account) -> None:
+        """A fresh login cookie for ``account`` on ``response``."""
+        expires = time.time() + self._cfg.cookie_days * 86400
+        cookie: dict[str, Any] = dict(
+            max_age=self._cfg.cookie_days * 86400, path=self._cfg.cookie_path,
+            httponly=True, samesite="Lax", secure=self._secure(request),
+        )
+        if self._cfg.cookie_domain:
+            cookie["domain"] = self._cfg.cookie_domain
+        response.set_cookie(
+            self._cfg.cookie_name, sign_cookie(self._secret, account, expires), **cookie
+        )
+
+    async def _evict(self, account_id: str, reason: str) -> None:
+        """End every live interview of the account — the cookie that
+        opened its socket no longer admits, so the socket is closed at
+        once, before the debrief is written."""
+        for key, session in list(self._live.items()):
+            if key[0] == account_id:
+                with contextlib.suppress(Exception):
+                    await session.pause(reason, revoke=True)
 
     def _require(self, request: Any, *, admin: bool = False) -> Account:
         from aiohttp import web
@@ -277,17 +313,8 @@ class InterviewApp:
             log.info("interview login refused for %r from %s", username, peer)
             return self._fail(401, "bad_login", "wrong username or password")
         self._accounts.touch(account.username)
-        expires = now + self._cfg.cookie_days * 86400
         response = web.json_response(self._me_payload(account))
-        cookie: dict[str, Any] = dict(
-            max_age=self._cfg.cookie_days * 86400, path=self._cfg.cookie_path,
-            httponly=True, samesite="Lax", secure=self._secure(request),
-        )
-        if self._cfg.cookie_domain:
-            cookie["domain"] = self._cfg.cookie_domain
-        response.set_cookie(
-            self._cfg.cookie_name, sign_cookie(self._secret, account.username, expires), **cookie
-        )
+        self._set_cookie(response, request, account)
         log.info("interview login: %s from %s", account.username, peer)
         return response
 
@@ -308,7 +335,12 @@ class InterviewApp:
             "caps": self._caps(),
             "limits": {
                 "daily_sessions": self._cfg.daily_sessions_per_user,
+                "daily_regenerations": self._cfg.daily_regenerations_per_user,
                 "max_answer_s": self._cfg.max_answer_s,
+            },
+            "used_today": {
+                "sessions": self._store.usage(account.username, self._today(), "sessions"),
+                "regenerations": self._store.usage(account.username, self._today(), "regenerations"),
             },
         }
 
@@ -356,12 +388,12 @@ class InterviewApp:
                 setup["focus"] = text("focus", 200)
         return setup
 
-    async def _generate_brief(self, setup: dict[str, Any], username: str) -> dict[str, Any]:
+    async def _generate_brief(self, setup: dict[str, Any], account: Account) -> dict[str, Any]:
         """The brief for a setup: a case from the library when asked and
         available, else one structured call to the model."""
         mode = setup["mode"]
         if mode == "case" and setup.get("case_source") == "library":
-            picked = self._pick_case(setup.get("case_type", "any"), username)
+            picked = self._pick_case(setup.get("case_type", "any"), account)
             if picked is not None:
                 return picked
         system, user, schema = prompts.brief_request(mode, setup)
@@ -371,7 +403,7 @@ class InterviewApp:
         finally:
             await backend.close()
 
-    def _pick_case(self, case_type: str, username: str) -> dict[str, Any] | None:
+    def _pick_case(self, case_type: str, account: Account) -> dict[str, Any] | None:
         """A library case not yet seen by this user, if the library exists
         (it arrives in a later phase; until then, generation)."""
         try:
@@ -379,39 +411,63 @@ class InterviewApp:
         except ImportError:
             return None
         seen = {
-            m.get("case_slug") for m in self._store.list(username) if m.get("case_slug")
+            m.get("case_slug")
+            for m in self._store.list(account.username, owner_id=account.id)
+            if m.get("case_slug")
         }
         return CaseLibrary(self._dir / "cases").pick(case_type, exclude=seen)
 
     def _session_row(self, meta: dict[str, Any]) -> dict[str, Any]:
         keys = ("id", "mode", "title", "created", "started", "ended", "duration_s",
-                "question_count", "state", "debriefed", "has_recording")
+                "question_count", "state", "debriefed", "has_recording", "end_reason")
         return {k: meta.get(k) for k in keys}
 
     async def _sessions_list(self, request: Any) -> Any:
         account = self._require(request)
-        rows = [self._session_row(m) for m in self._store.list(account.username)]
+        rows = [
+            self._session_row(m)
+            for m in self._store.list(account.username, owner_id=account.id)
+        ]
         return self._json({"sessions": rows})
 
-    def _over_daily_cap(self, username: str) -> bool:
-        if self._dev:
-            return False  # the loopback room is for working on the page, all day
-        today = time.strftime("%Y-%m-%dT00:00:00", time.localtime())
-        return self._store.count_since(username, today) >= self._cfg.daily_sessions_per_user
+    @staticmethod
+    def _today() -> str:
+        return time.strftime("%Y-%m-%d", time.localtime())
+
+    def _reserve(self, username: str, kind: str) -> Reservation | None:
+        """One unit of today's ``kind`` budget, taken now — before the
+        model call, so the check and the charge are one step and two
+        requests in the same instant cannot both pass it. The reservation
+        names its day: released after midnight, it credits that day, not
+        the new one."""
+        cap = (
+            self._cfg.daily_sessions_per_user if kind == "sessions"
+            else self._cfg.daily_regenerations_per_user
+        )
+        return self._store.reserve(username, self._today(), kind, cap)
+
+    def _release(self, reservation: Reservation) -> None:
+        self._store.release(reservation)
 
     async def _sessions_create(self, request: Any) -> Any:
         account = self._require(request)
         setup = self._clean_setup(await self._body(request))
         if isinstance(setup, str):
             return self._fail(400, "bad_request", setup)
-        if self._over_daily_cap(account.username):
+        slot = self._reserve(account.username, "sessions")
+        if slot is None:
             return self._fail(429, "daily_cap", "that is enough interviews for today — come back tomorrow")
         try:
-            brief = await self._generate_brief(setup, account.username)
+            brief = await self._generate_brief(setup, account)
         except BackendError as exc:
+            # Nothing was produced: the slot goes back.
+            self._release(slot)
             log.warning("brief generation failed for %s: %s", account.username, exc)
             return self._fail(502, "brief_failed", "the interviewer could not prepare a brief; try again")
-        meta = self._store.create(account.username, setup["mode"], setup, brief)
+        except BaseException:
+            self._release(slot)
+            raise
+        meta = self._store.create(account.username, setup["mode"], setup, brief, owner_id=account.id)
         log.info("interview %s prepared for %s (%s)", meta["id"], account.username, setup["mode"])
         return self._json({"session": self._session_row(meta), "brief": brief})
 
@@ -421,7 +477,9 @@ class InterviewApp:
         account = self._require(request)
         session_id = str(request.match_info.get("id", ""))
         try:
-            meta = self._store.load_meta(account.username, session_id)
+            # By owner id, not username: a session left by a deleted
+            # account of the same name is not this account's to see.
+            meta = self._store.load_meta(account.username, session_id, owner_id=account.id)
         except KeyError:
             raise web.HTTPNotFound(
                 text=json.dumps({"error": "no_such_session", "reason": session_id}),
@@ -450,11 +508,18 @@ class InterviewApp:
         if meta.get("state") != "prepared":
             return self._fail(409, "already_started", "this interview has already begun")
         setup = meta.get("setup") or {}
+        slot = self._reserve(account.username, "regenerations")
+        if slot is None:
+            return self._fail(429, "daily_cap", "that is enough new briefs for today — start with this one")
         try:
-            brief = await self._generate_brief(setup, account.username)
+            brief = await self._generate_brief(setup, account)
         except BackendError as exc:
+            self._release(slot)
             log.warning("brief regeneration failed for %s: %s", account.username, exc)
             return self._fail(502, "brief_failed", "the interviewer could not prepare a brief; try again")
+        except BaseException:
+            self._release(slot)
+            raise
         from ciel.interview.store import brief_title
 
         self._store.save_brief(account.username, session_id, brief)
@@ -503,10 +568,10 @@ class InterviewApp:
             raise web.HTTPUnauthorized
         session_id = str(request.query.get("session", ""))
         try:
-            meta = self._store.load_meta(account.username, session_id)
+            meta = self._store.load_meta(account.username, session_id, owner_id=account.id)
         except KeyError:
             raise web.HTTPNotFound
-        key = (account.username, session_id)
+        key = (account.id, session_id)
         session = self._live.get(key)
         if session is None:
             if meta.get("state") not in ("prepared", "live"):
@@ -520,7 +585,7 @@ class InterviewApp:
                 }))
                 await ws.close()
                 return ws
-            session = self._open_session(account.username, session_id, meta)
+            session = self._open_session(account, session_id, meta)
 
         ws = web.WebSocketResponse(heartbeat=30.0, max_msg_size=4 * 1024 * 1024)
         await ws.prepare(request)
@@ -544,10 +609,41 @@ class InterviewApp:
             await ws.close(code=4400, message=b"hello first")
             return ws
 
-        await session.attach(ws, caps)
+        seat = await session.attach(ws, caps)
+        seat.drive()
         log.info("interview %s: %s connected", session_id, account.username)
+        checked = time.monotonic()
         try:
-            async for msg in ws:
+            while True:
+                # The next frame, or the session asking for this seat to
+                # be closed — done here, by the socket's own task, so the
+                # handshake finishes before the connection is torn down.
+                if seat.close_request.done():
+                    code, message = seat.close_request.result()
+                    await ws.close(code=code, message=message.encode("utf-8")[:120])
+                    break
+                recv = asyncio.ensure_future(ws.receive())
+                await asyncio.wait({recv, seat.close_request}, return_when=asyncio.FIRST_COMPLETED)
+                if not recv.done():
+                    recv.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await recv
+                    continue
+                msg = recv.result()
+                if msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.CLOSING, web.WSMsgType.CLOSED, web.WSMsgType.ERROR):
+                    break
+                if not session.live:
+                    break
+                now = time.monotonic()
+                if now - checked >= _RECHECK_S:
+                    # The cookie again, against the file: a reset or a
+                    # disable made outside this process still ends here.
+                    checked = now
+                    current = self._user(request)
+                    if current is None or current.id != account.id:
+                        log.info("interview %s: %s no longer admitted — closing", session_id, account.username)
+                        await ws.close(code=4401, message=b"sign in again")
+                        break
                 if msg.type == web.WSMsgType.TEXT:
                     try:
                         frame = wire.decode(msg.data, "c2h")
@@ -565,22 +661,23 @@ class InterviewApp:
             log.debug("interview %s: socket errored", session_id, exc_info=True)
         finally:
             session.detach(ws)
+            seat.done()
             log.info("interview %s: %s disconnected", session_id, account.username)
         return ws
 
-    def _open_session(self, username: str, session_id: str, meta: dict[str, Any]) -> InterviewSession:
-        brief = self._store.load_brief(username, session_id)
+    def _open_session(self, account: Account, session_id: str, meta: dict[str, Any]) -> InterviewSession:
+        brief = self._store.load_brief(account.username, session_id)
         session = InterviewSession(
-            cfg=self._cfg, store=self._store, username=username, session_id=session_id,
-            meta=meta, brief=brief, backend=self._backend(), debrief_backend=self._backend,
-            speaker=self._speaker, on_finished=self._session_finished,
+            cfg=self._cfg, store=self._store, username=account.username, session_id=session_id,
+            owner_id=account.id, meta=meta, brief=brief, backend=self._backend(),
+            debrief_backend=self._backend, speaker=self._speaker, on_finished=self._session_finished,
         )
-        self._live[(username, session_id)] = session
-        log.info("interview %s opened for %s (%d live)", session_id, username, len(self._live))
+        self._live[(account.id, session_id)] = session
+        log.info("interview %s opened for %s (%d live)", session_id, account.username, len(self._live))
         return session
 
     def _session_finished(self, session: InterviewSession) -> None:
-        self._live.pop((session.username, session.session_id), None)
+        self._live.pop((session.owner_id, session.session_id), None)
 
     # ── admin ────────────────────────────────────────────────────────────────
 
@@ -628,6 +725,9 @@ class InterviewApp:
             return self._fail(404, "no_such_account", username)
         except ValueError as exc:
             return self._fail(400, "bad_request", str(exc))
+        target = self._accounts.get(username)
+        if target is not None:
+            await self._evict(target.id, "your password was reset — sign in again")
         log.info("interview account %r reset by %s", username, admin.username)
         return self._json({"username": username, "password": password, "chosen": chosen is not None})
 
@@ -646,7 +746,16 @@ class InterviewApp:
         except ValueError as exc:
             return self._fail(400, "bad_request", str(exc))
         log.info("interview account %r changed its own password", account.username)
-        return self._json({"ok": True})
+        # The reset retired the cookie this request arrived on; the same
+        # person keeps their seat with a fresh one. Every other browser
+        # signed in as them is out — sockets included, which a cookie
+        # check alone never reaches.
+        await self._evict(account.id, "your password changed — sign in again")
+        refreshed = self._accounts.get(account.username)
+        response = self._json({"ok": True})
+        if refreshed is not None:
+            self._set_cookie(response, request, refreshed)
+        return response
 
     async def _set_disabled(self, request: Any, disabled: bool) -> Any:
         admin = self._require(request, admin=True)
@@ -657,6 +766,8 @@ class InterviewApp:
             account = self._accounts.set_disabled(username, disabled)
         except KeyError:
             return self._fail(404, "no_such_account", username)
+        if disabled:
+            await self._evict(account.id, "your account was disabled")
         return self._json({"account": self._account_row(account)})
 
     async def _admin_disable(self, request: Any) -> Any:
@@ -670,10 +781,19 @@ class InterviewApp:
         username = self._target(request)
         if username == admin.username:
             return self._fail(400, "bad_request", "you cannot delete yourself")
+        target = self._accounts.get(username)
         try:
             self._accounts.delete(username)
         except KeyError:
             return self._fail(404, "no_such_account", username)
+        if target is not None:
+            await self._evict(target.id, "your account was removed")
+        # The sessions and the ledger go with the account: the next holder
+        # of the username starts empty, and the old data is kept aside.
+        try:
+            self._store.retire(username, target.id if target else "")
+        except OSError:
+            log.warning("could not retire the sessions of %r", username, exc_info=True)
         log.info("interview account %r deleted by %s", username, admin.username)
         return self._json({"ok": True})
 

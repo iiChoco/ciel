@@ -20,14 +20,17 @@ files is far cheaper than the class of bug that avoids.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import logging
 import os
 import re
+import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Iterable, Iterator, Literal
 
 log = logging.getLogger(__name__)
 
@@ -92,14 +95,56 @@ class Memory:
         )
 
 
+_UMASK = os.umask(0)
+os.umask(_UMASK)
+"""The process umask, read once: what a fresh file's mode is masked by."""
+
+
 def atomic_write(path: Path, text: str) -> None:
     """Write via temp-file-and-replace, so a crash mid-write can't leave a
     half-written file. These files are the truth their stores read back;
     "mostly written" is worse than "previous version". Same pattern as the
-    session store, shared here for every file-backed store to use."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    session store, shared here for every file-backed store to use.
+
+    The temp file is unique per call (two writers racing on one name would
+    replace each other's half-written file), and the result keeps the
+    target's mode — an owner-only file stays owner-only, and a new file
+    gets the ordinary umask default rather than mkstemp's 0600.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        mode = 0o666 & ~_UMASK
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
+@contextlib.contextmanager
+def exclusive_lock(path: Path) -> Iterator[None]:
+    """One writer at a time on ``path``'s lock file, across threads and
+    processes — for a read-modify-write of a whole file, where atomic
+    replacement alone still lets the slower writer put back a stale copy
+    (the lost update). ``flock`` on ``<name>.lock`` beside the file; a
+    crash releases it with the descriptor."""
+    lock_path = path.with_name(path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def slugify(text: str, *, max_length: int = 60) -> str:

@@ -38,6 +38,14 @@ _capturer: Any | None = None
 means capture here — the single process, or the spoke's executor."""
 
 
+_JPEG_QUALITY = 75
+"""What the screenshots are re-encoded at (sips' scale): a known bound
+rather than sips' unstated default, which lands near it. Text on a 1568px
+frame stays crisp at 75; a busy display is 300-450 KB, so two of them in
+one tool result overran the SDK's default one-megabyte line — the buffer
+in ``brain/agent.py`` is the fix, this is the belt."""
+
+
 class _PermissionMissing(Exception):
     """Screen Recording permission has not been granted to this process."""
 
@@ -87,8 +95,12 @@ def _capture_sync(max_edge: int) -> list[bytes]:
         for path in paths:
             if not path.exists():
                 continue  # fewer displays than NSScreen reported — fine
+            # Scaled, and re-encoded at a fixed JPEG quality: sips' default
+            # leaves a busy display at 400-500 KB, and every display rides
+            # in one tool result the SDK must frame as a single line.
             subprocess.run(
-                ["/usr/bin/sips", "--resampleHeightWidthMax", str(max_edge), str(path)],
+                ["/usr/bin/sips", "--resampleHeightWidthMax", str(max_edge),
+                 "-s", "format", "jpeg", "-s", "formatOptions", str(_JPEG_QUALITY), str(path)],
                 check=True,
                 capture_output=True,
                 timeout=15,

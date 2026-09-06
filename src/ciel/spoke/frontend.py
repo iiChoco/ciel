@@ -98,6 +98,10 @@ class Spoke:
     """Runs the room until stopped."""
 
     _world: WorldRelay | None = None
+    _hub_lane: str | None = None
+    """The lane of the hub turn being played: "voice" (ours — the ack
+    filler, the follow-up window) or "web" (speak back — a typed turn
+    the user wants to hear, played at idle with none of that)."""
     """The world relay, or None when ``[world]`` is off — a class default
     so a probe that builds the spoke by ``__new__`` runs without one."""
 
@@ -267,9 +271,15 @@ class Spoke:
                             self._set_muted(on_disk)
                         if self._world is not None:
                             self._world.flush()
-                        # The mirror's own ringing: only what the hub can't.
+                        # The mirror's own ringing: only what the hub can't
+                        # — and never into a muted room. Mute stops the
+                        # player but does not cover a playback that starts
+                        # later; a due timer is held (not marked rung) and
+                        # rings on the first poll after the unmute, the same
+                        # late announcement the hub would make.
                         if (
                             self._state is State.WAITING
+                            and not self._muted
                             and not self._delivering and not self._ringing
                         ):
                             due = self._timers.due(now_wall, hub_connected=self._link.connected)
@@ -383,16 +393,17 @@ class Spoke:
         await self._stt.warm_up()
 
     async def _warm_up_tts(self) -> None:
-        try:
-            await self._tts.warm_up()
-            return
-        except Exception as exc:  # noqa: BLE001 - any failure means fall back
-            log.warning("%s failed to start (%s) — falling back to `say`",
-                        type(self._tts).__name__, exc)
-        from ciel.pipeline import _apply_effect
-        from ciel.tts.macos_say import SayTTS
+        from ciel.pipeline import _ENGINE_CHAIN, fallback_tts
 
-        self._tts = _apply_effect(SayTTS(self._config.tts), self._config)
+        for _ in range(len(_ENGINE_CHAIN)):
+            try:
+                await self._tts.warm_up()
+                return
+            except Exception as exc:  # noqa: BLE001 - any failure means fall back
+                log.warning("%s failed to start (%s) — falling back",
+                            type(self._tts).__name__, exc)
+                await self._tts.close()
+                self._tts = fallback_tts(self._tts, self._config)
         await self._tts.warm_up()
 
     async def _shutdown(self) -> None:
@@ -559,10 +570,19 @@ class Spoke:
     def _on_frame(self, frame: dict[str, Any]) -> None:
         kind = frame["type"]
         if kind == "turn.begin":
-            if frame.get("lane") != "voice":
+            lane = frame.get("lane")
+            if lane == "web":
+                # Speak back: the sentences play, nothing else changes —
+                # no filler, no BUSY, no follow-up window afterwards.
+                self._hub_turn = frame["turn_id"]
+                self._hub_lane = "web"
+                self._prev_kind = None
+                return
+            if lane != "voice":
                 return
             self._awaiting_hub = False
             self._hub_turn = frame["turn_id"]
+            self._hub_lane = "voice"
             self._turn_deadline = time.monotonic() + self._config.hub.speak_timeout_s
             self._prev_kind = None
             self._state = State.BUSY
@@ -578,6 +598,7 @@ class Spoke:
         elif kind == "turn.end":
             if frame["turn_id"] == self._hub_turn:
                 self._hub_turn = None
+                self._hub_lane = None
                 self._confirm = None
                 asyncio.create_task(self._ack_done())
         elif kind == "confirm.request":
@@ -614,6 +635,11 @@ class Spoke:
         """One sentence through the speakers, receipted."""
         assert self._player is not None
         completed = True
+        spoken_back = self._hub_lane == "web"
+        if spoken_back:
+            # The room is Ciel's for the sentence: the wake loop must not
+            # hear the voice as a wake, and a timer must not ring over it.
+            self._delivering = True
         try:
             await self._ack_done()
             if (
@@ -626,7 +652,8 @@ class Spoke:
             self._indicator.set_state("reasoning" if kind == "thinking" and
                                       self._config.brain.speak_thinking else "speaking")
             completed = await self._player.play(self._tts.stream(text))
-            self._spoke = True
+            if not spoken_back:
+                self._spoke = True  # a typed turn earns no follow-up window
             if not completed:
                 if self._player.device_lost:
                     print("  (audio output lost)")
@@ -641,7 +668,11 @@ class Spoke:
                 "type": "turn.played", "turn_id": turn_id, "n": n,
                 "completed": completed,
             })
-            self._indicator.set_state("thinking")
+            if spoken_back:
+                self._delivering = False
+                self._indicator.set_state("idle")
+            else:
+                self._indicator.set_state("thinking")
 
     async def _ask(self, confirm_id: str, text: str, listen: bool) -> None:
         """Speak a confirm line; open the answer window when asked to."""
@@ -716,12 +747,18 @@ class Spoke:
         """A timer the hub could not ring: the ring, the announcement,
         the same words the hub would have used."""
         assert self._player is not None and self._mic is not None
+        if self._muted:
+            # Rechecked at the moment of playback, not just at the poll:
+            # the switch can move between the two. Held, not rung.
+            return
         self._ringing = True
         try:
             self._indicator.set_state("speaking")
             with contextlib.suppress(Exception):
                 await self._player.play(_one(ring_pcm(self._tts.sample_rate)))
             for timer in due:
+                if self._muted:
+                    break  # muted mid-ring: the rest wait for the unmute
                 text = self._timers.announcement(timer)
                 print(f"\n  ciel ({timer.kind}, local): {text}", flush=True)
                 self._timers.mark_rung(timer.id, time.time())

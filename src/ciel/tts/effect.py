@@ -125,6 +125,12 @@ class VoiceEffect:
     def sample_rate(self) -> int:
         return self._engine.sample_rate
 
+    @property
+    def inner(self) -> TextToSpeech:
+        """The engine under the treatment — for the fallback chain, which
+        needs to know *which* engine failed to warm up."""
+        return self._engine
+
     async def warm_up(self) -> None:
         await self._engine.warm_up()
         self._prepare()

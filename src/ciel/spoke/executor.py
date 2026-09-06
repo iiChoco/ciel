@@ -194,10 +194,11 @@ class Executor:
             return []
         return [_watch_dict(w) for w in self._watcher.active()]
 
-    async def _calendar_agenda(self) -> list[str]:
+    async def _calendar_agenda(self) -> list[str] | None:
         if self._calendar is None:
-            return []
-        return list(await self._calendar.agenda_today())
+            return None
+        rows = await self._calendar.agenda_today()
+        return None if rows is None else list(rows)
 
     # ── the machine ──────────────────────────────────────────────────────────
 
