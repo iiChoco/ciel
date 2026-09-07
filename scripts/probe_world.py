@@ -14,6 +14,8 @@ spoke's relay sends one ``fact`` frame per name, from the loop, and
 resends the set after a reconnect; the hub absorbs those frames into
 its table, source-stamped; and a pipeline built with a table opens its
 turn with the block after the lane's note and before the held notes.
+The same public/private turn boundary closes and reopens Spotify's
+account tools, so a guild turn cannot borrow the private player's state.
 
 And the spine under that: an observation is kept per source and the
 newest wins, an older one is refused, the ring's numbers merge across
@@ -641,13 +643,16 @@ async def probe_turn() -> None:
           "(Now — It is 3:42 PM" in prompt and "is connected" in prompt
           and "Place:" not in prompt and "The user is" not in prompt)
     from ciel.brain.tools import world as world_tool
+    from ciel.brain.tools import spotify as spotify_tool
 
     check("...and the world_now tool is scoped the same way for that turn",
           world_tool._public is True)
+    check("a public turn closes the Spotify account tools too", spotify_tool._public is True)
     await p._run_turn(TurnRequest(lane="discord", text="hi", channel=None, public=False),
                       _DiscordSink(p, link.send))
     check("a DM's turn has the lot",
           "Place: home" in p._brain.prompts[1] and world_tool._public is False)
+    check("a private turn reopens the Spotify account tools", spotify_tool._public is False)
 
     p = make_pipeline(in_prompt=False)
     await p._run_turn(TurnRequest(lane="typed", text="hi"), _TextSink(p))

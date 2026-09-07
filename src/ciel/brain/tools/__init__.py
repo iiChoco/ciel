@@ -41,6 +41,7 @@ from ciel.brain.tools.messages import bind_client as bind_messages
 from ciel.brain.tools.oura import OURA_TOOLS, bind_oura
 from ciel.brain.tools.projects import PROJECT_TOOLS, bind_projects
 from ciel.brain.tools.screen import SCREEN_TOOLS, bind_screen
+from ciel.brain.tools.spotify import SPOTIFY_TOOLS, bind_spotify, spotify_control
 from ciel.brain.tools.timers import TIMER_TOOLS, bind_timers
 from ciel.brain.tools.watch import WATCH_TOOLS, bind_watcher
 from ciel.brain.tools.world import WORLD_TOOLS, bind_world
@@ -51,6 +52,7 @@ from ciel.memory.store import MemoryStore
 from ciel.messages import MessagesClient
 from ciel.oura import OuraClient, build_auth
 from ciel.projects import ProjectStore
+from ciel.spotify import SpotifyClient
 from ciel.timers import TimerService
 
 log = logging.getLogger(__name__)
@@ -61,7 +63,7 @@ SERVER_NAME = "ciel"
 TOOLS = [
     *MEMORY_TOOLS, *MESSAGE_TOOLS, *ACTION_TOOLS, *PROJECT_TOOLS,
     *SCREEN_TOOLS, *TIMER_TOOLS, *WATCH_TOOLS, *GRANT_TOOLS, *OURA_TOOLS,
-    *LOCATION_TOOLS, *MAIL_TOOLS, *WORLD_TOOLS, *FILE_SEARCH_TOOLS,
+    *LOCATION_TOOLS, *MAIL_TOOLS, *WORLD_TOOLS, *FILE_SEARCH_TOOLS, *SPOTIFY_TOOLS,
 ]
 
 
@@ -185,6 +187,12 @@ def build_tool_server(
         # Same reasoning as memory: an always-refusing tool wastes turns —
         # and this one is the escalation channel, so absent means absent.
         tools = [t for t in tools if t not in GRANT_TOOLS]
+
+    bind_spotify(SpotifyClient(config.spotify) if config.spotify.enabled else None)
+    if not config.spotify.enabled:
+        tools = [t for t in tools if t not in SPOTIFY_TOOLS]
+    elif not config.journal.enabled:
+        tools = [t for t in tools if t is not spotify_control]
 
     auth = build_auth(config.oura) if config.oura.armed else None
     if auth is not None:

@@ -11,21 +11,33 @@ shell and files — and the tools that bind them, end to end. Then the
 edges: no spoke, a spoke that never answers (the deadline, the cancel),
 the spoke leaving mid-call, an unknown tool, and the executor's own
 guards — the deny tier refused whatever the hub says, the confirm tier
-refused without the hub's word, the workspace guard on the files.
+refused without the hub's word, the workspace guard on the files. Quiet
+Git writes are refused; cancellation, both deadlines, and shutdown stop
+and reap real shell descendants. Mac overwrites keep complete owner-only
+snapshots on the hub, restore through ordinary guards, and record honest
+notes for missing, oversized, or unreachable originals.
 """
+
+from __future__ import annotations
 
 import asyncio
 import base64
 import json
+import shlex
 import sys
 import tempfile
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from ciel.brain.tools import mac as mac_tools
+from ciel.brain.agent import Brain
+from ciel.brain.permissions import WorkspaceGuard
+from ciel.journal import ActionJournal
 from ciel.brain.tools import watch as watch_tool
 from ciel.brain.tools.screen import bind_screen, look_at_screen
 from ciel.config import Config, FilesConfig, HubConfig, ShellConfig, WebConfig
@@ -148,6 +160,7 @@ def make_config(tmp: Path) -> Config:
         hub=replace(HubConfig(), speak_timeout_s=1.0),
         shell=replace(ShellConfig(), enabled=True, command_timeout_s=2.0),
         files=replace(FilesConfig(), enabled=True, workspace=tmp / "ws"),
+        journal=replace(Config().journal, dir=tmp / "journal"),
     )
 
 
@@ -268,6 +281,17 @@ async def probe_mac(config: Config) -> None:
           "refused on the Mac" in text_of(out))
     out = await mac_tools.mac_read_file.handler({"path": "~/.ssh/id_rsa"})
     check("a forbidden name is refused on the Mac", "refused on the Mac" in text_of(out))
+    left, right = config.files.workspace / "left", config.files.workspace / "right"
+    left.write_text("before")
+    right.write_text("after")
+    output = config.state_dir / "outside.patch"
+    command = f"git diff --no-index --output={shlex.quote(str(output))} {shlex.quote(str(left))} {shlex.quote(str(right))}"
+    res = await pair.server.rpc("shell.run", {"command": command, "confirmed": False}, 5)
+    check("a Git output option cannot write outside the workspace without a yes", not res["ok"] and not output.exists())
+    cookie = config.files.workspace / "sections-cookie"
+    cookie.write_text("SYNTHETIC")
+    res = await pair.server.rpc("files.read", {"path": str(cookie)}, 5)
+    check("the spoke refuses the signup credential too", not res["ok"] and "off limits" in res["error"])
     await pair.close()
 
 
@@ -316,12 +340,123 @@ async def probe_edges(config: Config) -> None:
     await pair.close()
 
 
+async def probe_snapshots(config: Config) -> None:
+    pair = Pair(config)
+    remote = RemoteBindings(pair.server, config)
+    journal = ActionJournal(config.journal)
+    brain = Brain(config, journal=journal, mac_tools=True, mac_snapshot=remote.mac.snapshot_file)
+    recorder = brain._recorder
+    assert recorder is not None
+    mac_tools.bind_mac(remote.mac, config.shell)
+    target = config.files.workspace / "restore.txt"
+    original = "previous contents\n" * 1500
+    target.write_text(original)
+    args = {"path": "restore.txt", "content": "replacement"}
+    payload = {"tool_name": "mcp__ciel__mac_write_file", "tool_input": args}
+    await recorder.before(payload, "overwrite", None)
+    result = await mac_tools.mac_write_file.handler(args)
+    await recorder.after({**payload, "tool_response": result}, "overwrite", None)
+    entry = journal.recent(1)[0]
+    saved = Path(entry["snapshot"])
+    check("a Mac write saves its real previous contents on the hub before overwriting", saved.read_text() == original
+          and target.read_text() == "replacement" and entry["note"] is None)
+    check("the complete snapshot is owner-only and outside the file workspace", saved.stat().st_mode & 0o777 == 0o600
+          and not saved.is_relative_to(config.files.workspace))
+    check("the ordinary read guard can read the snapshot for undo", WorkspaceGuard.from_config(config).permits(str(saved)) is None)
+    check("a snapshot is never offered as a write destination", WorkspaceGuard.from_config(config).permits(str(saved), write=True) is not None)
+    undo = {**payload, "tool_input": {**args, "content": saved.read_text()}}
+    await recorder.before(undo, "undo", None)
+    result = await mac_tools.mac_write_file.handler(undo["tool_input"])
+    await recorder.after({**undo, "tool_response": result}, "undo", None)
+    check("ordinary guarded Mac tools can restore every character", target.read_text() == original)
+    check("the undo itself has a snapshot too", Path(journal.recent(1)[0]["snapshot"]).read_text() == "replacement")
+    for name, contents, wanted in (("missing.txt", None, "did not exist"), ("large.txt", "x" * (config.journal.max_snapshot_kb * 1024 + 1), "too large"), ("empty.txt", "", None)):
+        if contents is not None:
+            (config.files.workspace / name).write_text(contents)
+        item = {**payload, "tool_input": {"path": name, "content": "new"}}
+        await recorder.before(item, name, None)
+        result = await mac_tools.mac_write_file.handler(item["tool_input"])
+        await recorder.after({**item, "tool_response": result}, name, None)
+        entry = journal.recent(1)[0]
+        check(f"the Mac's {name} has an honest undo record", (entry["snapshot"] is None and wanted in entry["note"])
+              if wanted else Path(entry["snapshot"]).read_bytes() == b"")
+    for path in ("sections-cookie", str(config.state_dir / "outside.patch")):
+        result = await pair.server.rpc("files.snapshot", {"path": path, "max_bytes": 1000}, 5)
+        check("the snapshot reader refuses a secret or a path outside the write boundary", not result["ok"])
+    pair.leave()
+    await recorder.before(payload, "offline", None)
+    check("an unreachable Mac records why no snapshot was kept", recorder._pending["offline"][0] is None
+          and "not connected" in recorder._pending["offline"][1])
+    await pair.close()
+
+
+async def probe_process_cleanup(config: Config) -> None:
+    immediate = Executor(config, lambda frame: True)
+    immediate.handle({"type": "tool.request", "rpc_id": "early", "tool": "shell.run", "args": {"command": "echo never"}})
+    immediate.handle({"type": "tool.cancel", "rpc_id": "early"})
+    await immediate.close()
+    check("a call canceled before it starts leaves no unfinished ledger entry", not immediate._tasks)
+    for cause in ("cancel", "rpc deadline", "shell deadline", "close", "hub cancel", "startup cancel"):
+        marker = config.state_dir / (cause.replace(" ", "-") + "-late")
+        ready = marker.with_suffix(".ready")
+        worker = marker.with_suffix(".py")
+        child = f"import time; from pathlib import Path; time.sleep(0.5); Path({str(marker)!r}).write_text('late')"
+        worker.write_text("import subprocess, sys\nfrom pathlib import Path\n"
+                          + f"child = subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+                          + f"Path({str(ready)!r}).write_text(str(child.pid))\nchild.wait()\n")
+        cfg = replace(config, shell=replace(config.shell, command_timeout_s=0.2 if cause == "shell deadline" else 3.0))
+        pair = Pair(cfg)
+        processes: list[asyncio.subprocess.Process] = []
+        spawn = asyncio.create_subprocess_shell
+
+        async def track(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+            proc = await spawn(*args, **kwargs)
+            processes.append(proc)
+            if cause == "startup cancel":
+                await asyncio.sleep(0.15)
+            return proc
+
+        with patch("asyncio.create_subprocess_shell", track):
+            task = asyncio.create_task(pair.server.rpc("shell.run", {"command": shlex.quote(sys.executable) + " " + shlex.quote(str(worker)), "confirmed": True}, 0.2 if cause == "rpc deadline" else 3.0))
+            for _ in range(100):
+                if ready.exists():
+                    break
+                await asyncio.sleep(0.005)
+            assert ready.exists(), cause
+            if cause == "cancel":
+                rpc_id = next(iter(pair.executor._tasks))
+                pair.executor.handle({"type": "tool.cancel", "rpc_id": rpc_id})
+                cleanup = pair.executor._tasks.get(rpc_id)
+                if cleanup is not None:
+                    await cleanup
+                task.cancel()
+            elif cause == "close":
+                await pair.executor.close()
+                task.cancel()
+            elif cause in {"hub cancel", "startup cancel"}:
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            # A returned RPC cancellation has queued the frame; let its
+            # receiver finish cleanup before checking the OS process.
+            for _ in range(100):
+                if processes and processes[0].returncode is not None:
+                    break
+                await asyncio.sleep(0.005)
+            await asyncio.sleep(0.6)
+            check(f"{cause} stops the shell and its delayed child", not marker.exists())
+            check(f"{cause} reaps the shell and finishes its task", bool(processes)
+                  and processes[0].returncode is not None and not pair.executor._tasks)
+        await pair.close()
+
+
 async def main() -> None:
     tmp = Path(tempfile.mkdtemp())
     config = make_config(tmp)
     await probe_senses(config)
     await probe_mac(config)
     await probe_edges(config)
+    await probe_snapshots(config)
+    await probe_process_cleanup(config)
     print(f"\nall {len(CHECKS)} checks passed")
 
 

@@ -629,8 +629,10 @@ function addRow(role, body, t) {
   if (stick) logEl.scrollTop = logEl.scrollHeight;
 }
 
-function setState(s) {
-  statelabel.textContent = s;
+// The chip names the state and, while listening, what opened the window:
+// "listening · snap" reads differently from "listening · spoken".
+function setState(s, source) {
+  statelabel.textContent = source && s === "listening" ? s + " \u00b7 " + source : s;
   document.body.dataset.state = KNOWN_STATES.has(s) ? s : "idle";
 }
 
@@ -974,7 +976,7 @@ function connect() {
         for (const r of f.history || []) addRow(r.role, r.text, r.t);
         logEl.scrollTop = logEl.scrollHeight;
       }
-      setState(f.state || "idle");
+      setState(f.state || "idle", f.source);
       setMuted(!!f.muted);
       setSpeakBack(!!f.speakback);
       setAgents(f.agents);
@@ -983,7 +985,7 @@ function connect() {
       addRow(f.role, f.text, f.t);
       if (f.role && f.role.startsWith("you-confirm")) clearAsk();
     } else if (f.type === "state") {
-      setState(f.state);
+      setState(f.state, f.source);
       if (f.state === "idle") clearAsk(); // the question expired with its turn
     } else if (f.type === "muted") {
       setMuted(!!f.muted);

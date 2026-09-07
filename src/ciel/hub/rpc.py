@@ -194,6 +194,18 @@ class RemoteMac(_Remote):
     async def read_file(self, path: str) -> str:
         return str(await self.call("files.read", path=path))
 
+    async def snapshot_file(self, path: str, max_bytes: int) -> tuple[bytes | None, str | None]:
+        """Read the actual Mac file in full for the hub's journal, within its bound."""
+        import base64
+
+        result = await self.call("files.snapshot", path=path, max_bytes=max_bytes)
+        encoded = result.get("data")
+        if encoded is None:
+            return None, str(result.get("note") or "Mac snapshot unavailable")
+        if len(encoded) > 4 * ((max_bytes + 2) // 3):
+            raise ValueError("Mac snapshot exceeded the journal's limit")
+        return base64.b64decode(encoded, validate=True), None
+
     async def write_file(self, path: str, content: str) -> str:
         return str(await self.call("files.write", path=path, content=content))
 

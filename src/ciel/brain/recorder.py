@@ -9,6 +9,12 @@ create-event returns lives only in the response). Only calls that actually ran
 are journaled: a denied call has no PostToolUse, and an undo log padded with
 things that never happened would send the model undoing fiction.
 
+**A Mac path is read on the Mac.** The hub's pre-hook requests bounded
+previous contents from the spoke and saves an owner-only snapshot beside
+its own journal, where ordinary Read can recover them. Missing, oversized,
+or unreachable originals leave an explicit note instead of an invented
+snapshot of a similarly named file on the hub.
+
 This recorder never denies anything — it observes. Keeping it separate from
 the guards keeps that property legible: nothing in here can be talked into
 becoming an enforcement path, and nothing in the guards grows a side effect.
@@ -19,7 +25,7 @@ from __future__ import annotations
 import logging
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from claude_agent_sdk import HookContext, HookMatcher
 
@@ -66,8 +72,10 @@ class ActionRecorder:
         watched: frozenset[str],
         verify_emitter: "Callable[[str, dict[str, Any]], None] | None" = None,
         verify_for: frozenset[str] | None = None,
+        mac_snapshot: Callable[[str, int], Awaitable[tuple[bytes | None, str | None]]] | None = None,
     ) -> None:
         self._journal = journal
+        self._mac_snapshot = mac_snapshot
         self._watched = frozenset(watched) | set(_FILE_MUTATORS) | {"Bash"}
         # Read-back verification (Vigil): the confirm-gated tools are the
         # outward-acting ones whose success is worth independently observing,
@@ -95,11 +103,23 @@ class ActionRecorder:
         context: HookContext,
     ) -> dict[str, Any]:
         tool_name = payload.get("tool_name", "")
-        path_field = _FILE_MUTATORS.get(tool_name)
+        remote = tool_name == "mcp__ciel__mac_write_file"
+        path_field = "path" if remote else _FILE_MUTATORS.get(tool_name)
         if path_field is not None and tool_use_id is not None:
             raw = (payload.get("tool_input") or {}).get(path_field)
             if raw:
-                self._pending[tool_use_id] = self._journal.snapshot(Path(str(raw)))
+                if remote:
+                    snapshot, note = None, "Mac snapshot unavailable"
+                    if self._mac_snapshot is not None:
+                        try:
+                            data, note = await self._mac_snapshot(str(raw), self._journal.max_snapshot_bytes)
+                            if data is not None:
+                                snapshot, note = self._journal.snapshot_bytes(str(raw), data)
+                        except Exception as exc:
+                            note = f"Mac snapshot failed ({exc})"
+                    self._pending[tool_use_id] = snapshot, note
+                else:
+                    self._pending[tool_use_id] = self._journal.snapshot(Path(str(raw)))
                 while len(self._pending) > 32:
                     self._pending.popitem(last=False)
         return {}

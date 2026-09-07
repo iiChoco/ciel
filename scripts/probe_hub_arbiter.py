@@ -261,9 +261,17 @@ async def probe_seat() -> None:
         and not server.pending
         and any(f["type"] == "ack" and f["seq"] == 1 for f in frames(q1)),
     )
+    seen: list[tuple[bool, str | None]] = []
+    server.on_voice_state = lambda listening, source: seen.append((listening, source))
     server._on_frame(json.dumps({"type": "voice.state", "listening": True, "speaking": True}), "spoke")
     check("voice.state lands in the snapshot's inputs",
           server.spoke_listening and server.spoke_speaking)
+    server._on_frame(json.dumps({"type": "voice.state", "listening": True, "speaking": False, "source": "snap"}), "spoke")
+    server._on_frame(json.dumps({"type": "voice.state", "listening": False, "speaking": False, "source": "snap"}), "spoke")
+    check("the window's source is kept while it is open, dropped when it closes, and reported each time",
+          seen == [(True, None), (True, "snap"), (False, None)] and server.spoke_wake_source is None)
+    server.on_voice_state = None
+    server._on_frame(json.dumps({"type": "voice.state", "listening": True, "speaking": True}), "spoke")
     q2 = seat_spoke(server, "spoke2")
     await asyncio.sleep(0)
     check(

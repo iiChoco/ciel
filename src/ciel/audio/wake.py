@@ -66,6 +66,9 @@ class HotkeyWake:
     lock.
     """
 
+    source = "hotkey"
+    """How this detector addresses Ciel, for the Chart's chip."""
+
     def __init__(self, prompt: str = "[press Enter to talk]") -> None:
         self._prompt = prompt
         self._armed = False
@@ -102,6 +105,8 @@ class AlwaysAwake:
     Only sane alone in a quiet room. With a television on, Ciel answers it.
     """
 
+    source = "spoken"
+
     async def start(self) -> None:
         return None
 
@@ -128,6 +133,8 @@ class OpenWakeWord:
     goes live, and the spoken ready line takes the wake phrase from the
     path's stem.
     """
+
+    source = "spoken"
 
     def __init__(
         self,
@@ -239,11 +246,17 @@ class GestureWake:
         detector,  # noqa: ANN001 - GestureDetector
         wake: set[str],
         actions: "dict[str, tuple[str, Callable[[], Awaitable[object]]]] | None" = None,
+        log_candidates: bool = False,
     ) -> None:
         self._detector = detector
         self._wake = set(wake)
         self._actions = dict(actions or {})
+        self._log_candidates = log_candidates
         self._tasks: set[asyncio.Task] = set()
+        self.veto = None
+        """The ear's second opinion, started with the ear; None when off."""
+        self.source = "snap"
+        """The gesture that last woke, in the words the Chart shows."""
         names = {"snap": "snap", "double_clap": "clap twice"}
         self.phrases = tuple(
             names[kind] if kind in self._wake else f"{names[kind]} to {self._actions[kind][0]}"
@@ -253,13 +266,30 @@ class GestureWake:
         """How the ready line names each gesture, in the order they fire."""
 
     async def start(self) -> None:
+        if self.veto is not None:
+            await self.veto.start()
         log.info("gesture wake ready (%s)", ", ".join(self.phrases))
 
     def push(self, frame: bytes) -> bool:
         for row in self._detector.push(frame):
             if row.type != "gesture":
+                if self._log_candidates:
+                    log.info(
+                        "ear: %s (peak %.2f, width %.1f ms, tilt %.2f, fall %.0f dB)%s",
+                        row.kind, row.peak, row.width_ms, row.tilt, row.fall_db,
+                        f" — {row.reason}" if row.reason else "",
+                    )
                 continue
             shown = row.kind.replace("_", " ")
+            if row.kind not in self._actions and row.kind not in self._wake:
+                # A lone clap released unpaired is the commonest way a
+                # double clap fails, and it used to leave no trace.
+                if self._log_candidates:
+                    log.info(
+                        "ear: %s stood alone (peak %.2f, width %.1f ms, tilt %.2f, fall %.0f dB) — no second clap inside %d ms",
+                        shown, row.peak, row.width_ms, row.tilt, row.fall_db, self._detector.config.double_max_ms,
+                    )
+                continue
             if row.kind in self._actions:
                 verb, action = self._actions[row.kind]
                 log.info("gesture: %s — %s (peak %.2f, tilt %.2f)", shown, verb, row.peak, row.tilt)
@@ -268,6 +298,7 @@ class GestureWake:
                 task.add_done_callback(self._tasks.discard)
             elif row.kind in self._wake:
                 log.info("wake: %s (peak %.2f, tilt %.2f)", shown, row.peak, row.tilt)
+                self.source = shown
                 return True
         return False
 
@@ -290,6 +321,8 @@ class AnyWake:
 
     def __init__(self, members: list[WakeDetector]) -> None:
         self._members = members
+        self.source = "spoken"
+        """Whichever member fired last says how Ciel was addressed."""
         armable = [m for m in members if hasattr(m, "arm")]
         if armable:
             self.arm = lambda: [m.arm() for m in armable]  # type: ignore[attr-defined]
@@ -300,7 +333,12 @@ class AnyWake:
 
     def push(self, frame: bytes) -> bool:
         # No short-circuit: every member must consume the frame.
-        return any([member.push(frame) for member in self._members])
+        fired = [member.push(frame) for member in self._members]
+        for member, hit in zip(self._members, fired):
+            if hit:
+                self.source = getattr(member, "source", "spoken")
+                break
+        return any(fired)
 
     def reset(self) -> None:
         for member in self._members:
@@ -311,8 +349,13 @@ class AnyWake:
             await member.close()
 
 
-def build_wake_detector(config, gestures=None) -> WakeDetector:  # noqa: ANN001 - WakeConfig, GestureConfig
-    """Pick a detector from config, with the gesture ear beside it when asked."""
+def build_wake_detector(config, gestures=None, models_dir: "Path | None" = None, spotify=None) -> WakeDetector:  # noqa: ANN001 - WakeConfig, GestureConfig, SpotifyConfig
+    """Pick a detector from config, with the gesture ear beside it when asked.
+
+    ``models_dir`` is where a fetched veto model lives (``~/.ciel/models``);
+    the ear needs it only when ``gestures.veto_model`` is set. ``spotify``
+    is the connector's config: switched on, two claps go through the Web
+    API before the desktop app."""
     if config.mode == "hotkey":
         base: WakeDetector = HotkeyWake()
     elif config.mode == "always":
@@ -335,13 +378,31 @@ def build_wake_detector(config, gestures=None) -> WakeDetector:  # noqa: ANN001 
                 f"wake.double_clap_plays must be a Spotify URI such as spotify:artist:<id>, not {config.double_clap_plays!r}"
             )
         uri = config.double_clap_plays
-        actions["double_clap"] = ("play music", lambda: music.play(uri))
+        api = music.web_player(spotify)
+        actions["double_clap"] = ("play music", lambda: music.play(uri, api=api))
     if not (wake or actions):
         return base
     from ciel.audio.gestures import GestureDetector
     from ciel.config import GestureConfig
 
-    ear = GestureWake(GestureDetector(gestures or GestureConfig()), wake, actions)
+    gestures = gestures or GestureConfig()
+    from ciel.audio.gestures import first_of
+
+    keys = None
+    if gestures.keyboard_veto_ms > 0:
+        from ciel.audio.keys import KeyboardVeto
+
+        keys = KeyboardVeto(gestures.keyboard_veto_ms)
+        if not keys.available:
+            keys = None
+    model = None
+    if gestures.veto_model:
+        from ciel.audio.audioset import AudioSetVeto
+
+        model = AudioSetVeto(gestures.veto_model, (models_dir or Path.home() / ".ciel") / "models", gestures.veto_threshold)
+    # The keyboard answers first: a tenth of a millisecond, and certain.
+    ear = GestureWake(GestureDetector(gestures, first_of(keys, model)), wake, actions, log_candidates=gestures.log_candidates)
+    ear.veto = model
     return AnyWake([base, ear])
 
 

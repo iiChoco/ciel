@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import time
 import uuid
@@ -97,6 +98,31 @@ class ActionJournal:
             return str(dest), None
         except OSError as exc:  # a failed snapshot must not block the action
             log.warning("could not snapshot %s: %s", path, exc)
+            return None, f"snapshot failed ({exc})"
+
+    @property
+    def max_snapshot_bytes(self) -> int:
+        """The same bound for local copies and snapshots arriving from the Mac."""
+        return self._max_snapshot_bytes
+
+    def snapshot_bytes(self, name: str, data: bytes) -> tuple[str | None, str | None]:
+        """Keep the Mac's previous contents here, where ordinary undo reads them.
+
+        These bytes were read on the spoke before its write. They never
+        belong in a tool response to the model, whose excerpts truncate;
+        the journal holds a complete, owner-only file instead.
+        """
+        if len(data) > self._max_snapshot_bytes:
+            return None, "file too large to snapshot"
+        try:
+            self.ensure()
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            dest = self._snapshots / f"{stamp}-{uuid.uuid4().hex}-{Path(name).name}"
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+            return str(dest), None
+        except OSError as exc:
             return None, f"snapshot failed ({exc})"
 
     def record(

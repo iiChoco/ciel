@@ -216,6 +216,23 @@ def probe_view() -> None:
     indicator = WebIndicator(link)
     indicator.set_state("thinking")
     check("the indicator adapter feeds the link", link._state == "thinking")
+    queue: asyncio.Queue = asyncio.Queue()
+    link._clients["fake"] = queue
+    link.note_state("listening", "snap")
+    link.note_state("listening", "snap")
+    link.note_state("listening")
+    link.note_state("idle")
+    frames = []
+    while not queue.empty():
+        frames.append(json.loads(queue.get_nowait()))
+    check(
+        "a listening state carries how the window was opened, once per change, and idle carries nothing",
+        [(f["state"], f.get("source")) for f in frames if f["type"] == "state"]
+        == [("listening", "snap"), ("listening", None), ("idle", None)],
+    )
+    link.note_state("listening", "clap twice")
+    check("the hello would carry the source for a page opened mid-window", link._source == "clap twice")
+    del link._clients["fake"]
 
 
 def probe_agents() -> None:

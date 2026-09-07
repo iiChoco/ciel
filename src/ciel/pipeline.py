@@ -75,6 +75,7 @@ from ciel.proactive.work import WorkWatcher
 from ciel.brain.tools.location import bind_locator
 from ciel.brain.tools.watch import bind_watcher
 from ciel.brain.tools.world import set_scope as set_world_scope
+from ciel.brain.tools.spotify import set_scope as set_spotify_scope
 from ciel.location import Locator
 from ciel import world as W
 from ciel.world import World
@@ -792,7 +793,7 @@ class Pipeline:
 
             self._stt = build_stt(config.stt)
             self._tts = build_tts(config)
-            self._wake = build_wake_detector(config.wake, config.gestures)
+            self._wake = build_wake_detector(config.wake, config.gestures, config.state_dir, config.spotify)
             # The lambda defers to the running noise-floor estimate (tracked in
             # the frame loop) so endpointing in a noisy room demands speech
             # louder than the room — see Endpointer._clears_floor.
@@ -932,6 +933,7 @@ class Pipeline:
             server.on_spoke_mute = lambda muted: self._set_muted(muted, from_spoke=True)
             server.on_spoke_change = self._on_spoke_change
             server.on_fact = self._on_fact
+            server.on_voice_state = self._on_spoke_voice_state
             if self._world is not None:
                 # Until the spoke says hello, the honest reading is "not
                 # here" — a carried-over "connected" from the last process
@@ -956,6 +958,7 @@ class Pipeline:
             # The Mac tools exist when the Mac is elsewhere.
             mac_tools=self._remote is not None
             and (config.shell.enabled or config.files.enabled),
+            mac_snapshot=self._remote.mac.snapshot_file if self._remote is not None else None,
         )
         # Memory writes carry provenance: "proactive" when a Vigil turn with
         # nobody around is writing, "conversation" otherwise — reflection
@@ -2177,6 +2180,7 @@ class Pipeline:
             # then the readings, then the held notes, then the words.
             note = prompt_note(req, muted=self._muted)
             set_world_scope(public=req.public)
+            set_spotify_scope(public=req.public)
             prompt = note + self._world_block(public=req.public) + (
                 self._with_held_notes(req.text) if spec.held_notes else req.text
             )
@@ -2736,6 +2740,7 @@ class Pipeline:
         try:
             extra = await self._proactive_extra(event)
             set_world_scope(public=False)
+            set_spotify_scope(public=False)
             block = self._world_block().strip()
             if block:
                 # The readings, before the event's own material: an
@@ -3469,6 +3474,21 @@ class Pipeline:
             )
             self._conversed = False
             self._brain_conversed = False
+
+    def _on_spoke_voice_state(self, listening: bool, source: str | None) -> None:
+        """The Chart's listening light, in hub role.
+
+        The room's window is the spoke's, so the hub only ever learns of
+        it by report; the chip says how it was opened (spoken, snap, clap
+        twice) so a wake by hand reads differently from a wake by name.
+        A closed window goes back to idle unless a turn is already
+        running here, in which case the turn's own states own the chip.
+        """
+        assert self._web_link is not None
+        if listening:
+            self._web_link.note_state("listening", source)
+        elif self._state is not State.BUSY:
+            self._web_link.note_state("idle")
 
     def _on_wake_from_sleep(self, gap_s: float) -> None:
         """Reconcile the loop with a wall clock that jumped (the machine slept).

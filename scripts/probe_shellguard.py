@@ -3,7 +3,9 @@
 No audio hardware and no model: the broker takes an injectable endpointer and
 everything else it touches is duck-typed, so the entire confirmation
 choreography — prompt, drain, listen, timeout, cancel — runs on scripted
-fakes, the same way the pipeline itself is verified. Run it directly:
+fakes, the same way the pipeline itself is verified. Mutating Git options
+never inherit a quiet prefix, and the signup cookie is always refused.
+Run it directly:
 
     uv run python scripts/probe_shellguard.py
 """
@@ -156,6 +158,19 @@ async def main() -> None:
     table: list[tuple[str, str]] = [
         ("git status", "quiet"),
         ("git status -sb", "quiet"),
+        ("git diff --no-index --output=/tmp/result.patch left right", "confirm"),
+        ("git log --output=/tmp/history", "confirm"),
+        ("git log --output /tmp/history", "confirm"),
+        ("git show --output=/tmp/show", "confirm"),
+        ("git branch new-branch", "confirm"),
+        ("git branch -D old-branch", "confirm"),
+        ("git diff --ext-diff", "confirm"),
+        ("git log --textconv -p", "confirm"),
+        ("git log --max-count=3 --graph --all", "quiet"),
+        ("file -C -m magic", "confirm"),
+        ("hostname changed", "confirm"),
+        ("date 010112002026", "confirm"),
+        ("cat ~/.ciel/sections-cookie", "deny"),
         ("git log --oneline -5", "quiet"),
         ("ls -la", "quiet"),
         ("ls -la; pwd", "quiet"),
@@ -385,6 +400,10 @@ async def main() -> None:
     answer = False
     check("confirm tier, declined",
           denied(await guard(payload("touch b.txt"), None, None)))
+    calls.clear()
+    check("a Git output file asks the user and obeys their no",
+          denied(await guard(payload("git diff --no-index --output=/tmp/result.patch left right"), None, None))
+          and len(calls) == 1)
     check("non-Bash payloads pass through",
           await guard({"tool_name": "Read", "tool_input": {}}, None, None) == {})
 

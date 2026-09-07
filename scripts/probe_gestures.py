@@ -16,7 +16,20 @@ the frame a snap fires on, ``always`` mode has nothing to wake, the hotkey's
 the ``[gestures]`` table loads from TOML and from the environment. In play
 mode two claps run their action once, after the frame loop, and never wake;
 the snap still wakes beside them; the build refuses anything but a Spotify
-URI; and the music door passes the URI as an argument, never as script.
+URI; the music door passes the URI as an argument, never as script; and with
+the Spotify connector on, the Web API is tried first and the desktop app
+answers when the API has no player or no login.
+With ``log_candidates`` on, every gated impulse becomes a log line with its
+four numbers and the cue a miss failed; off, the ear says nothing but gestures.
+The keyboard's own word: a snap or a clap inside ``keyboard_veto_ms`` of a key
+event is a keystroke and says so, the keyboard is asked before the model, and
+without Quartz the veto is inert.
+A snap is solitary: one after another gated impulse inside ``snap_quiet_ms`` is
+typing cadence, claps are not held to it, and zero switches it off.
+The veto half pins that a second opinion only says no: it is asked only about
+what the rules accepted, shown one AudioSet frame ending just after the
+impulse, its answer names what the room was doing, a vetoed second clap breaks
+the pair, and the model wrapper vetoes on room classes alone, never on hands.
 """
 
 from __future__ import annotations
@@ -42,7 +55,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from listen_gestures import Reporter, listen
-from ciel.audio.gestures import GestureDetector, Measurement, Observation, classify
+from ciel.audio.audioset import AudioSetVeto, VETO_CLASSES, WINDOW_SAMPLES, YAMNET_SHA256
+from ciel.audio.gestures import GestureDetector, Measurement, Observation, classify, first_of
+from ciel.audio.keys import KeyboardVeto
 from ciel import music
 from ciel.audio.wake import AnyWake, GestureWake, HotkeyWake, build_wake_detector, wake_phrases
 from ciel.config import FRAME_BYTES, SAMPLE_RATE, AudioConfig, Config, GestureConfig, WakeConfig, load_config
@@ -122,7 +137,7 @@ def main() -> None:
     check('a close echo remains one clap', kinds([(1, 'clap'), (1.03, 'clap')]) == ['clap'])
     check('three claps become a pair and a single', kinds([(1, 'clap'), (1.2, 'clap'), (1.4, 'clap')]) == ['double_clap', 'clap'])
     check('four claps become two pairs', kinds([(1, 'clap'), (1.2, 'clap'), (1.4, 'clap'), (1.6, 'clap')]) == ['double_clap', 'double_clap'])
-    check('a snap breaks a pending pair', kinds([(1, 'clap'), (1.2, 'snap'), (1.4, 'clap')]) == ['clap', 'snap', 'clap'])
+    check('a snap breaks a pending pair', kinds([(1, 'clap'), (1.5, 'snap'), (1.7, 'clap')]) == ['clap', 'snap', 'clap'])
     check('a rejected tick breaks a pending pair', kinds([(1, 'clap'), (1.2, 'tick'), (1.4, 'clap')]) == ['clap', 'clap'])
     for gap, expected in ((.06, ['double_clap']), (.799, ['double_clap']), (.8, ['clap', 'clap'])):
         d = GestureDetector()
@@ -281,6 +296,8 @@ def main() -> None:
     both = AnyWake([word, GestureWake(GestureDetector(), {'snap'})])
     fired = wakes(both, [(1, 'snap')])
     check('a snap wakes through the composite', len(fired) == 1)
+    check('...and the composite says what addressed it', both.source == 'snap')
+    check('a wake word or a hotkey says spoken or hotkey', HotkeyWake().source == 'hotkey' and AnyWake([HotkeyWake()]).source == 'spoken')
     check('the wake-word model still saw every frame, including the one the snap fired on', word.frames == len(pcm(recording([(1, 'snap')]))) // FRAME_BYTES)
     both.arm()
     check('the hotkey\'s arm survives the wrapping', word.armed and hasattr(both, 'arm'))
@@ -358,6 +375,175 @@ def main() -> None:
 
     said = asyncio.run(music.play(URI, run=failing))
     check('a refusal from Spotify is reported, not raised', said.startswith('Spotify would not play'))
+
+    from ciel.config import SpotifyConfig
+    from ciel.spotify import SpotifyUnavailable
+
+    calls.clear()
+    said = asyncio.run(music.play(URI, run=fake_osascript, api=lambda uri: f'playing on Kitchen ({uri[-4:]})'))
+    check('with the connector, two claps play through the Web API on the active device and the desktop app is not scripted',
+          said == 'Spotify Connect: playing on Kitchen (zA0C)' and calls == [])
+
+    def no_player(uri: str) -> str:
+        raise SpotifyUnavailable('No active device.', 404)
+
+    said = asyncio.run(music.play(URI, run=fake_osascript, api=no_player))
+    check('when the API has no player to talk to, the desktop app answers', len(calls) == 1 and said == 'Bruno Mars — Uptown Funk')
+
+    def not_connected(uri: str) -> str:
+        raise SpotifyUnavailable('Spotify is not connected.')
+
+    calls.clear()
+    said = asyncio.run(music.play(URI, run=fake_osascript, api=not_connected))
+    check('...and so it does before the account is authorized', len(calls) == 1 and said == 'Bruno Mars — Uptown Funk')
+    check('a connector that is off, or has no app, leaves the desktop app alone as the only door',
+          music.web_player(SpotifyConfig()) is None and music.web_player(SpotifyConfig(enabled=True)) is None
+          and music.web_player(None) is None)
+    check('a connector that is on with an app is the first door',
+          callable(music.web_player(SpotifyConfig(enabled=True, client_id='abc'))))
+    built = build_wake_detector(WakeConfig(mode='hotkey', double_clap='play', double_clap_plays=URI), spotify=SpotifyConfig(enabled=True, client_id='abc'))
+    check('the spoke builds the pair action with the connector beside it', isinstance(built, AnyWake))
+
+    # ── the ear can narrate what it hears ────────────────────────────────────
+
+    import logging
+
+    class Catch(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lines: list[str] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.lines.append(record.getMessage())
+
+    catch = Catch()
+    logging.getLogger('ciel.audio.wake').addHandler(catch)
+    logging.getLogger('ciel.audio.wake').setLevel(logging.INFO)
+    wakes(GestureWake(GestureDetector(), {'snap'}), [(1, 'clap'), (1.5, 'tick')], 3)
+    check('by default the ear says nothing about impulses that fire no gesture', not any(l.startswith('ear:') for l in catch.lines))
+    catch.lines.clear()
+    wakes(GestureWake(GestureDetector(), {'snap'}, log_candidates=True), [(1, 'clap'), (1.5, 'tick')], 3)
+    ears = [l for l in catch.lines if l.startswith('ear:')]
+    check('with log_candidates on, every gated impulse is a line with its four numbers',
+          len(ears) >= 2 and all('peak' in l and 'tilt' in l and 'fall' in l for l in ears))
+    check('...and a miss names the cue it failed', any('rejected' in l and ':' in l.split('—')[-1] for l in ears))
+    check('...and a lone clap says it is waiting for its pair', any('waiting for second clap' in l for l in ears))
+    check('...and says when it stood alone, with the window it waited', any('stood alone' in l and '800 ms' in l for l in ears))
+    logging.getLogger('ciel.audio.wake').removeHandler(catch)
+    with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {}, clear=True):
+        toml = Path(folder) / 'config.toml'
+        toml.write_text('[wake]\nsnap = true\n\n[gestures]\nlog_candidates = true\n')
+        loaded = load_config(toml)
+        built = build_wake_detector(loaded.wake, loaded.gestures)
+        check('the switch reaches the ear the spoke builds', built._members[1]._log_candidates is True)
+
+    # ── a snap is solitary ───────────────────────────────────────────────────
+
+    check('a snap on its own is a snap', kinds([(1, 'snap')]) == ['snap'])
+    rows = feed(recording([(1, 'tick'), (1.2, 'snap')]))
+    check('a snap 200 ms after a keystroke-shaped tick is typing cadence, and says so',
+          gestures(rows) == [] and any('typing cadence' in r.reason for r in rows if r.type == 'candidate'))
+    check('a snap 500 ms after the tick is solitary again', kinds([(1, 'tick'), (1.5, 'snap')]) == ['snap'])
+    check('the run of keystrokes itself never becomes a snap', kinds([(1, 'tick'), (1.15, 'tick'), (1.3, 'tick'), (1.45, 'snap')]) == [])
+    check('claps are not held to the snap\'s solitude', kinds([(1, 'tick'), (1.2, 'clap'), (1.4, 'clap')]) == ['double_clap'])
+    quiet_off = GestureDetector(replace(GestureConfig(), snap_quiet_ms=0))
+    check('snap_quiet_ms = 0 switches the gate off', gestures(feed(recording([(1, 'tick'), (1.2, 'snap')]), quiet_off)) == ['snap'])
+
+    # ── the keyboard's own word ──────────────────────────────────────────────
+
+    ago = [0.05]
+    keys = KeyboardVeto(300, since_key=lambda: ago[0])
+    check('a snap 50 ms after a key went down is that key', keys(np.zeros(8)) == 'a keystroke 50 ms ago')
+    check('...and so is one 299 ms after', (ago.__setitem__(0, 0.299) or keys(np.zeros(8))) == 'a keystroke 299 ms ago')
+    check('a snap 300 ms after the last key is not the keyboard\'s business', (ago.__setitem__(0, 0.3) or keys(np.zeros(8))) is None)
+    check('nor one a minute after', (ago.__setitem__(0, 60.0) or keys(np.zeros(8))) is None)
+    with patch('ciel.audio.keys._quartz_since_key', lambda: None):
+        inert = KeyboardVeto(300)
+    check('without Quartz the veto is inert and says so', not inert.available and inert(np.zeros(8)) is None)
+    ago[0] = 0.04
+    rows = feed(recording([(1, 'snap'), (2, 'clap'), (2.2, 'clap')]), GestureDetector(veto=keys))
+    check('with a key just pressed, a snap and both claps are keystrokes, and say so',
+          gestures(rows) == [] and all('a keystroke 40 ms ago' in r.reason for r in rows if r.type == 'candidate' and r.kind == 'rejected'))
+    ago[0] = 5.0
+    check('with the keyboard quiet, the same sounds are gestures again', gestures(feed(recording([(1, 'snap'), (2, 'clap'), (2.2, 'clap')]), GestureDetector(veto=keys))) == ['snap', 'double_clap'])
+    order: list[str] = []
+    both = first_of(lambda w: (order.append('keys'), 'a keystroke 20 ms ago')[1], lambda w: (order.append('model'), 'typing 0.9')[1])
+    check('the keyboard is asked first and a certain answer spares the model', both(np.zeros(8)) == 'a keystroke 20 ms ago' and order == ['keys'])
+    order.clear()
+    both = first_of(lambda w: (order.append('keys'), None)[1], lambda w: (order.append('model'), 'typing 0.9')[1])
+    check('when the keyboard has nothing to say the model is asked', both(np.zeros(8)) == 'typing 0.9' and order == ['keys', 'model'])
+    check('no opinions at all is no veto', first_of(None, None) is None)
+    built = build_wake_detector(WakeConfig(mode='hotkey', snap=True), replace(GestureConfig(), keyboard_veto_ms=0))
+    check('keyboard_veto_ms = 0 builds an ear without the keyboard', built._members[1]._detector._veto is None)
+
+    # ── a second opinion that only says no ───────────────────────────────────
+
+    asked: list[np.ndarray] = []
+
+    def typing_veto(window: np.ndarray) -> str | None:
+        asked.append(window)
+        return 'typing 0.82'
+
+    rows = feed(recording([(1, 'snap'), (1.5, 'tick'), (2, 'clap')]), GestureDetector(veto=typing_veto))
+    vetoed = [r for r in rows if r.type == 'candidate' and r.kind == 'rejected' and 'sounds like typing 0.82' in r.reason]
+    check('a vetoed snap and a vetoed clap are rejections that say what the room was doing',
+          gestures(rows) == [] and len(vetoed) == 2)
+    check('the veto is asked only about what the rules accepted, never about the tick', len(asked) == 2)
+    check('the veto is shown one AudioSet frame of raw audio', all(len(w) == WINDOW_SAMPLES for w in asked))
+    peak_at = int(np.abs(asked[0]).argmax())
+    check('...ending 35 ms after the impulse, so the room around it is in the picture',
+          WINDOW_SAMPLES - 35 * 16 - 80 <= peak_at <= WINDOW_SAMPLES - 35 * 16 + 80)
+    rows = feed(recording([(1, 'snap'), (2, 'clap'), (2.2, 'clap')]), GestureDetector(veto=lambda w: None))
+    check('a veto that hears nothing changes nothing', gestures(rows) == ['snap', 'double_clap'])
+    second = iter([None, 'speech 0.95'])
+    rows = feed(recording([(1, 'clap'), (1.2, 'clap')]), GestureDetector(veto=lambda w: next(second)))
+    check('a vetoed second clap breaks the pair instead of completing it', gestures(rows) == ['clap'])
+    check('the veto never finds a gesture the rules did not',
+          gestures(feed(recording([(1, 'tick')]), GestureDetector(veto=lambda w: None))) == [])
+
+    class FakeSession:
+        def __init__(self, scores: dict[int, float]) -> None:
+            self.scores = scores
+            self.seen: list[int] = []
+
+        def get_inputs(self):
+            return [type('I', (), {'name': 'waveform'})()]
+
+        def run(self, _outputs, feeds):
+            self.seen.append(len(feeds['waveform']))
+            row = np.zeros(521, dtype=np.float32)
+            for i, v in self.scores.items():
+                row[i] = v
+            return [np.stack([row * 0.5, row])]  # two frames; the best one counts
+
+    loud_typing = AudioSetVeto('yamnet', Path('/nonexistent'), 0.3, session=FakeSession({378: 0.82, 57: 0.4}))
+    loud_typing.load()
+    check('the model vetoes with the loudest of its room classes, by name and score',
+          loud_typing(np.zeros(WINDOW_SAMPLES)) == 'typing 0.82' and loud_typing._session.seen == [WINDOW_SAMPLES])
+    quiet = AudioSetVeto('yamnet', Path('/nonexistent'), 0.3, session=FakeSession({378: 0.29, 0: 0.1}))
+    quiet.load()
+    check('below the threshold it says nothing', quiet(np.zeros(WINDOW_SAMPLES)) is None)
+    snappy = AudioSetVeto('yamnet', Path('/nonexistent'), 0.3, session=FakeSession({57: 0.9, 485: 0.9}))
+    snappy.load()
+    check('finger snapping and clicking are never grounds for a veto', snappy(np.zeros(WINDOW_SAMPLES)) is None)
+    check('the veto classes are the room, not hands',
+          set(VETO_CLASSES.values()) == {'speech', 'conversation', 'music', 'typing', 'computer keyboard'})
+    with tempfile.TemporaryDirectory() as folder:
+        bogus = Path(folder) / 'bogus.onnx'
+        bogus.write_bytes(b'not a model')
+        try:
+            AudioSetVeto(str(bogus), Path(folder), 0.3).load()
+        except Exception:  # noqa: BLE001 - onnxruntime's own refusal
+            check('a custom path that is not a model is refused', True)
+        else:
+            check('a custom path that is not a model is refused', False)
+        try:
+            AudioSetVeto(str(Path(folder) / 'absent.onnx'), Path(folder), 0.3).load()
+        except FileNotFoundError as exc:
+            check('a custom path that does not exist says so', 'absent.onnx' in str(exc))
+        else:
+            check('a custom path that does not exist says so', False)
+    check('the pretrained model is pinned by hash', len(YAMNET_SHA256) == 64)
     print(f'\nall {len(CHECKS)} checks passed')
 
 

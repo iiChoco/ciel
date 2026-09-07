@@ -80,6 +80,11 @@ class HubServer(WebLink):
         """The spoke's last reported listening state — a window is open."""
         self.spoke_speaking = False
         """The spoke's last reported endpointer state — speech in hand."""
+        self.spoke_wake_source: str | None = None
+        """How the spoke's open window was opened, if it said."""
+        self.on_voice_state: Callable[[bool, str | None], None] | None = None
+        """Every ``voice.state``: the listening flag and its source — the
+        Chart's chip is drawn from this."""
         self.on_confirm_answer: Callable[[str], bool] | None = None
         """The broker's ``answer``: a spoken yes or no came back."""
         self.on_turn_cancel: Callable[[str, str], None] | None = None
@@ -172,6 +177,9 @@ class HubServer(WebLink):
             except asyncio.TimeoutError:
                 self.send_spoke({"type": "tool.cancel", "rpc_id": rpc_id})
                 raise RpcUnavailable(f"the Mac did not answer in {timeout:.0f}s")
+            except asyncio.CancelledError:
+                self.send_spoke({"type": "tool.cancel", "rpc_id": rpc_id})
+                raise
         finally:
             self._rpc.pop(rpc_id, None)
 
@@ -318,6 +326,9 @@ class HubServer(WebLink):
             elif kind == "voice.state":
                 self.spoke_listening = frame["listening"]
                 self.spoke_speaking = frame["speaking"]
+                self.spoke_wake_source = frame.get("source") if frame["listening"] else None
+                if self.on_voice_state is not None:
+                    self.on_voice_state(self.spoke_listening, self.spoke_wake_source)
             elif kind == "mute":
                 if self.on_spoke_mute is not None:
                     self.on_spoke_mute(frame["muted"])

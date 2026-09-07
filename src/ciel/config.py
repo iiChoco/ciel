@@ -217,7 +217,9 @@ class WakeConfig:
     """The Spotify URI two claps start when ``double_clap = "play"`` —
     an artist, album, playlist, or track, as Spotify's "Copy Spotify URI"
     gives it (``spotify:artist:...``). Only a URI of that shape is ever
-    handed to Spotify; see ``music.py``."""
+    handed to Spotify. With the ``[spotify]`` connector switched on and
+    authorized on this Mac it plays through the Web API on whichever
+    device is active, the desktop app being the fallback; see ``music.py``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +282,41 @@ class GestureConfig:
     second_clap_min_peak: float = 0.05
     """The second clap of a pair is often quieter and lands in the first
     one's reverberation, so it is held only to this and to tilt."""
+
+    veto_model: str = ""
+    """A second opinion that only says no. ``"yamnet"`` fetches Google's
+    AudioSet classifier (16 MB, Apache 2.0, hash-pinned) into the models
+    directory on first start and asks it, about each snap or clap the
+    rules accept, whether the room was really typing, talking, or playing
+    music — the sounds those rules mistake for hands. A path names a
+    custom ONNX model with the same interface. Empty, the rules stand
+    alone. See ``audio/audioset.py`` for why it is not the judge."""
+
+    veto_threshold: float = 0.3
+    """How sure the model must be that the room was doing something else
+    before a snap or a clap is dropped. Typing at the desk scores 0.6 to
+    0.8; speech 0.9 and up; a real snap in a quiet room gives them 0.1."""
+
+    keyboard_veto_ms: int = 300
+    """The keyboard's own word: a snap or a clap that lands this soon
+    after a key went down or up on this Mac is a keystroke, whatever it
+    sounded like. macOS reports the time since the last key event to any
+    process in the session — timestamps only, never which key, and no
+    permission dialog. See ``audio/keys.py``. 0 switches it off; off the
+    Mac it is inert."""
+
+    snap_quiet_ms: int = 400
+    """A snap must be the only impulse in this much time: a snap is
+    solitary, a keystroke arrives in a run. Any gated impulse in the
+    window before a would-be snap turns it into a rejection that says
+    "typing cadence". The cost is a snap made mid-typing, which was
+    already taken for a keystroke. 0 switches the gate off."""
+
+    log_candidates: bool = False
+    """Log every impulse the ear gates, not only the gestures it fires —
+    each with its four numbers and, for a miss, the cue it failed — so
+    the spoke's own log shows what the room sounded like while you tune.
+    A few lines per minute of typing; off once the boundaries are set."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -517,9 +554,9 @@ class ShellConfig:
     the gate is the defense."""
 
     auto_allow: tuple[str, ...] = (
-        # Version control, read-only.
-        "git status", "git log", "git diff", "git show", "git branch",
-        "git blame",
+        # Git's diff and branch families can write files or run helpers.
+        # Log stays quiet only for the guard's display-only arguments.
+        "git status", "git log",
         # The machine describing itself.
         "ls", "pwd", "date", "whoami", "uname", "id", "hostname", "uptime",
         "df", "du", "ps", "pmset -g",
@@ -538,13 +575,15 @@ class ShellConfig:
         # workspace. What still holds is the credential blocklist — a command
         # naming .ssh, .aws, .zshrc and kin is denied outright, quiet tier or
         # not — and redirection still confirms, so reading is all these get.
-        "cat", "file", "stat", "which",
+        "cat", "stat", "which",
     )
     """Command prefixes that run without a spoken confirmation. Matched per
     pipeline segment against leading whole tokens — "git status" covers
     "git status -sb", and every segment of a pipe must match for the pipeline
-    to stay quiet. Only for commands with no redirection, substitution, or
-    backgrounding, which escalate to a confirmation regardless (merging or
+    to stay quiet. The guard also checks arguments: Git log accepts only
+    its display-only forms; diff/show/branch/blame and unfamiliar date,
+    hostname, or file arguments still ask, even with an added prefix.
+    Only for commands with no redirection, substitution, or backgrounding, which escalate to a confirmation regardless (merging or
     discarding a stream — 2>&1, >/dev/null — doesn't count; those can't
     touch a file)."""
 
@@ -654,7 +693,8 @@ class JournalConfig:
     max_snapshot_kb: int = 1024
     """Files larger than this are not snapshotted before an edit; the journal
     entry says so instead. Bounds the cost of editing something huge — and a
-    file that size is usually generated, not precious."""
+    file that size is usually generated, not precious. Mac snapshots use
+    the smaller of the hub's and spoke's limits, before sending any bytes."""
 
     dir: Path = field(default_factory=lambda: Path.home() / ".ciel" / "undo")
     """Where the journal and its snapshots live. The workspace guard carves
@@ -823,6 +863,38 @@ class MessagesConfig:
     """How long to wait on osascript. A first call often blocks on a macOS
     permission dialog, which needs longer than a normal call but must not hang
     the assistant forever."""
+
+
+@dataclass(frozen=True, slots=True)
+class SpotifyConfig:
+    """Spotify Web API search and Connect playback, from the brain's host."""
+
+    enabled: bool = False
+    """Offer Spotify tools after browser authorization. Off until opted in;
+    playback controls also require the action journal to be enabled."""
+
+    confirm_controls: bool = False
+    """Ask before a playback change. Off: a direct user request is enough.
+    Controls still enter the action journal and remain unavailable in
+    public or unattended turns."""
+
+    client_id: str = ""
+    """The developer app's public Client ID. PKCE needs no client secret.
+    The authorized Client ID is saved with the tokens for refresh."""
+
+    token_file: Path = field(default_factory=lambda: Path.home() / ".ciel" / "spotify.json")
+    """Owner-only OAuth tokens on the brain's host. This name, any configured
+    replacement, and its .lock companion are forbidden to the model."""
+
+    redirect_port: int = 8888
+    """The explicit login command listens on 127.0.0.1 at this port.
+    Register http://127.0.0.1:8888/callback (with the chosen port) in Spotify."""
+
+    timeout_s: float = 15.0
+    """Deadline for each Spotify HTTP request, off the event loop."""
+
+    authorize_timeout_s: float = 300.0
+    """How long the login command waits for browser approval."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1985,6 +2057,7 @@ class Config:
     web: WebConfig = field(default_factory=WebConfig)
     hub: HubConfig = field(default_factory=HubConfig)
     spoke: SpokeConfig = field(default_factory=SpokeConfig)
+    spotify: SpotifyConfig = field(default_factory=SpotifyConfig)
     oura: OuraConfig = field(default_factory=OuraConfig)
     sections: SectionsConfig = field(default_factory=SectionsConfig)
     mail: MailConfig = field(default_factory=MailConfig)
@@ -2036,6 +2109,7 @@ _SECTIONS = {
     "web": WebConfig,
     "hub": HubConfig,
     "spoke": SpokeConfig,
+    "spotify": SpotifyConfig,
     "oura": OuraConfig,
     "sections": SectionsConfig,
     "mail": MailConfig,

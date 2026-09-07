@@ -2,6 +2,267 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-06 — a playback request is enough
+
+**Why.** Asking to play or pause Spotify already says what the user wants.
+The user chose to remove the second yes from these playback requests.
+
+**What.**
+
+- *Music follows the request.* Spotify controls run without confirmation by
+  default; `[spotify] confirm_controls = true` can restore the voice gate.
+  Inverse records and verifies controls independently of that choice.
+  Public and unattended turns still cannot control the player, and other
+  actions keep their own confirmation requirements.
+
+**Probes.** `probe_spotify.py 93 → 102`: direct controls pass the brain's
+hooks without asking, still reach the journal and read-back, and stay
+allowed without a confirmer; another connector still asks and respects
+refusal, while Spotify's optional confirmation still works.
+
+## 2026-09-06 — Spotify can follow the room
+
+**Why.** A double clap could start a known URI on the Mac, but Ciel could
+not find a recording, read the player, or choose a Spotify Connect device.
+
+**What.**
+
+- *The account behind the speakers.* An opt-in Spotify Web API client and
+  four tools bring search, playback status, device discovery and controls
+  to either brain host, using the dependencies already here. Browser PKCE
+  needs no client secret; owner-only atomic tokens and a shared refresh
+  lock keep authorization intact across overlapping processes.
+- *Looking is different from changing the room.* Controls go through
+  Proof Obligation and Inverse; public turns cannot use the account tools,
+  and unattended turns can only inspect playback and devices. Playback
+  requests are sent once, with explicit uncertainty after network failure;
+  rate limits hold later calls. Library and playlist editing are outside
+  this first connection's scopes.
+
+**Probes.** `probe_spotify.py 0 → 93`: PKCE state and refusal, refresh
+rotation and concurrent clients, token permissions, API shapes and bounds,
+empty playback, rate limiting, quoted names, public refusal, opt-in tools,
+confirmation, journaling, the Witness rule and credential guards.
+`probe_world.py 121 → 123`: public and private turns set the account scope.
+
+## 2026-09-06 — the Mac's files can be put back
+
+**Why.** A Mac overwrite reached the action journal without its previous
+contents. The fourth finding in `reports/2026-09-06-codebase-review.md`
+reproduced a record that could explain the write but could not undo it.
+
+**What.**
+
+- *Read where the file lives.* Before the write, the recorder asks the
+  spoke for bounded previous contents and saves an owner-only snapshot
+  beside the hub's journal. Ordinary Read and mac_write_file perform the
+  inverse; missing, oversized, or unreachable originals leave a note.
+
+**Probes.** `probe_tool_rpc.py 32 → 59` (the combined review regressions):
+complete snapshots beyond the tool-output limit, their permissions and
+read-only carve-out, restoration and its own undo record, empty/missing/
+oversized originals, forbidden paths, and an unreachable Mac.
+
+## 2026-09-06 — a canceled command stops working
+
+**Why.** Canceling a Mac tool call erased its coroutine while the process
+kept changing files. The third finding in
+`reports/2026-09-06-codebase-review.md` reproduced a write after cancel.
+
+**What.**
+
+- *Keep ownership until the shell exits.* Commands run in their own
+  process group. Cancellation, either deadline, and executor shutdown
+  stop that group and reap the shell, including during process startup.
+  The hub forwards cancellation, and shutdown awaits cleanup.
+
+**Probes.** `probe_tool_rpc.py 32 → 59` (the combined review regressions):
+real delayed child writes stay absent after explicit cancel, both
+deadlines, shutdown, hub cancellation, and cancellation during startup;
+a call canceled before starting leaves no ledger entry.
+
+## 2026-09-06 — the signup cookie stays behind the door
+
+**Why.** The signup watcher kept a login credential in an owner-only file,
+but the brain ran as that same owner and could read it. The second finding
+in `reports/2026-09-06-codebase-review.md` reproduced the missing boundary.
+
+**What.**
+
+- *One credential list for both gates.* `sections-cookie` joins
+  `FORBIDDEN_NAMES`; a configured cookie filename joins it when the file
+  and shell guards are built, on the hub and the spoke.
+
+**Probes.** `probe_files.py 21 → 26`: direct reads, search, listing, and
+the shell refuse both default and configured cookie names.
+`probe_shellguard.py 148 → 162` and `probe_tool_rpc.py 32 → 59` include
+refusals for the standard cookie through the shell and spoke.
+
+## 2026-09-06 — a quiet prefix is not permission to write
+
+**Why.** `git diff --output` could write outside the workspace without
+asking, because the shell gate recognized only its prefix. The first
+finding in `reports/2026-09-06-codebase-review.md` reproduced that escape.
+
+**What.**
+
+- *The arguments owe a proof too.* Git status and a small display-only
+  vocabulary for log stay quiet. Git's diff/show/branch/blame commands,
+  file inspection, and unfamiliar date or hostname arguments ask first.
+  A configured prefix cannot bypass the argument check.
+
+**Probes.** `probe_shellguard.py 148 → 162`: mutating Git options and
+machine setters ask, the display-only forms stay quiet, and a declined
+output write is refused. `probe_tool_rpc.py 32 → 59` includes a real
+unconfirmed Git output write whose destination remains absent.
+
+## 2026-09-06 — the keyboard's own word
+
+**Why.** Every acoustic gate had been tried against keystrokes — four
+rules, a model that names typing, a solitude window — and a lone key in
+a quiet second still woke Ciel as a snap. It is a snap, acoustically.
+What it is not is a hand: the sound of a key is made by a key, and the
+Mac knows when its keys are pressed.
+
+**What.**
+
+- *Ask the keyboard.* `audio/keys.py` asks macOS, at the moment the ear
+  judges an impulse, how long since a key went down or up — a session-wide
+  number any process may read, timestamps only, no event tap, no
+  permission dialog, a tenth of a millisecond. A snap or a clap inside
+  `gestures.keyboard_veto_ms` (300) of a key event is rejected as that
+  keystroke, by name.
+- *Opinions in order.* The ear's vetoes compose: the keyboard first,
+  since it is certain and free, then the AudioSet model. `first_of` in
+  `audio/gestures.py`.
+
+**Probes.** `probe_gestures.py 117 → 128`: a snap 50 or 299 ms after a
+key is that key, 300 ms or a minute after it is not; without Quartz the
+veto is inert; with a key just pressed a snap and both claps are
+keystrokes and say so; with the keyboard quiet they are gestures again;
+the keyboard is asked first and a certain answer spares the model; no
+opinions is no veto; zero builds an ear without the keyboard.
+
+## 2026-09-06 — a snap is solitary
+
+**Why.** With the AudioSet veto in place, keystrokes still woke Ciel as
+snaps: a single key in a quiet second does not sound like *typing* to a
+model trained on runs of it, and by shape a mechanical key is a snap.
+What a keystroke has that a snap does not is company.
+
+**What.**
+
+- *One number.* `gestures.snap_quiet_ms` (400): a would-be snap that
+  follows any other gated impulse inside the window is rejected as
+  typing cadence, whatever its shape or the model's opinion. Claps are
+  not held to it, so a double clap is untouched. Zero switches it off.
+
+**Probes.** `probe_gestures.py 110 → 116`: a lone snap stands; a snap
+200 ms after a keystroke-shaped tick is typing cadence and says so; at
+500 ms it is solitary again; a run of keystrokes never becomes a snap;
+claps are not held to it; zero switches it off.
+
+## 2026-09-06 — two claps reach whichever device is playing
+
+**Why.** The double clap could only start the desktop app on this Mac.
+The Spotify connector that arrived the same day talks to the account
+itself, so the gesture should too: two claps in the kitchen should reach
+the phone that is playing there.
+
+**What.**
+
+- *Two doors, one order.* `music.play` takes the connector's Web API as
+  the first door — `play` on the active device, then a status read for
+  the device's name — and keeps the AppleScript surface as the second,
+  taken when the API has no player to talk to or no login to talk with.
+  The login is checked at play time, so authorizing after the spoke
+  started needs no restart. The same URI check guards both doors.
+- *The connector must be authorized on the spoke's host.* The gesture
+  runs where the microphone is, so the Mac keeps its own token file; the
+  README says so beside the gesture.
+
+**Probes.** `probe_gestures.py 104 → 110`: with the connector, two claps
+play through the API and the desktop app is not scripted; without a
+player, or before authorization, the desktop app answers; a connector
+that is off or has no app leaves the desktop app as the only door; the
+spoke builds the pair action with the connector beside it.
+
+## 2026-09-06 — a second opinion that only says no
+
+**Why.** Snaps were, in the user's words, too accurate: keyboard clicks
+woke Ciel. Four hand-set numbers cannot tell a keystroke from a snap on
+a lid microphone, and neither can more of them. What can is a model
+trained on two million labelled clips — but tried as the judge, Google's
+AudioSet classifier missed half of a set of real snaps and called a loud
+clap a snap, while naming typing and speech every time.
+
+**What.**
+
+- *The rules judge; the model may veto.* `audio/audioset.py` wraps YAMNet
+  (a tf2onnx export, 16 MB, Apache 2.0) under the onnxruntime the wake
+  word already uses, fetched once into the models directory and refused
+  unless its SHA-256 matches. The ear keeps a second of raw audio and,
+  for each snap or clap the rules accept, asks whether that second was
+  really typing, a keyboard, speech, conversation, or music; above
+  `veto_threshold` the gesture becomes a rejection that names what was
+  heard. A vetoed second clap breaks the pair. Nothing the rules did not
+  find is ever found by the model.
+- *Two fields.* `gestures.veto_model` — empty, `yamnet`, or a path to a
+  model with the same interface — and `gestures.veto_threshold`.
+
+**Probes.** `probe_gestures.py 90 → 103`: vetoed gestures are rejections
+that say why; the veto is asked only about what the rules accepted;
+it is shown one AudioSet frame ending just after the impulse; a silent
+veto changes nothing; a vetoed second clap breaks the pair; the wrapper
+vetoes on room classes only, by name and score, never on snapping or
+clicking; a bogus or missing custom model is refused; the pretrained
+model is pinned by hash.
+
+## 2026-09-06 — the Chart says whether you snapped or spoke
+
+**Why.** With two ways to wake Ciel, the Chart's chip said only
+"listening", and in hub-and-spoke mode it did not even say that: the
+room's window belongs to the spoke, and the hub only ever set the chip
+from its own turns.
+
+**What.**
+
+- *The detector says how it was addressed.* Every wake detector carries a
+  `source` — spoken, hotkey, snap, clap twice — and the composite takes
+  the firing member's.
+- *The window's source rides `voice.state`.* The spoke sends it while the
+  window it opened is open, and nothing for a follow-up window; the hub
+  keeps it, lights the Chart with it, and returns the chip to idle when
+  the window closes and no turn is running.
+- *The chip reads it.* `listening · snap` beside `listening · spoken`;
+  the hello carries it for a page opened mid-window.
+
+**Probes.** `probe_gestures.py 88 → 90`: the composite names what
+addressed it. `probe_spoke.py 52 → 53`: a snap-opened window says so, a
+follow-up says nothing, idle says nothing. `probe_hub_arbiter.py +1`:
+the source is kept while open, dropped when closed, reported each time.
+`probe_web.py +2`: one state frame per change with the source, idle
+without, and the hello holds it.
+
+## 2026-09-06 — the ear can narrate what it hears
+
+**Why.** The spoke logged only the gestures it acted on. A clap that was
+heard but fell short of a boundary left no trace, so tuning meant
+running the tester in a second window and matching its clock to the
+spoke's by eye.
+
+**What.**
+
+- *One switch, every impulse.* `gestures.log_candidates`, off by
+  default, makes the ear log each gated impulse with its four numbers
+  and, for a miss, the cue it failed — the tester's candidate rows, in
+  the spoke's own log, in the spoke's own time.
+
+**Probes.** `probe_gestures.py 83 → 88`: silent by default; with the
+switch on every gated impulse is a line with its numbers, a miss names
+its cue, a lone clap says it is waiting, and the switch reaches the ear
+the spoke builds from config.
+
 ## 2026-09-06 — the log says which microphone, and when it hears only zeros
 
 **Why.** The spoke sat "ready" all evening and heard nothing — not a

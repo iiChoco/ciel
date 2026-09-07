@@ -138,7 +138,7 @@ def _normalize(token: str) -> str:
     return os.path.basename(_unquote(token))
 
 
-def _forbidden_component(command: str) -> tuple[str, bool] | None:
+def _forbidden_component(command: str, names: frozenset[str]) -> tuple[str, bool] | None:
     """The first credential/startup-file name the command mentions, if any,
     as ``(component, exact)``.
 
@@ -163,12 +163,12 @@ def _forbidden_component(command: str) -> tuple[str, bool] | None:
     for token in command.split():
         cleaned = _unquote(token)
         for part in cleaned.split("/"):
-            if part in FORBIDDEN_NAMES:
+            if part in names:
                 return part, True
             if (
                 _GLOB_CHARS.search(part)
                 and part.strip("*?[]")  # skip a bare `*`, which matches everything
-                and any(fnmatch.fnmatch(name, part) for name in FORBIDDEN_NAMES)
+                and any(fnmatch.fnmatch(name, part) for name in names)
             ):
                 literals = re.sub(r"[*?\[\]]", "", part)
                 if len(literals) > 1:
@@ -263,14 +263,41 @@ def _dangerous_rm(tokens: list[str]) -> bool:
     return False
 
 
-def classify(command: str, config: ShellConfig) -> tuple[Tier, str]:
+def _quiet_arguments(tokens: list[str]) -> bool:
+    """Prefixes cannot prove that their options are read-only.
+
+    Git's diff family can write output or run external diff drivers, and
+    branch can mutate refs. Keep those behind the question. Log's small
+    display-only vocabulary leaves output files and executable helpers out;
+    unknown forms earn a question instead of growing a denylist of flags.
+    """
+    if tokens[0] == "git":
+        if tokens[1:2] == ["status"]:
+            return True
+        if tokens[1:2] != ["log"]:
+            return False
+        return all(
+            arg in {"--oneline", "--graph", "--all", "--decorate", "--no-decorate", "--no-patch"}
+            or re.fullmatch(r"-\d+|--max-count=\d+", arg) is not None
+            for arg in tokens[2:]
+        )
+    # These also have setters or output-writing modes. A bare invocation
+    # describes the machine; unfamiliar arguments must be heard first.
+    if tokens[0] in {"date", "hostname", "file"}:
+        return len(tokens) == 1
+    return True
+
+
+def classify(
+    command: str, config: ShellConfig, *, forbidden: frozenset[str] = FORBIDDEN_NAMES,
+) -> tuple[Tier, str]:
     """Sort a command line into deny, quiet, or confirm, with a spoken reason."""
     text = command.strip()
     if not text:
         return "deny", "it is empty"
 
-    forbidden = _forbidden_component(text)
-    if forbidden is not None and forbidden[1]:
+    credential = _forbidden_component(text, forbidden | FORBIDDEN_NAMES)
+    if credential is not None and credential[1]:
         return "deny", "it touches credentials, shell configuration, or agent state"
 
     deny_tokens = _DENY_TOKENS | set(config.deny_extra)
@@ -289,7 +316,7 @@ def classify(command: str, config: ShellConfig) -> tuple[Tier, str]:
             if head in _DOWNLOADERS:
                 interpreter_stage = True
 
-    if forbidden is not None:
+    if credential is not None:
         # A broad glob that could expand to a credential or startup-file
         # name, with no exact or targeted mention anywhere. Confirm, not
         # deny — and the reason is spoken (see GLOB_CONFIRM_REASON): the
@@ -307,8 +334,10 @@ def classify(command: str, config: ShellConfig) -> tuple[Tier, str]:
         return "confirm", "it redirects, substitutes, or backgrounds"
 
     allow = [tuple(entry.split()) for entry in config.auto_allow]
-    for pipeline in pipelines:
+    for pipeline in _pipelines(harmless_stripped):
         for tokens in pipeline:
+            if not _quiet_arguments(tokens):
+                return "confirm", "its arguments are not known to be read-only"
             if not any(tuple(tokens[: len(entry)]) == entry for entry in allow):
                 return "confirm", "it is not on the quiet allowlist"
     return "quiet", ""
@@ -336,11 +365,13 @@ class ShellGuard:
         tool_name: str = "Bash",
         arg: str = "command",
         where: str = "",
+        forbidden: frozenset[str] = FORBIDDEN_NAMES,
     ) -> None:
         self._config = config
         self._confirm = confirm
         self._tool_name = tool_name
         self._arg = arg
+        self._forbidden = forbidden
         self._where = f" on {where}" if where else ""
         """The same three tiers for any tool whose call is a shell
         command: the SDK's Bash here, or the hub's run-on-the-Mac tool,
@@ -365,7 +396,7 @@ class ShellGuard:
                 "Run it in the foreground instead."
             )
 
-        tier, reason = classify(command, self._config)
+        tier, reason = classify(command, self._config, forbidden=self._forbidden)
         if tier == "deny":
             log.warning("denied shell command (%s): %s", reason, command)
             return deny_decision(

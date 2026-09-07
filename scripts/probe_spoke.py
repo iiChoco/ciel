@@ -465,6 +465,21 @@ async def probe_mute_and_state() -> None:
         [(f["listening"], f["speaking"]) for f in s._link.of("voice.state")]
         == [(False, False), (True, False), (True, True)],
     )
+    s = make_spoke()
+    s._state = State.WAITING
+    s._report_voice_state()
+    s._wake_source = "snap"  # what the frame loop records when the ear fires
+    s._enter_listening()
+    s._report_voice_state()
+    s._enter_followup()
+    s._report_voice_state()
+    s._enter_waiting()
+    s._report_voice_state()
+    check(
+        "a window opened by a snap says so; a follow-up window says nothing; idle says nothing",
+        [(f["listening"], f.get("source")) for f in s._link.of("voice.state")]
+        == [(False, None), (True, "snap"), (True, None), (False, None)],
+    )
 
 
 async def probe_offline() -> None:

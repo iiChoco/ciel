@@ -50,7 +50,7 @@ _BUILTIN_OBSERVERS = ("Read",)
 _CIEL_OBSERVERS = (
     "recall", "recent_actions", "list_timers", "read_messages",
     "find_contact", "open_project", "oura_summary", "where_am_i",
-    "search_files", "find_files",
+    "search_files", "find_files", "spotify_status", "spotify_devices",
 )
 
 # The notebook: Ciel's own memory and project state. Internal, never

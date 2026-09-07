@@ -37,7 +37,7 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
-from ciel.brain.permissions import FILE_TOOLS, WorkspaceGuard
+from ciel.brain.permissions import FILE_TOOLS, WorkspaceGuard, forbidden_names
 from ciel.brain.prompt import build_system_prompt, sections_watch_line
 from ciel.brain.sentences import flush_point, split_sentences
 from ciel.brain.session import SessionStore
@@ -87,6 +87,7 @@ class Brain:
         projects_index_provider: "Callable[[], str | None] | None" = None,
         verify_emitter: "Callable[[str, dict], None] | None" = None,
         mac_tools: bool = False,
+        mac_snapshot: Callable[[str, int], Awaitable[tuple[bytes | None, str | None]]] | None = None,
     ) -> None:
         self._config = config
         self._mac_tools = mac_tools
@@ -142,7 +143,7 @@ class Brain:
         # stays in disallowed_tools exactly as before.
         self._shell_guard: ShellGuard | None = None
         if config.shell.enabled and confirmer is not None:
-            self._shell_guard = ShellGuard(config.shell, confirmer)
+            self._shell_guard = ShellGuard(config.shell, confirmer, forbidden=forbidden_names(config))
             log.info("shell enabled behind the voice gate")
         # The Mac's shell, from the hub: the same tiers and the same gate,
         # matched on the RPC tool's name, and the question says where.
@@ -151,6 +152,7 @@ class Brain:
             self._mac_shell_guard = ShellGuard(
                 config.shell, confirmer,
                 tool_name="mcp__ciel__run_on_mac", where="the Mac",
+                forbidden=forbidden_names(config),
             )
             log.info("the Mac's shell enabled behind the voice gate")
 
@@ -173,6 +175,12 @@ class Brain:
         # rather than letting it run silently on the tool description's say-so.
         if config.messages.enabled and config.messages.allow_send:
             gated.add("mcp__ciel__send_message")
+        spotify_actions = (
+            frozenset({"mcp__ciel__spotify_control"})
+            if config.spotify.enabled else frozenset()
+        )
+        if config.spotify.confirm_controls:
+            gated.update(spotify_actions)
         # Mail from Ciel's own address: outward, irreversible, same gate.
         if config.mail.armed:
             gated.add("mcp__ciel__send_as_ciel")
@@ -221,9 +229,12 @@ class Brain:
                 # an unattended re-check would add a turn to observe what
                 # the tool already proved. The Mac's shell and writes are
                 # journaled like the local ones.
-                self._gated_tools | grant_tools | mac_mutators,
+                # A direct Spotify request is sufficient permission, but
+                # its record and read-back must not depend on asking again.
+                self._gated_tools | grant_tools | mac_mutators | spotify_actions,
                 verify_emitter=verify_emitter,
-                verify_for=self._gated_tools - grant_tools,
+                verify_for=(self._gated_tools | spotify_actions) - grant_tools,
+                mac_snapshot=mac_snapshot,
             )
 
     @property

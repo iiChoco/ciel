@@ -38,12 +38,21 @@ Invariants:
   double clap and no single claps; a single clap is released only once
   its window has been fully scanned, and a snap or a rejected impulse
   in between breaks the pair.
+- **A snap is solitary.** A keystroke arrives in a run; a snap does not.
+  With ``snap_quiet_ms`` on, a would-be snap that follows any other gated
+  impulse inside that window is rejected as typing cadence, whatever its
+  shape.
+- **A veto only says no.** When the ear is given one (``audio/audioset.py``),
+  it is asked only about impulses the rules accepted, and its answer can
+  turn a snap or a clap into a rejection that names what the room was
+  doing instead — never the reverse.
 """
 
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, fields, replace
+from typing import Callable
 
 import numpy as np
 
@@ -54,6 +63,34 @@ _PRE = 80
 _POST = 560
 _RISE = 32
 _ENV = 16
+_CONTEXT = 15_600
+"""What a veto is shown: the 0.975 s of raw audio ending 35 ms after the
+peak — one AudioSet frame, with the keystrokes or the sentence around
+the impulse inside it."""
+
+Veto = Callable[[np.ndarray], "str | None"]
+"""A second opinion that only says no: given the context window, the
+sound the impulse was mistaken for (``"typing 0.82"``), or None."""
+
+
+def first_of(*vetoes: Veto | None) -> Veto | None:
+    """Several opinions, asked in order; the first that says no is the
+    answer. Cheap ones go first, so the model is not run for a keystroke
+    the keyboard already owned up to."""
+    asked = [v for v in vetoes if v is not None]
+    if not asked:
+        return None
+    if len(asked) == 1:
+        return asked[0]
+
+    def veto(window: np.ndarray) -> str | None:
+        for v in asked:
+            heard = v(window)
+            if heard:
+                return heard
+        return None
+
+    return veto
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,10 +140,15 @@ def classify(m: Measurement, c: GestureConfig) -> tuple[str, str]:
 class GestureDetector:
     """Feed the same 30 ms PCM frames the pipeline reads; opens no device."""
 
-    def __init__(self, config: GestureConfig | None = None) -> None:
+    def __init__(self, config: GestureConfig | None = None, veto: Veto | None = None) -> None:
         self.config = config or GestureConfig()
+        self._veto = veto
         c = self.config
-        if not all(np.isfinite(getattr(c, f.name)) and getattr(c, f.name) > 0 for f in fields(c)):
+        numbers = [(f.name, getattr(c, f.name)) for f in fields(c)]
+        numbers = [(n, v) for n, v in numbers if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        # The two windows are switched off by a zero; every other number is a threshold.
+        switches = {"snap_quiet_ms", "keyboard_veto_ms"}
+        if not all(np.isfinite(v) and (v > 0 or (n in switches and v == 0)) for n, v in numbers):
             raise ValueError("gesture thresholds must be finite and positive")
         if not (c.highpass_hz < SAMPLE_RATE / 2 and c.min_peak < c.snap_max_peak <= 1
                 and c.noise_ratio > 1 and c.rise_ratio > 1
@@ -122,11 +164,15 @@ class GestureDetector:
         self._samples = 0
         self._hp = np.zeros(_FRAME * 3)
         self._env = np.zeros(_FRAME * 3)
+        self._raw = np.zeros(_CONTEXT + _FRAME * 3)
         self._prev_x = self._prev_y = 0.0
         self._squares: deque[float] = deque([0.0] * _ENV, maxlen=_ENV)
         self._sum = 0.0
         self._ambient: deque[float] = deque(maxlen=100)
         self._last_peak: int | None = None
+        self._last_gated: int | None = None
+        """The sample of the last impulse that cleared the gate, whatever
+        became of it — the snap's solitude is measured from here."""
         self._pending: Measurement | None = None
         self._ended = False
 
@@ -166,6 +212,7 @@ class GestureDetector:
         hp, env = self._filter(samples)
         self._hp = np.concatenate((self._hp[_FRAME:], hp))
         self._env = np.concatenate((self._env[_FRAME:], env))
+        self._raw = np.concatenate((self._raw[_FRAME:], samples))
         self._samples += _FRAME
         # Scan a whole frame once, with 35 ms of future audio even at its end.
         # This deliberately overlaps capture frames, so their boundaries do
@@ -192,8 +239,10 @@ class GestureDetector:
             if self._last_peak is not None and (sample - self._last_peak) * 1000 < c.refractory_ms * SAMPLE_RATE:
                 continue
             self._last_peak = sample
+            crowded = self._last_gated is not None and (sample - self._last_gated) * 1000 < c.snap_quiet_ms * SAMPLE_RATE
+            self._last_gated = sample
             m = self._measure(p, sample)
-            rows.extend(self._accept(m))
+            rows.extend(self._accept(m, self._context(p), crowded))
         self._ambient.append(float(np.sqrt(np.mean(self._hp[low:high] ** 2))))
         # Only expire a pair once every eligible second peak has been scanned.
         scanned_s = (base + high - 1) / SAMPLE_RATE
@@ -213,6 +262,12 @@ class GestureDetector:
         fall = float(20 * np.log10(peak / max(float(self._env[p + 160]), 1e-9)))
         return Measurement(sample / SAMPLE_RATE, peak, width, high / low, fall)
 
+    def _context(self, p: int) -> np.ndarray:
+        """The second of raw audio ending 35 ms after the peak at ``p`` (an
+        index into the filtered rings, whose end is the raw ring's end)."""
+        end = len(self._raw) - len(self._env) + p + _POST
+        return self._raw[max(0, end - _CONTEXT):end]
+
     def _row(self, m: Measurement, type_: str, kind: str, reason: str = "", second: float | None = None) -> Observation:
         return Observation(type_, kind, m.onset_s, self._samples / SAMPLE_RATE,
                            m.peak, m.width_ms, m.tilt, m.fall_db, reason, second)
@@ -222,16 +277,25 @@ class GestureDetector:
         m, self._pending = self._pending, None
         return self._row(m, "gesture", "clap")
 
-    def _accept(self, m: Measurement) -> list[Observation]:
+    def _accept(self, m: Measurement, context: np.ndarray | None = None, crowded: bool = False) -> list[Observation]:
         rows: list[Observation] = []
         c = self.config
         kind, reason = classify(m, c)
+        if kind == "snap" and crowded:
+            kind, reason = "rejected", f"typing cadence — another impulse inside {c.snap_quiet_ms} ms"
+        # The veto is asked only about what the rules accepted, or what the
+        # relaxed second-clap rule is about to: never about a rejection.
+        vetoed = False
+        if self._veto is not None and context is not None and (kind != "rejected" or self._pending):
+            heard = self._veto(context)
+            if heard:
+                kind, reason, vetoed = "rejected", f"sounds like {heard}", True
         if self._pending:
             first = self._pending
             gap = (m.onset_s - first.onset_s) * 1000
             # A fully recognized snap breaks a pair even in the overlap of
             # the snap and relaxed second-clap spectral boundaries.
-            if (kind != "snap" and c.double_min_ms - 1e-6 <= gap < c.double_max_ms - 1e-6
+            if (kind != "snap" and not vetoed and c.double_min_ms - 1e-6 <= gap < c.double_max_ms - 1e-6
                     and m.peak >= c.second_clap_min_peak and m.tilt < c.clap_max_tilt):
                 self._pending = None
                 rows.append(self._row(m, "candidate", "clap", "second clap; relaxed peak/tilt rule"))
@@ -252,4 +316,4 @@ class GestureDetector:
         return [self._release()] if self._pending else []
 
 
-__all__ = ["Measurement", "Observation", "classify", "GestureDetector"]
+__all__ = ["Measurement", "Observation", "Veto", "first_of", "classify", "GestureDetector"]

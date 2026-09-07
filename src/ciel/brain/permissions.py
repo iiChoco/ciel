@@ -107,6 +107,10 @@ FORBIDDEN_NAMES = frozenset({
     # The Oura authorization — client secret and a refresh token, same
     # arrangement: its own file so this list can name it.
     "oura.json",
+    # Spotify holds a standing right to control the user's player.
+    "spotify.json", "spotify.json.lock",
+    # The signup watcher holds an authenticated website session here.
+    "sections-cookie",
     # The hub token — the wire's shared secret; its own file for the same
     # reason. And the hub's environment file, which holds the brain's
     # login on a server with no keychain.
@@ -131,6 +135,18 @@ FORBIDDEN_NAMES = frozenset({
 _FORBIDDEN_SUBTREES: tuple[str, ...] = ("Library",)
 
 
+def forbidden_names(config: Any) -> frozenset[str]:
+    """Configured credential names join the shared blocklist, even when moved.
+
+    Both gates compare names: choosing a different cookie file must not
+    quietly turn an authentication credential into an ordinary document.
+    """
+    return FORBIDDEN_NAMES | {
+        config.sections.cookie_file.name, config.spotify.token_file.name,
+        config.spotify.token_file.name + ".lock",
+    }
+
+
 class WorkspaceGuard:
     """Confines file tools to a single directory tree.
 
@@ -146,9 +162,11 @@ class WorkspaceGuard:
         workspace: Path,
         read_only_outside: bool = False,
         snapshot_dir: Path | None = None,
+        forbidden: frozenset[str] = FORBIDDEN_NAMES,
     ) -> None:
         self._workspace = workspace.expanduser().resolve()
         self._read_only_outside = read_only_outside
+        self._forbidden = forbidden | FORBIDDEN_NAMES
         self._snapshots = (
             snapshot_dir.expanduser().resolve() if snapshot_dir is not None else None
         )
@@ -160,6 +178,7 @@ class WorkspaceGuard:
         return cls(
             config.files.workspace,
             config.files.read_only_outside,
+            forbidden=forbidden_names(config),
             # The undo carve-out: snapshots live outside any workspace,
             # and restoring one is an ordinary Read the guard must allow.
             snapshot_dir=(
@@ -250,7 +269,7 @@ class WorkspaceGuard:
         except (OSError, RuntimeError, ValueError) as exc:
             return f"That path could not be resolved ({exc})."
 
-        if any(part in FORBIDDEN_NAMES for part in resolved.parts):
+        if any(part in self._forbidden for part in resolved.parts):
             return (
                 "That path touches credentials, shell configuration, or agent "
                 "state, which is off limits."
@@ -274,7 +293,7 @@ class WorkspaceGuard:
             # stray snapshot of a forbidden file should never exist (denied
             # calls are not snapshotted), but if one ever does, reading it
             # here would resurrect exactly what the names list buries.
-            and not any(resolved.name.endswith(f"-{bad}") for bad in FORBIDDEN_NAMES)
+            and not any(resolved.name.endswith(f"-{bad}") for bad in self._forbidden)
         ):
             return None
 
@@ -291,4 +310,4 @@ class WorkspaceGuard:
         )
 
 
-__all__ = ["WorkspaceGuard", "FILE_TOOLS", "FORBIDDEN_NAMES"]
+__all__ = ["WorkspaceGuard", "FILE_TOOLS", "FORBIDDEN_NAMES", "forbidden_names"]

@@ -116,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
     defaults = GestureConfig()
     for field in fields(defaults):
         value = getattr(defaults, field.name)
+        if isinstance(value, bool):
+            continue  # switches are the spoke's business; the tester prints every candidate anyway
         parser.add_argument('--' + field.name.replace('_', '-'), type=type(value), default=value,
                             help=f'gesture threshold (default: {value})')
     args = parser.parse_args(argv)
@@ -128,8 +130,24 @@ def main(argv: list[str] | None = None) -> int:
         # A flag left at its default defers to the configured ear, so the
         # tester hears with the room's own thresholds unless told otherwise.
         overrides = {f.name: getattr(args, f.name) for f in fields(defaults)
-                     if getattr(args, f.name) != getattr(defaults, f.name)}
-        detector = GestureDetector(replace(config.gestures, **overrides))
+                     if hasattr(args, f.name) and getattr(args, f.name) != getattr(defaults, f.name)}
+        gestures = replace(config.gestures, **overrides)
+        from ciel.audio.gestures import first_of
+
+        keys = None
+        if gestures.keyboard_veto_ms > 0 and not args.wav:  # a recording has no keyboard to ask
+            from ciel.audio.keys import KeyboardVeto
+
+            keys = KeyboardVeto(gestures.keyboard_veto_ms)
+            keys = keys if keys.available else None
+        model = None
+        if gestures.veto_model:
+            from ciel.audio.audioset import AudioSetVeto
+
+            model = AudioSetVeto(gestures.veto_model, config.state_dir / "models", gestures.veto_threshold)
+            model.load()  # fetches the pretrained model once, like the spoke does
+            print(f"veto: {model.path.name} at {gestures.veto_threshold:g}", file=sys.stderr)
+        detector = GestureDetector(gestures, first_of(keys, model))
         if args.csv:
             descriptor = os.open(args.csv, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
             os.fchmod(descriptor, 0o600)

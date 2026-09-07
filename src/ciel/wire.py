@@ -121,8 +121,12 @@ CATALOG: dict[str, FrameSpec] = {
     ),
     # The spoke's state machine, for the hub's ladder: whether a
     # listening window is open and whether speech is in hand right now.
+    # ``source`` says how an open window was opened — spoken, snap, or
+    # clap twice — so the Chart's chip can say so; a follow-up window,
+    # opened by nothing, carries none.
     "voice.state": FrameSpec(
-        "c2h", required={"listening": "bool", "speaking": "bool"}
+        "c2h", required={"listening": "bool", "speaking": "bool"},
+        optional={"source": "str"},
     ),
     "confirm.answer": FrameSpec(
         "c2h", required={"confirm_id": "str", "text": "str"}

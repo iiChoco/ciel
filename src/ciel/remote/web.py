@@ -319,6 +319,9 @@ class WebLink:
         socket would let the slowest tab pace the pipeline."""
         self._writers: set[asyncio.Task[None]] = set()
         self._state = "idle"
+        self._source: str | None = None
+        """How a listening state was reached — "spoken", "snap", "clap
+        twice" — shown beside it on the chip; None when nothing opened it."""
         self._muted = False
         self._speak_back = False
         self._agents: list[dict[str, Any]] = []
@@ -410,11 +413,14 @@ class WebLink:
         self._history.append(row)
         self._broadcast(row)
 
-    def note_state(self, state: str) -> None:
-        if state == self._state:
+    def note_state(self, state: str, source: str | None = None) -> None:
+        if (state, source) == (self._state, self._source):
             return
-        self._state = state
-        self._broadcast({"type": "state", "state": state})
+        self._state, self._source = state, source
+        frame: dict[str, Any] = {"type": "state", "state": state}
+        if source:
+            frame["source"] = source
+        self._broadcast(frame)
 
     def note_muted(self, muted: bool) -> None:
         self._muted = muted
@@ -718,6 +724,7 @@ class WebLink:
             "muted": self._muted,
             "speakback": self._speak_back,
             "state": self._state,
+            "source": self._source,
             "agents": self._agents,
             "world": self._world,
             "history": [] if replay is not None else list(self._history),

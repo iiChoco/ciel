@@ -102,6 +102,11 @@ class Spoke:
     """The lane of the hub turn being played: "voice" (ours — the ack
     filler, the follow-up window) or "web" (speak back — a typed turn
     the user wants to hear, played at idle with none of that)."""
+    _wake_source: str | None = None
+    """What opened the current listening window — "spoken", "snap",
+    "clap twice" — or None for a window nothing opened (a follow-up).
+    Rides ``voice.state`` so the Chart's chip can say it. A class default
+    so a probe that builds the spoke by ``__new__`` runs without one."""
     """The world relay, or None when ``[world]`` is off — a class default
     so a probe that builds the spoke by ``__new__`` runs without one."""
 
@@ -109,7 +114,7 @@ class Spoke:
         self._config = config
         self._stt: SpeechToText = build_stt(config.stt)
         self._tts: TextToSpeech = build_tts(config)
-        self._wake: WakeDetector = build_wake_detector(config.wake, config.gestures)
+        self._wake: WakeDetector = build_wake_detector(config.wake, config.gestures, config.state_dir, config.spotify)
         self._endpointer = Endpointer(
             config.audio, noise_floor=lambda: self._noise_floor
         )
@@ -229,8 +234,9 @@ class Spoke:
         """(confirm_id, deadline) while listening for a spoken answer."""
         self._delivering = False
         self._hub_lost_said = False
-        self._reported: tuple[bool, bool] | None = None
+        self._reported: tuple[bool, bool, str | None] | None = None
         """The last ``voice.state`` sent, so transitions send one frame."""
+        self._wake_source = None
 
         self._last_wall = time.time()
         self._watcher: SourceWatcher | None = (
@@ -307,6 +313,7 @@ class Spoke:
                             continue  # the room is Ciel's for a moment
                         self._track_noise_floor(frame)
                         if not self._muted and self._wake.push(frame):
+                            self._wake_source = getattr(self._wake, "source", None) or "spoken"
                             await self._acknowledge(player, mic)
                             self._enter_listening()
 
@@ -875,10 +882,14 @@ class Spoke:
     def _report_voice_state(self) -> None:
         listening = self._state is State.LISTENING
         speaking = listening and self._endpointer.speaking
-        current = (listening, speaking)
+        source = self._wake_source if listening else None
+        current = (listening, speaking, source)
         if current != self._reported:
-            if self._link.send({"type": "voice.state", "listening": listening,
-                                "speaking": speaking}):
+            frame: dict[str, Any] = {"type": "voice.state", "listening": listening,
+                                     "speaking": speaking}
+            if source:
+                frame["source"] = source
+            if self._link.send(frame):
                 self._reported = current
 
     @staticmethod
@@ -936,6 +947,7 @@ class Spoke:
 
     def _enter_continuation(self) -> None:
         self._state = State.LISTENING
+        self._wake_source = None
         self._endpointer.reset()
         self._followup_until = (
             time.monotonic() + self._config.audio.filler_extend_ms / 1000
@@ -944,6 +956,7 @@ class Spoke:
 
     def _enter_followup(self) -> None:
         self._state = State.LISTENING
+        self._wake_source = None
         self._endpointer.reset()
         self._followup_until = (
             time.monotonic() + self._config.audio.followup_ms / 1000
@@ -958,6 +971,7 @@ class Spoke:
 
     def _enter_waiting(self) -> None:
         self._state = State.WAITING
+        self._wake_source = None
         self._endpointer.reset()
         self._wake.reset()
         self._followup_until = None
