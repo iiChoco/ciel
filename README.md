@@ -29,9 +29,10 @@ Say **"hey jarvis"**, then talk.
 
 ## What it does
 
-- **Hears you** — `openWakeWord` for the wake phrase, WebRTC VAD for knowing when
-  you've stopped talking, `mlx-whisper` (Metal GPU) for transcription with
-  `faster-whisper` as the CPU fallback. All on-device.
+- **Hears you** — `openWakeWord` for the wake phrase (a finger snap or two
+  claps can stand in for it — see [Snapping and clapping](#snapping-and-clapping)),
+  WebRTC VAD for knowing when you've stopped talking, `mlx-whisper` (Metal GPU)
+  for transcription with `faster-whisper` as the CPU fallback. All on-device.
 - **Thinks** — Claude Opus 5 via the Claude Agent SDK, with web search — and a
   deep-thought escalation agent for the questions that deserve more than a
   conversational answer. Mechanical requests ("ten minute timer") never reach
@@ -163,6 +164,9 @@ effect = "none"              # "jarvis" adds the installed-speaker treatment
 [wake]
 mode = "wakeword"
 threshold = 0.5              # raise if the TV sets it off, lower if it ignores you
+snap = true                  # a finger snap addresses Ciel too
+double_clap = "play"         # two claps within 0.8 s: "wake" like the snap, or "play" music; the [gestures] table tunes the ear
+double_clap_plays = "spotify:artist:0du5cEVh5yTK9QJze8zA0C"   # Spotify's "Copy Spotify URI"
 
 [audio]
 silence_ms = 500             # how long a pause ends your turn (toward 700 if she interrupts)
@@ -1159,6 +1163,53 @@ Train **"hey ciel"**, not bare "Ciel". One-syllable wake words have much higher
 false-trigger rates; the two-syllable prefix gives the detector enough to work
 with. You'd still address it as Ciel.
 
+## Snapping and clapping
+
+A finger snap, or two claps, can address Ciel the way the phrase does: the
+same acknowledgement, the same listening window, the same log line. Switch
+either on under `[wake]` (`snap = true`, `double_clap = "wake"`); the ear sits
+*beside* the wake word, never instead of it, and is not built in `always`
+mode where there is nothing to wake.
+
+Two claps can also do something rather than wake: `double_clap = "play"`
+starts `double_clap_plays` in Spotify — an artist, album, playlist, or track,
+as Spotify's "Copy Spotify URI" gives it — the way a switch on the wall
+starts music. Nothing is asked first: the pair is itself a deliberate
+gesture, mute gates it, and a wrong song costs one tap. The door
+(`music.py`) is deliberately narrow — the shell guard still denies
+`osascript` to the brain — and only a string of the URI's exact shape is ever
+handed to Spotify, as an argument rather than as script. What played is
+logged.
+
+The ear (`audio/gestures.py`, part of Characteristic) needs no model. Every
+impulse that clears an onset gate — a twenty-decibel step inside two
+milliseconds, well above the room's floor — is measured four ways: its peak,
+the width of its body above half that peak, its *tilt* (energy above 2 kHz
+against the band below), and how far it has fallen ten milliseconds on. At
+the pipeline's 16 kHz a snap and a clap are both one to three milliseconds
+wide, so tilt is what tells them apart (a snap is bright, a clap dark), and
+loudness is what tells a clap from a keystroke. A single clap never wakes:
+on a laptop microphone it is the same sound as a knuckle on the desk, which
+is why the gesture is a pair. Reach is the same room and line of sight —
+snaps to about five metres in a quiet room, claps further — and it shrinks
+with music on or the lid closed.
+
+Every boundary is a field in `[gestures]`, read off one MacBook's lid
+microphone on 2026-09-06. Rooms differ, so before trusting it, listen with
+the tester, which prints the four numbers and a verdict for every impulse
+and names the cue a miss failed on:
+
+```bash
+uv run scripts/listen_gestures.py                       # live, through Ciel's own microphone path
+uv run scripts/listen_gestures.py --csv /tmp/hands.csv  # ...and log every impulse (owner-only)
+uv run scripts/listen_gestures.py --wav /tmp/hands.wav  # replay a 16 kHz mono recording instead
+uv run scripts/listen_gestures.py --snap-min-tilt 2.0   # try a boundary before writing it to config
+```
+
+Snap ten times, clap ten times, then type and knock on the desk, and move
+each boundary to sit midway between the clusters. A boundary that separates
+one room's snaps from its claps is not a promise about another room.
+
 ## Development probes
 
 Each isolates one layer, so when something misbehaves you can tell which half to
@@ -1188,6 +1239,8 @@ uv run scripts/probe_location.py      # places, both sources, move notes
 uv run scripts/probe_location.py --live  # read where this Mac is right now
 uv run scripts/probe_world.py         # the world table: facts, freshness, the block, the relay
 uv run scripts/probe_wake_model.py ~/.ciel/models/hey_ciel.onnx  # qualify a custom wake model
+uv run scripts/probe_gestures.py      # the gesture ear: snaps, pairs, and its seat beside the wake word
+uv run scripts/listen_gestures.py     # hear snaps and claps for real, with the numbers behind each verdict
 ```
 
 `enroll_voice.py` (Barn Door's enrollment and tuning) is documented in the
@@ -1231,7 +1284,7 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `config.py` | Every swappable choice, in one place |
 | `commands.py` | The no-brain fast path — mechanical requests matched locally |
 | `confirm.py` | Proof Obligation — the spoken/texted yes-or-no broker |
-| `audio/` | Capture, endpointing, playback, wake, speaker identity |
+| `audio/` | Capture, endpointing, playback, wake (the phrase and the gesture ear), speaker identity |
 | `stt/`, `tts/` | Engine protocols and implementations (plus the voice effect) |
 | `brain/` | Claude client, system prompt, sessions, guards, tools |
 | `memory/` | The durable file-backed store (Invariant) |
@@ -1240,6 +1293,7 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `messages/` | iMessage — reading the database, sending through Messages |
 | `journal.py` | Inverse — the action journal and snapshots, so actions can be undone |
 | `timers.py` | Timers and alarms, ringing or held while muted |
+| `music.py` | Spotify on the Mac, through one narrow AppleScript door |
 | `projects.py` | Atlas — durable working state per project |
 | `transcript.py` | Trace — the record of the path actually taken |
 | `reload.py` | Analytic Continuation — watch the source, re-exec, resume |

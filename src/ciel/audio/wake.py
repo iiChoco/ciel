@@ -17,7 +17,7 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Awaitable, Callable, Protocol, runtime_checkable
 
 log = logging.getLogger(__name__)
 
@@ -221,19 +221,137 @@ class OpenWakeWord:
         self._model = None
 
 
-def build_wake_detector(config) -> WakeDetector:  # noqa: ANN001 - WakeConfig
-    """Pick a detector from config."""
+class GestureWake:
+    """Wake on a hand sound — a snap, two claps, or either — or act on one.
+
+    Wraps the gesture ear (``audio/gestures.py``) in the detector shape so
+    the frame loop cannot tell it from the wake word: fed the same frames,
+    answering the same question. A gesture in ``wake`` answers yes; a
+    gesture in ``actions`` runs its callable instead and answers no, so
+    two claps can start music without opening a listening window. The
+    detector's other rows are diagnostics and are dropped here. Actions
+    are scheduled, never awaited: the frame loop must not wait on an
+    application.
+    """
+
+    def __init__(
+        self,
+        detector,  # noqa: ANN001 - GestureDetector
+        wake: set[str],
+        actions: "dict[str, tuple[str, Callable[[], Awaitable[object]]]] | None" = None,
+    ) -> None:
+        self._detector = detector
+        self._wake = set(wake)
+        self._actions = dict(actions or {})
+        self._tasks: set[asyncio.Task] = set()
+        names = {"snap": "snap", "double_clap": "clap twice"}
+        self.phrases = tuple(
+            names[kind] if kind in self._wake else f"{names[kind]} to {self._actions[kind][0]}"
+            for kind in ("snap", "double_clap")
+            if kind in self._wake or kind in self._actions
+        )
+        """How the ready line names each gesture, in the order they fire."""
+
+    async def start(self) -> None:
+        log.info("gesture wake ready (%s)", ", ".join(self.phrases))
+
+    def push(self, frame: bytes) -> bool:
+        for row in self._detector.push(frame):
+            if row.type != "gesture":
+                continue
+            shown = row.kind.replace("_", " ")
+            if row.kind in self._actions:
+                verb, action = self._actions[row.kind]
+                log.info("gesture: %s — %s (peak %.2f, tilt %.2f)", shown, verb, row.peak, row.tilt)
+                task = asyncio.get_running_loop().create_task(action())
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+            elif row.kind in self._wake:
+                log.info("wake: %s (peak %.2f, tilt %.2f)", shown, row.peak, row.tilt)
+                return True
+        return False
+
+    def reset(self) -> None:
+        # A half-made pair must not survive a turn, but the ears stay warm.
+        self._detector.clear()
+
+    async def close(self) -> None:
+        return None
+
+
+class AnyWake:
+    """Several detectors, one answer: addressed if any of them says so.
+
+    Every member sees every frame, so a wake word's model keeps its buffers
+    current even on the frame a snap fires. ``arm`` is exposed only when a
+    member has it, so the pipeline's ``hasattr`` test for the hotkey keeps
+    meaning what it meant.
+    """
+
+    def __init__(self, members: list[WakeDetector]) -> None:
+        self._members = members
+        armable = [m for m in members if hasattr(m, "arm")]
+        if armable:
+            self.arm = lambda: [m.arm() for m in armable]  # type: ignore[attr-defined]
+
+    async def start(self) -> None:
+        for member in self._members:
+            await member.start()
+
+    def push(self, frame: bytes) -> bool:
+        # No short-circuit: every member must consume the frame.
+        return any([member.push(frame) for member in self._members])
+
+    def reset(self) -> None:
+        for member in self._members:
+            member.reset()
+
+    async def close(self) -> None:
+        for member in self._members:
+            await member.close()
+
+
+def build_wake_detector(config, gestures=None) -> WakeDetector:  # noqa: ANN001 - WakeConfig, GestureConfig
+    """Pick a detector from config, with the gesture ear beside it when asked."""
     if config.mode == "hotkey":
-        return HotkeyWake()
-    if config.mode == "always":
+        base: WakeDetector = HotkeyWake()
+    elif config.mode == "always":
         return AlwaysAwake()
-    if config.mode == "wakeword":
-        return OpenWakeWord(
+    elif config.mode == "wakeword":
+        base = OpenWakeWord(
             model=config.model,
             threshold=config.threshold,
             vad_threshold=config.vad_threshold,
         )
-    raise ValueError(f"unknown wake mode {config.mode!r}")
+    else:
+        raise ValueError(f"unknown wake mode {config.mode!r}")
+    wake = {kind for kind, on in (("snap", config.snap), ("double_clap", config.double_clap == "wake")) if on}
+    actions: dict[str, tuple[str, Callable[[], Awaitable[object]]]] = {}
+    if config.double_clap == "play":
+        from ciel import music
+
+        if not music.valid_uri(config.double_clap_plays):
+            raise ValueError(
+                f"wake.double_clap_plays must be a Spotify URI such as spotify:artist:<id>, not {config.double_clap_plays!r}"
+            )
+        uri = config.double_clap_plays
+        actions["double_clap"] = ("play music", lambda: music.play(uri))
+    if not (wake or actions):
+        return base
+    from ciel.audio.gestures import GestureDetector
+    from ciel.config import GestureConfig
+
+    ear = GestureWake(GestureDetector(gestures or GestureConfig()), wake, actions)
+    return AnyWake([base, ear])
+
+
+def wake_phrases(detector: WakeDetector) -> tuple[str, ...]:
+    """The gestures a detector answers to, for the ready line."""
+    if isinstance(detector, GestureWake):
+        return detector.phrases
+    if isinstance(detector, AnyWake):
+        return tuple(p for m in detector._members for p in wake_phrases(m))
+    return ()
 
 
 __all__ = [
@@ -241,5 +359,8 @@ __all__ = [
     "HotkeyWake",
     "AlwaysAwake",
     "OpenWakeWord",
+    "GestureWake",
+    "AnyWake",
     "build_wake_detector",
+    "wake_phrases",
 ]

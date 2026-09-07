@@ -45,7 +45,7 @@ from ciel.audio.input import MicStream, float_to_pcm
 from ciel.audio.output import Player
 from ciel.audio.speaker import build_speaker_gate
 from ciel.audio.vad import Endpointer
-from ciel.audio.wake import WakeDetector, build_wake_detector
+from ciel.audio.wake import WakeDetector, build_wake_detector, wake_phrases
 from ciel.commands import match as match_command
 from ciel.config import SAMPLE_RATE, Config
 from ciel.pipeline import _SLEEP_GAP_S, build_tts, trails_off
@@ -109,7 +109,7 @@ class Spoke:
         self._config = config
         self._stt: SpeechToText = build_stt(config.stt)
         self._tts: TextToSpeech = build_tts(config)
-        self._wake: WakeDetector = build_wake_detector(config.wake)
+        self._wake: WakeDetector = build_wake_detector(config.wake, config.gestures)
         self._endpointer = Endpointer(
             config.audio, noise_floor=lambda: self._noise_floor
         )
@@ -425,11 +425,14 @@ class Spoke:
 
     def _announce_ready(self) -> None:
         mode = self._config.wake.mode
+        gestures = ", or ".join(wake_phrases(self._wake))
         if mode == "wakeword":
             phrase = Path(self._config.wake.model).stem.replace("_", " ")
-            print(f'\nReady. Say "{phrase}".')
+            print(f'\nReady. Say "{phrase}"{", or " + gestures if gestures else ""}.')
         elif mode == "always":
             print("\nReady. Just talk.")
+        elif gestures:
+            print(f"\nOr {gestures}.")
         print(f"hub: {self._config.spoke.hub}")
         if self._muted:
             print("  [muted — Ciel will stay silent and not listen for its name]")

@@ -199,6 +199,88 @@ class WakeConfig:
     nothing is waiting on this one to finish (no command follows in the same
     breath), so a slightly longer phrase is fine."""
 
+    snap: bool = False
+    """A finger snap addresses Ciel the way the phrase does: the same
+    acknowledgement, the same listening window. Heard alongside the wake
+    word, not instead of it, and ignored in ``always`` mode where there is
+    nothing to wake. Tune the ear in ``[gestures]``."""
+
+    double_clap: Literal["off", "wake", "play"] = "off"
+    """What two claps within the pair window do. ``wake`` addresses Ciel
+    like the snap; ``play`` starts ``double_clap_plays`` in Spotify without
+    waking, the way a switch on the wall starts music. Two claps rather
+    than one because on a laptop microphone a single clap and a knuckle on
+    the desk are the same sound; a pair is something the desk rarely
+    produces. Gated by mute either way."""
+
+    double_clap_plays: str = ""
+    """The Spotify URI two claps start when ``double_clap = "play"`` —
+    an artist, album, playlist, or track, as Spotify's "Copy Spotify URI"
+    gives it (``spotify:artist:...``). Only a URI of that shape is ever
+    handed to Spotify; see ``music.py``."""
+
+
+@dataclass(frozen=True, slots=True)
+class GestureConfig:
+    """The ear for hand sounds — snaps and claps on the wake microphone.
+
+    An impulse that clears the onset gate is measured four ways: its peak,
+    how long its body stays above half that peak, how much energy sits
+    above 2 kHz against the band below it (the *tilt*), and how far the
+    envelope has fallen 10 ms later. Tilt is what separates a snap from a
+    clap at 16 kHz; loudness is what separates a clap from a keystroke.
+    Every boundary here was read off one MacBook's lid microphone on
+    2026-09-06, and ``scripts/listen_gestures.py`` prints the same four
+    numbers for every impulse so they can be re-read in another room."""
+
+    warmup_ms: int = 600
+    """Frames ignored after start while the noise floor settles."""
+
+    min_peak: float = 0.01
+    """Full-scale fraction an impulse must reach to be looked at at all."""
+
+    noise_ratio: float = 6.0
+    """...and how far above the room's floor (a median of recent frames)."""
+
+    rise_ratio: float = 10.0
+    """The onset gate: the peak must be this many times the envelope 2 ms
+    earlier. A 20 dB step inside 2 ms is an impact; speech never does it."""
+
+    highpass_hz: float = 500.0
+    """Hum and vowels are dropped before anything is measured."""
+
+    refractory_ms: int = 60
+    """No second impulse is counted this soon after one: a clap's ring-down
+    is gone in 60 ms, and a fast double clap's second hit lands at 100."""
+
+    double_min_ms: int = 60
+    double_max_ms: int = 800
+    """The pair window: a second clap this long after the first completes
+    a double clap. Wider than 800 ms and unrelated bumps start pairing."""
+
+    snap_max_peak: float = 0.25
+    """No snap measured louder than this; above it a bright impulse is a
+    clap close to the microphone, which carries more top end than one
+    across the room."""
+
+    snap_max_ms: float = 5.0
+    snap_min_tilt: float = 1.5
+    snap_min_fall_db: float = 15.0
+
+    clap_min_peak: float = 0.1
+    """Claps at the desk peaked at 0.55 and up, typing at 0.02: loudness
+    is the only cue that tells them apart."""
+
+    clap_max_ms: float = 20.0
+    clap_max_tilt: float = 2.0
+    clap_min_fall_db: float = 3.0
+    """Loud claps overload the microphone and ring, so their fall barely
+    clears this."""
+
+    second_clap_min_peak: float = 0.05
+    """The second clap of a pair is often quieter and lands in the first
+    one's reverberation, so it is held only to this and to tilt."""
+
 
 @dataclass(frozen=True, slots=True)
 class VoiceConfig:
@@ -1887,6 +1969,7 @@ class WorldConfig:
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
+    gestures: GestureConfig = field(default_factory=GestureConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     stt: STTConfig = field(default_factory=STTConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
@@ -1937,6 +2020,7 @@ class Config:
 _SECTIONS = {
     "audio": AudioConfig,
     "wake": WakeConfig,
+    "gestures": GestureConfig,
     "voice": VoiceConfig,
     "stt": STTConfig,
     "tts": TTSConfig,

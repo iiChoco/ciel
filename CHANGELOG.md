@@ -2,6 +2,74 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-06 — two claps can start the music
+
+**Why.** With the gesture ear in place, the first thing the user wanted
+two claps to do was not to wake Ciel but to start Bruno Mars. There was
+no way for Ciel to start music at all: the shell guard denies
+`osascript` outright, and rightly, since scripting other applications
+erases every boundary the tool configs draw.
+
+**What.**
+
+- *A gesture can act instead of waking.* `GestureWake` now carries
+  actions beside its wake set: a gesture with an action runs it (scheduled
+  on the loop, never awaited by the frame loop) and answers no, so the
+  listening window stays shut. `wake.double_clap` is a three-way switch —
+  `off`, `wake`, `play` — and `wake.double_clap_plays` names what plays.
+- *One narrow door.* `music.py` starts Spotify playing a URI through its
+  AppleScript surface and nothing else: the URI must match the exact shape
+  "Copy Spotify URI" produces, is refused at build time otherwise, and
+  reaches the script as an argument, never spliced in. What played is
+  logged. It does not go through the confirmation broker, on purpose: two
+  claps are the deliberate act, mute gates them, and a wrong song is undone
+  with one tap. The journal lives with the brain, so the log line is the
+  record here.
+
+**Probes.** `probe_gestures.py 71 → 83`: in play mode two claps run the
+action once and never wake, the snap still wakes beside them, the ready
+line says what two claps do, the build refuses anything but a Spotify URI,
+the URI reaches AppleScript as an argument, a bad URI never starts a
+process, and Spotify's refusal is reported rather than raised.
+
+## 2026-09-06 — a snap or two claps can stand in for the name
+
+**Why.** The wake phrase was the only way to get Ciel's attention without
+a keyboard, and there are moments when a phrase is the wrong instrument:
+a room where speaking feels odd, a mouth full, a doorway too far for a
+whisper. An afternoon at the microphone showed that a finger snap is
+reliably detectable on a laptop's lid microphone at the pipeline's
+16 kHz, that a clap is too, and that a single clap is indistinguishable
+from a knuckle on the desk — so the second gesture is a pair.
+
+**What.**
+
+- *An ear beside the wake word.* `audio/gestures.py` measures every
+  impulse that clears an onset gate four ways — peak, width, tilt, fall —
+  and sorts it into snap, clap, or neither, in audio time, with filter
+  state carried across frames. `GestureWake` wraps it in the detector
+  shape and `AnyWake` seats it beside the phrase (or the hotkey), so the
+  frame loop, the acknowledgement, and the listening window cannot tell
+  a snap from "hey jarvis". The wake-word model still sees every frame,
+  and a turn's reset forgets a half-made pair without restarting the
+  warm-up.
+- *Two switches and a table.* `wake.snap` and `wake.double_clap`, both
+  off by default; every boundary the ear uses is a documented field in
+  `[gestures]`, read off one MacBook on 2026-09-06 and expected to move
+  in another room. The ready line names what is switched on.
+- *The tester hears with Ciel's ear.* `scripts/listen_gestures.py` now
+  imports the detector and thresholds from the package rather than
+  carrying its own copy, replays recordings, and turns every `[gestures]`
+  field into a flag so a boundary can be tried before it is written down.
+
+**Probes.** `probe_gestures.py 52 → 71`: a snap and a double clap wake
+through the ear and a lone clap never does; each switch admits only its
+own gesture; a pair fires once; reset forgets a pair without going deaf;
+the composite feeds every member every frame and keeps the hotkey's
+`arm`; `always` mode builds no ear; the ready line names the gestures in
+order; the `[gestures]` table loads from TOML and the environment.
+`probe_spoke.py` and `probe_audio.py vad` unchanged and passing.
+
 ## 2026-09-06 — two hands, one set of conventions
 
 **Why.** Two agents wrote to the same checkout and could undo one another's

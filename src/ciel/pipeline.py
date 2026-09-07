@@ -792,7 +792,7 @@ class Pipeline:
 
             self._stt = build_stt(config.stt)
             self._tts = build_tts(config)
-            self._wake = build_wake_detector(config.wake)
+            self._wake = build_wake_detector(config.wake, config.gestures)
             # The lambda defers to the running noise-floor estimate (tracked in
             # the frame loop) so endpointing in a noisy room demands speech
             # louder than the room — see Endpointer._clears_floor.
@@ -3550,15 +3550,20 @@ class Pipeline:
             assert self._web_link is not None
             print(f"\nHub ready. Wire: {self._web_link.url}/ws — run `ciel spoke` for the room.")
             return
+        from ciel.audio.wake import wake_phrases
+
         mode = self._config.wake.mode
+        gestures = ", or ".join(wake_phrases(self._wake)) if self._wake is not None else ""
         if mode == "wakeword":
             # The model may be a pretrained NAME ("hey_jarvis") or a PATH to
             # a custom model ("~/.ciel/models/hey_ciel.onnx") — the phrase is
             # the stem either way, not the directory it lives in.
             phrase = Path(self._config.wake.model).stem.replace("_", " ")
-            print(f'\nReady. Say "{phrase}".')
+            print(f'\nReady. Say "{phrase}"{", or " + gestures if gestures else ""}.')
         elif mode == "always":
             print("\nReady. Just talk.")
+        elif gestures:
+            print(f"\nOr {gestures}.")
         # hotkey prints its own prompt via reset()/start()
         if self._web_link is not None and self._web_link.serving:
             print(f"GUI: {self._web_link.url}")
