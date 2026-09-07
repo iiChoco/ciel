@@ -1,9 +1,15 @@
 """The Spotify tools — find a recording, then choose what the room plays.
 
-**Looking and acting are separate.** Search, status and devices are reads;
-control is one tool, watched by Inverse. A direct user request is enough
-unless confirm_controls is enabled. A missing journal removes control;
-when confirmation is opted into, a missing confirmer withholds permission.
+**Looking and acting are separate.** Search, status, devices, the user's
+playlists and their contents are reads; control and the three playlist
+changes (create, add, remove) are actions, watched by Inverse. A direct
+user request is enough unless confirm_controls is enabled. A missing
+journal removes every action; when confirmation is opted into, a missing
+confirmer withholds permission.
+
+**Playlists are the user's own.** Spotify shows and edits only playlists
+the account owns or collaborates on, and a new one is private unless the
+user says otherwise, so a spoken request never publishes to the profile.
 
 **Account data stays in private turns.** The pipeline scopes these tools
 alongside the world projection. A public turn cannot read the account or
@@ -72,4 +78,50 @@ async def spotify_control(args: dict[str, Any]) -> dict[str, Any]:
     return await _run("control", args)
 
 
-SPOTIFY_TOOLS = [spotify_search, spotify_status, spotify_devices, spotify_control]
+@tool("spotify_playlists", "List the user's own Spotify playlists (name, URI, id, item count), a page at a time. Read-only, private turns only. To play one, pass its URI to spotify_control; to find one by name, use spotify_playlist_named.", {
+    "type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50}, "offset": {"type": "integer", "minimum": 0, "default": 0}}, "additionalProperties": False,
+})
+async def spotify_playlists(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run("playlists", args)
+
+
+@tool("spotify_playlist_named", "Find one of the user's own playlists by its name, case-insensitively. Read-only, private turns only. Use for 'play my playlist called X', then pass the found URI to spotify_control. An honest miss says no playlist has that name.", {
+    "type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"], "additionalProperties": False,
+})
+async def spotify_playlist_named(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run("playlist_named", args)
+
+
+@tool("spotify_playlist_items", "Read what is in one of the user's own playlists (name, URI, artists, added_at), a page at a time. Read-only, private turns only. Spotify shows only playlists the user owns or collaborates on.", {
+    "type": "object", "properties": {"playlist": {"type": "string", "description": "The playlist's Spotify ID or URI, from spotify_playlists."}, "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50}, "offset": {"type": "integer", "minimum": 0, "default": 0}}, "required": ["playlist"], "additionalProperties": False,
+})
+async def spotify_playlist_items(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run("playlist_items", args)
+
+
+@tool("spotify_playlist_create", "Create a new playlist in the user's account, on their direct request. Private unless public is true. Returns the new playlist's id and URI; it is empty until spotify_playlist_add fills it. Private turns only.", {
+    "type": "object", "properties": {"name": {"type": "string"}, "description": {"type": "string", "default": ""}, "public": {"type": "boolean", "default": False}}, "required": ["name"], "additionalProperties": False,
+})
+async def spotify_playlist_create(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run("playlist_create", args)
+
+
+@tool("spotify_playlist_add", "Add one to a hundred tracks or episodes to one of the user's own playlists, by exact URIs from spotify_search or spotify_playlist_items; never invent a URI. Appends unless position is given. Returns the playlist's new snapshot id. Private turns only.", {
+    "type": "object", "properties": {"playlist": {"type": "string"}, "uris": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 100}, "position": {"type": "integer", "minimum": 0}}, "required": ["playlist", "uris"], "additionalProperties": False,
+})
+async def spotify_playlist_add(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run("playlist_add", args)
+
+
+@tool("spotify_playlist_remove", "Remove every occurrence of the given tracks or episodes from one of the user's own playlists, by exact URIs from spotify_playlist_items. Returns the playlist's new snapshot id. Private turns only.", {
+    "type": "object", "properties": {"playlist": {"type": "string"}, "uris": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 100}}, "required": ["playlist", "uris"], "additionalProperties": False,
+})
+async def spotify_playlist_remove(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run("playlist_remove", args)
+
+
+SPOTIFY_READS = [spotify_search, spotify_status, spotify_devices, spotify_playlists, spotify_playlist_named, spotify_playlist_items]
+SPOTIFY_ACTIONS = [spotify_control, spotify_playlist_create, spotify_playlist_add, spotify_playlist_remove]
+"""The actions are what Inverse watches and what a missing journal removes."""
+SPOTIFY_TOOLS = SPOTIFY_READS + SPOTIFY_ACTIONS
+SPOTIFY_ACTION_NAMES = frozenset("mcp__ciel__" + t.name for t in SPOTIFY_ACTIONS)

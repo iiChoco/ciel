@@ -45,8 +45,16 @@ from ciel.config import SpotifyConfig, load_config
 API_URL = "https://api.spotify.com/v1"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
-SCOPES = ("user-read-playback-state", "user-modify-playback-state")
+PLAYBACK_SCOPES = ("user-read-playback-state", "user-modify-playback-state")
+"""What a login must carry: without these there is no player to talk to."""
+PLAYLIST_SCOPES = ("playlist-read-private", "playlist-modify-private", "playlist-modify-public")
+"""What the playlist calls need. Asked for at every login; a login made
+before they were asked for still works for playback and is told, by
+name, to connect again when a playlist is touched."""
+SCOPES = PLAYBACK_SCOPES + PLAYLIST_SCOPES
 _URI = re.compile(r"spotify:(track|album|artist|playlist):[A-Za-z0-9]{22}\Z")
+_ITEM_URI = re.compile(r"spotify:(track|episode):[A-Za-z0-9]{22}\Z")
+_ID = re.compile(r"[A-Za-z0-9]{22}\Z")
 
 
 class SpotifyUnavailable(RuntimeError):
@@ -150,14 +158,25 @@ class OAuthTokens:
         if not isinstance(access, str) or not access or not isinstance(refresh, str) or not refresh or type(expires) not in (int, float) or not math.isfinite(expires) or expires <= 0:
             raise SpotifyUnavailable("Spotify returned an incomplete authorization. Connect again.")
         scopes = payload.get("scope")
-        if scopes is not None and (not isinstance(scopes, str) or not set(SCOPES).issubset(scopes.split())):
+        if scopes is not None and (not isinstance(scopes, str) or not set(PLAYBACK_SCOPES).issubset(scopes.split())):
             raise SpotifyUnavailable("Spotify did not grant the playback permissions. Connect again.")
-        return {"client_id": fields["client_id"], "access_token": access, "refresh_token": refresh, "expires_at": time.time() + expires}
+        granted = scopes.split() if isinstance(scopes, str) else previous.get("scope", [])
+        return {"client_id": fields["client_id"], "access_token": access, "refresh_token": refresh, "expires_at": time.time() + expires, "scope": granted}
 
     def accept_code(self, code: str, verifier: str, redirect: str) -> None:
         with self._locked():
             data = self._exchange({"grant_type": "authorization_code", "client_id": self.config.client_id, "code": code, "code_verifier": verifier, "redirect_uri": redirect}, {})
             self._save(data)
+
+    def granted(self) -> frozenset[str]:
+        """The scopes the saved login carries. A login saved before scopes
+        were recorded is taken at its word for playback and nothing more."""
+        with self._locked():
+            data = self._read()
+        scope = data.get("scope")
+        if isinstance(scope, list) and all(isinstance(x, str) for x in scope):
+            return frozenset(scope)
+        return frozenset(PLAYBACK_SCOPES)
 
     def bearer(self) -> str:
         with self._locked():
@@ -244,6 +263,31 @@ def _item(item: dict[str, Any]) -> dict[str, Any]:
     return {"name": item.get("name"), "uri": item.get("uri"), "artists": [artist.get("name") for artist in item.get("artists", [])], "type": item.get("type")}
 
 
+def _playlist(item: dict[str, Any]) -> dict[str, Any]:
+    tracks = item.get("tracks") if isinstance(item.get("tracks"), dict) else {}
+    owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+    return {"name": item.get("name"), "uri": item.get("uri"), "id": item.get("id"), "public": item.get("public"),
+            "collaborative": item.get("collaborative"), "owner": owner.get("display_name") or owner.get("id"),
+            "items": tracks.get("total"), "description": item.get("description")}
+
+
+def _playlist_id(playlist: str) -> str:
+    """A playlist named by id or by URI; anything else is refused."""
+    if not isinstance(playlist, str):
+        raise ValueError("Name the playlist by its Spotify ID or URI, from spotify_playlists.")
+    if playlist.startswith("spotify:playlist:"):
+        playlist = playlist[len("spotify:playlist:"):]
+    if not _ID.fullmatch(playlist):
+        raise ValueError("Name the playlist by its Spotify ID or URI, from spotify_playlists.")
+    return playlist
+
+
+def _item_uris(uris: Any) -> list[str]:
+    if not isinstance(uris, list) or not 1 <= len(uris) <= 100 or not all(isinstance(u, str) and _ITEM_URI.fullmatch(u) for u in uris):
+        raise ValueError("Give one to a hundred Spotify track or episode URIs, from spotify_search or spotify_playlist_items.")
+    return uris
+
+
 class SpotifyClient:
     """Fixed endpoints and bounded arguments; no arbitrary authenticated URL."""
 
@@ -286,6 +330,93 @@ class SpotifyClient:
 
     def devices(self) -> dict[str, Any]:
         return self._call("GET", "/me/player/devices")
+
+    # ── playlists: the user's own, never anyone else's ────────────────────
+
+    def _needs(self, scope: str) -> None:
+        if scope not in self._tokens.granted():
+            raise SpotifyUnavailable("Spotify's login predates playlist access. Run `uv run --no-sync python -m ciel.spotify authorize` again to grant it.")
+
+    def playlists(self, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        """The account's own playlists, a page at a time."""
+        if type(limit) is not int or not 1 <= limit <= 50 or type(offset) is not int or offset < 0:
+            raise ValueError("Playlists come in pages of 1 to 50, from a nonnegative offset.")
+        self._needs("playlist-read-private")
+        result = self._call("GET", "/me/playlists", {"limit": limit, "offset": offset})
+        return {"items": [_playlist(p) for p in result.get("items", []) if isinstance(p, dict)], "total": result.get("total"), "offset": offset}
+
+    def playlist_named(self, name: str) -> dict[str, Any]:
+        """The account's playlist called ``name``, case-insensitively, or an
+        honest miss. This is the call behind "play my playlist called X":
+        the user's own library, never the public catalogue."""
+        if not isinstance(name, str) or not name.strip() or len(name) > 200:
+            raise ValueError("Give a playlist name of 1–200 characters.")
+        wanted = name.strip().casefold()
+        offset = 0
+        for _ in range(20):  # a thousand playlists is enough to look through
+            page = self.playlists(50, offset)
+            for item in page["items"]:
+                if str(item.get("name") or "").strip().casefold() == wanted:
+                    return {"found": True, "playlist": item}
+            offset += 50
+            if not page["items"] or (page.get("total") or 0) <= offset:
+                break
+        return {"found": False, "message": f"No playlist of yours is called {name.strip()!r}."}
+
+    def playlist_items(self, playlist: str, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        """What is in one of the account's own playlists. Spotify shows the
+        contents only of playlists the user owns or collaborates on."""
+        playlist_id = _playlist_id(playlist)
+        if type(limit) is not int or not 1 <= limit <= 50 or type(offset) is not int or offset < 0:
+            raise ValueError("Playlist items come in pages of 1 to 50, from a nonnegative offset.")
+        self._needs("playlist-read-private")
+        try:
+            result = self._call("GET", f"/playlists/{playlist_id}/items", {"limit": limit, "offset": offset})
+        except SpotifyUnavailable as exc:
+            if exc.status == 403:
+                raise SpotifyUnavailable("Spotify shows the contents only of playlists you own or collaborate on; this one is not yours to read.", 403) from None
+            raise
+        items = []
+        for entry in result.get("items", []):
+            item = entry.get("item") if isinstance(entry, dict) else None
+            if isinstance(item, dict):
+                items.append({**_item(item), "added_at": entry.get("added_at")})
+        return {"items": items, "total": result.get("total"), "offset": offset}
+
+    def playlist_create(self, name: str, description: str = "", public: bool = False) -> dict[str, Any]:
+        """A new playlist in the account — private unless asked, so a spoken
+        request never publishes one to the profile."""
+        if not isinstance(name, str) or not name.strip() or len(name) > 100:
+            raise ValueError("Give the new playlist a name of 1–100 characters.")
+        if not isinstance(description, str) or len(description) > 300:
+            raise ValueError("A playlist description is at most 300 characters.")
+        if type(public) is not bool:
+            raise ValueError("public is true or false.")
+        self._needs("playlist-modify-public" if public else "playlist-modify-private")
+        result = self._call("POST", "/me/playlists", None, {"name": name.strip(), "description": description, "public": public})
+        return {"created": _playlist(result), "message": "Spotify created the playlist. It is empty until items are added."}
+
+    def playlist_add(self, playlist: str, uris: list[str], position: int | None = None) -> dict[str, Any]:
+        """Items onto one of the account's playlists; the snapshot id names
+        the version this made, which is what the journal keeps."""
+        playlist_id = _playlist_id(playlist)
+        items = _item_uris(uris)
+        if position is not None and (type(position) is not int or position < 0):
+            raise ValueError("position is a nonnegative index, or omitted to append.")
+        self._needs("playlist-modify-private")
+        body: dict[str, Any] = {"uris": items}
+        if position is not None:
+            body["position"] = position
+        result = self._call("POST", f"/playlists/{playlist_id}/items", None, body)
+        return {"added": len(items), "snapshot_id": result.get("snapshot_id"), "message": "Spotify accepted the addition. Read spotify_playlist_items to see the playlist as it is now."}
+
+    def playlist_remove(self, playlist: str, uris: list[str]) -> dict[str, Any]:
+        """Every occurrence of each item, off one of the account's playlists."""
+        playlist_id = _playlist_id(playlist)
+        items = _item_uris(uris)
+        self._needs("playlist-modify-private")
+        result = self._call("DELETE", f"/playlists/{playlist_id}/items", None, {"items": [{"uri": u} for u in items]})
+        return {"removed": len(items), "snapshot_id": result.get("snapshot_id"), "message": "Spotify accepted the removal. Read spotify_playlist_items to see the playlist as it is now."}
 
     def control(self, action: str, uri: str = "", device_id: str = "", value: int | None = None) -> dict[str, Any]:
         if not isinstance(device_id, str) or len(device_id) > 256 or any(ord(c) < 32 for c in device_id):

@@ -41,7 +41,7 @@ from ciel.brain.tools.messages import bind_client as bind_messages
 from ciel.brain.tools.oura import OURA_TOOLS, bind_oura
 from ciel.brain.tools.projects import PROJECT_TOOLS, bind_projects
 from ciel.brain.tools.screen import SCREEN_TOOLS, bind_screen
-from ciel.brain.tools.spotify import SPOTIFY_TOOLS, bind_spotify, spotify_control
+from ciel.brain.tools.spotify import SPOTIFY_ACTIONS, SPOTIFY_TOOLS, bind_spotify
 from ciel.brain.tools.timers import TIMER_TOOLS, bind_timers
 from ciel.brain.tools.watch import WATCH_TOOLS, bind_watcher
 from ciel.brain.tools.world import WORLD_TOOLS, bind_world
@@ -192,7 +192,7 @@ def build_tool_server(
     if not config.spotify.enabled:
         tools = [t for t in tools if t not in SPOTIFY_TOOLS]
     elif not config.journal.enabled:
-        tools = [t for t in tools if t is not spotify_control]
+        tools = [t for t in tools if t not in SPOTIFY_ACTIONS]
 
     auth = build_auth(config.oura) if config.oura.armed else None
     if auth is not None:

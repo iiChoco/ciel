@@ -175,10 +175,11 @@ class Brain:
         # rather than letting it run silently on the tool description's say-so.
         if config.messages.enabled and config.messages.allow_send:
             gated.add("mcp__ciel__send_message")
-        spotify_actions = (
-            frozenset({"mcp__ciel__spotify_control"})
-            if config.spotify.enabled else frozenset()
-        )
+        from ciel.brain.tools.spotify import SPOTIFY_ACTION_NAMES
+
+        # Playback and the three playlist changes alike: journaled, read
+        # back, and behind the voice gate only when the user opts in.
+        spotify_actions = SPOTIFY_ACTION_NAMES if config.spotify.enabled else frozenset()
         if config.spotify.confirm_controls:
             gated.update(spotify_actions)
         # Mail from Ciel's own address: outward, irreversible, same gate.

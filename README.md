@@ -169,6 +169,12 @@ snap = true                  # a finger snap addresses Ciel too
 double_clap = "play"         # two claps within 0.8 s: "wake" like the snap, or "play" music; the [gestures] table tunes the ear
 double_clap_plays = "spotify:artist:0du5cEVh5yTK9QJze8zA0C"   # Spotify's "Copy Spotify URI"
 
+[shortcuts]
+enabled = false             # opt in; Ciel requests macOS Input Monitoring
+talk = "ctrl+option+space"
+stop = "ctrl+option+escape"
+mute = "ctrl+option+m"
+
 [audio]
 silence_ms = 500             # how long a pause ends your turn (toward 700 if she interrupts)
 barge_in = false             # see below
@@ -177,6 +183,47 @@ barge_in = false             # see below
 ```bash
 CIEL_WAKE_MODE=hotkey CIEL_BRAIN_MODEL=claude-sonnet-5 uv run ciel
 ```
+
+## Keyboard shortcuts
+
+The Mac can hear three keys even while another app has focus. Set
+`[shortcuts] enabled = true` in `~/.ciel/config.toml` and restart Ciel. When
+**Input Monitoring** is missing, Ciel makes the macOS permission request from
+its own process. Allow the Python running Ciel in the system prompt or in
+System Settings → Privacy & Security → Input Monitoring. A launchd spoke
+uses its Python, not the terminal's permission. If macOS still withholds access
+after the request, restart Ciel after granting it. An existing grant needs no
+new prompt; disabled or invalid shortcuts never request permission.
+
+The request runs on the keyboard listener's thread, leaving voice available
+while macOS handles it. The listener reports `global shortcuts ready` when it
+can open the tap, or a warning if permission remains unavailable. Shortcuts
+are off by default.
+
+| Default | Action |
+|---|---|
+| Control–Option–Space | Interrupt the current response and open a listening window |
+| Control–Option–Escape | Stop the response and close listening |
+| Control–Option–M | Toggle mute; muting also interrupts the current response |
+
+Talk respects mute: unmute first. It waits for an interrupted hub turn to
+release the room before opening listening. These are press-once controls,
+not push-to-talk; holding a key does not repeat. Stop denies any pending
+confirmation and discards a held partial utterance. It cannot undo an action
+that has already happened. The existing Barn Door gate still checks captured
+speech. Both `ciel` and `ciel spoke` support the controls; the hub never watches
+a keyboard. The stdin Enter fallback remains separate.
+
+Each binding accepts `ctrl`, `option`, `cmd`, and `shift`, joined with `+`,
+followed by a letter, digit, `space`, `escape`, `return`, or `tab`. Aliases
+`control`, `alt`, `command`, and `esc` work too. At least one of Control,
+Option, or Command is required; all three bindings must be different.
+Letter keys refer to physical US keyboard positions. Extra modifiers do not
+match, while Caps Lock is ignored. The passive listener does not consume the
+keys, so choose other bindings if a foreground app already uses them.
+No characters or keyboard history are read or recorded: only matching action
+names leave the native callback. `CIEL_SHORTCUTS_ENABLED=true` and the other
+`CIEL_SHORTCUTS_*` variables use the same configuration path.
 
 ## Speak back (hearing the voice where you cannot talk)
 
@@ -307,35 +354,89 @@ out — Ciel can edit her own source at `~/Projects/ciel`.
 
 ## Voice identity (Barn Door)
 
-Off by default; needs a one-time enrollment. With it on, every utterance is
+Off by default; needs a one-time enrollment. In enforcing mode, every utterance is
 embedded by a local speaker model (CAM++ via sherpa-onnx, ~30 ms on CPU) and
 compared against your enrolled profile *before* transcription — a stranger's
 sentence never reaches Whisper, the brain, or a follow-up window.
 
 ```bash
-uv sync --extra voice
-uv run python scripts/enroll_voice.py          # record 10 short phrases, varied styles (Ciel stopped)
-uv run python scripts/enroll_voice.py --test   # score yourself live
-uv run python scripts/enroll_voice.py --add    # append takes to the existing profile
-uv run python scripts/enroll_voice.py --adopt  # review rejected clips, adopt the ones that are you
-uv run python scripts/enroll_voice.py --calibrate  # re-measure the threshold against impostor voices
-uv run python scripts/enroll_voice.py --prune  # inspect takes by name and drop bad ones
+uv sync --locked --all-extras
+uv run --no-sync python scripts/enroll_voice.py          # record 10 short phrases, varied styles (Ciel stopped)
+uv run --no-sync python scripts/enroll_voice.py --test   # score yourself live
+uv run --no-sync python scripts/enroll_voice.py --add    # append takes to the existing profile
+uv run --no-sync python scripts/enroll_voice.py --adopt  # review rejected clips, adopt the ones that are you
+uv run --no-sync python scripts/enroll_voice.py --calibrate  # re-measure the threshold against impostor voices
+uv run --no-sync python scripts/enroll_voice.py --prune  # inspect takes by name and drop bad ones
 ```
 
 ```toml
 [voice]
 enabled = true
+diagnostic = false  # true measures decisions while letting every utterance through
 # threshold: leave unset — enrollment *calibrates* one and stores it with
 # the profile (impostor voices vs your takes); a number here overrides it.
 ```
 
 The threshold is measured, not guessed: every profile change ends with a
 calibration pass that scores a set of macOS `say` voices against your takes
-exactly the way the gate scores, compares that with your takes'
+using the gate's best-match similarity, compares that with your takes'
 leave-one-out agreement, and places the bar between the two distributions.
 Takes that disagree with the rest of the profile get flagged for pruning —
 with best-match scoring, every take is another chance for a lucky impostor
-hit.
+hit. This sets the base threshold; short speech and a recent verified turn
+can lower the actual bar. Synthetic calibration is not a measurement of
+recognition accuracy through your microphone.
+
+**Measure without being turned away.** On the machine doing the listening
+(the Mac in a hub/spoke setup), set these values in `~/.ciel/config.toml`:
+
+```toml
+[voice]
+enabled = true
+diagnostic = true
+diagnostic_file = "~/.ciel/voice/diagnostics.jsonl"
+diagnostic_max_bytes = 1000000
+```
+
+Restart the listening process to load the config. For the launchd spoke:
+`launchctl kickstart -k gui/$(id -u)/ai.ciel.spoke`. Keep the existing profile
+and threshold; diagnostic mode does not enroll, adopt, or recalibrate.
+Follow the numbers with `tail -F ~/.ciel/voice/diagnostics.jsonl`, or look for
+`voice diagnostic:` in `~/.ciel/log/ciel-spoke.err.log`.
+
+Every captured utterance that reaches Barn Door continues to transcription,
+including ones it would reject. Wake detection, capture, transcription, and
+the existing action permissions still apply. Only an embedding that would
+pass advances the diagnostic grace clock; a bypassed rejection does not.
+This measures the policy on the actual conversation, including follow-ups
+that an enforcing gate might not have allowed to arise.
+
+Each reading has a timestamp, `would_accept`, a reason, similarity, the base
+and effective thresholds, both discounts, grace-window state, and the best
+matching reference's number. Capture measurements include duration, RMS,
+peak, clipped fraction (absolute samples at least 0.999), zero fraction, and
+whether the samples are finite. Duration includes captured silence; these
+numbers are not a speech detector or a confidence percentage. Reasons are
+`matched`, `below_threshold`, `too_short`, or `short_grace`; `no_profile`,
+`model_unavailable`, `encoder_error`, `invalid_audio`, and `invalid_embedding`
+mean unavailable (`would_accept: null`). A missing model or failed reading
+never becomes a claimed recognition. An unwritable diagnostic file is logged
+and does not block the turn.
+
+The JSONL file is owner-only and starts a new window before its byte limit
+is exceeded (minimum 4,096 bytes). The process log also receives each record
+under its ordinary retention. No audio, transcript, or embedding is included;
+diagnostic mode skips the rejected-clip ring even if `keep_rejected` is set.
+Other configured transcript/recording behavior is unchanged. For evaluation,
+note the timestamp, who spoke, and the conditions while testing; these readings
+cannot determine the correct speaker label by themselves. A wake or capture
+failure produces no Barn Door row, so compare with the microphone and wake
+logs when no row appears. Set `diagnostic = false` and restart to enforce
+again, or `enabled = false` to turn speaker verification off.
+
+The [speaker probe](scripts/probe_speaker.py) uses synthetic embeddings and
+both real voice handlers to pin decision parity, grace, failures, and private
+storage. It does not measure real-room accuracy.
 
 Honesty section: an embedding is a filter, not authentication. It turns away
 the TV, guests, and background chatter; it will not resist a recording of
@@ -850,10 +951,21 @@ pause, next, previous, volume, seek, transfer, and queue a track. It runs on
 existing Python dependencies. The double-clap's narrow AppleScript door is
 still described under [Snapping and clapping](#snapping-and-clapping).
 
-`spotify_search`, `spotify_status` and `spotify_devices` are reads.
-`spotify_control` acts on a direct request without asking for a second yes.
-Inverse still records each control and schedules a read-back; without the
-action journal the control is not offered. Set `confirm_controls = true`
+`spotify_search`, `spotify_status` and `spotify_devices` are reads, and so
+are the three that look at your own playlists: `spotify_playlists` (a page
+of them), `spotify_playlist_named` ("play my playlist called Morning Run"
+resolves here, in your library, never the public catalogue), and
+`spotify_playlist_items`. Spotify shows the contents only of playlists you
+own or collaborate on, and says so plainly when asked about another's.
+`spotify_control` acts on a direct request without asking for a second yes,
+and the three playlist changes act the same way: `spotify_playlist_create`
+(private unless you say public, so a spoken request never publishes to your
+profile), `spotify_playlist_add` and `spotify_playlist_remove` (one to a
+hundred track or episode URIs at a time, on the renamed `/items` endpoints).
+Each change returns Spotify's snapshot id, the version of the playlist it
+made, which is what the journal keeps.
+Inverse still records each control and each playlist change and schedules
+a read-back; without the action journal none of the four is offered. Set `confirm_controls = true`
 under `[spotify]` to opt into Proof Obligation — then a confirmer is required.
 Account tools refuse public-channel turns. An unattended verification can
 read playback and devices, but cannot search or change playback. Names from
@@ -1385,6 +1497,8 @@ uv run scripts/probe_voice.py speak   # TTS + playback only
 uv run scripts/probe_voice.py barge   # interrupt path
 uv run scripts/probe_voice.py echo    # mic -> STT -> TTS, no model in the loop
 uv run --no-sync python scripts/probe_shellguard.py  # confirmation and mutating command options
+uv run --no-sync python scripts/probe_shortcuts.py   # global Mac controls: chords, lifecycle, interruption, mute, both voice paths
+uv run --no-sync python scripts/probe_speaker.py     # Barn Door: diagnostic policy, private readings, both voice paths
 uv run --no-sync python scripts/probe_files.py       # file/search boundaries and session credentials
 uv run --no-sync python scripts/probe_tool_rpc.py    # Mac snapshots, undo, and process cancellation
 uv run scripts/probe_closure.py       # Closure + Atlas: rotation, turn lock, atomic writes
@@ -1447,6 +1561,7 @@ as soon as the first complete thought exists rather than after the whole answer.
 |---|---|
 | `pipeline.py` | The loop and the state machine |
 | `config.py` | Every swappable choice, in one place |
+| `shortcuts.py` | Global Mac Talk, Stop, and Mute controls, with a passive keyboard listener |
 | `commands.py` | The no-brain fast path — mechanical requests matched locally |
 | `confirm.py` | Proof Obligation — the spoken/texted yes-or-no broker |
 | `audio/` | Capture, endpointing, playback, wake (the phrase and the gesture ear), speaker identity |

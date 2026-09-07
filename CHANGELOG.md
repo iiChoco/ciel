@@ -2,6 +2,71 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-07 — Ciel asks to hear the keys
+
+**Why.** Enabled shortcuts only logged that Input Monitoring was missing,
+leaving the user to find and register Ciel's Python in System Settings.
+
+**What.**
+
+- *The request belongs to the room.* Ciel now makes the native macOS Input
+  Monitoring request when enabled shortcuts lack permission. The listener's
+  thread handles it, so the audio loop remains available. Existing grants
+  are reused; disabled or invalid bindings never prompt. A grant that is
+  available immediately starts the listener, while denial or failure leaves
+  voice running and the keyboard untouched.
+
+**Probes.** `probe_shortcuts.py 48 → 55`: requesting missing permission,
+reusing grants, avoiding repeated requests, no prompts when disabled or
+invalid, starting after a grant, and surviving a failed system request.
+
+## 2026-09-07 — The room answers to three keys
+
+**Why.** Talking, interrupting, and muting should remain within reach when
+another app has focus and the wake word is not the right way to ask.
+
+**What.**
+
+- *A hand on the conversation.* Configurable global Mac shortcuts open
+  listening, stop the current response, and toggle the persisted mute switch.
+  Both voice paths use their existing capture, interruption, and confirmation
+  machinery. Talk respects mute; Stop denies a pending confirmation, clears
+  held words, and prevents late speech from restarting the stopped response.
+- *The keyboard stays a keyboard.* An opt-in passive event tap matches only
+  physical chords, fires once per press, and sends action names to asyncio.
+  No new dependency, character capture, or hub keyboard listener. Invalid
+  bindings and missing Input Monitoring permission leave voice available.
+
+**Probes.** `probe_shortcuts.py 0 → 48`: exact chords and repeats, configuration,
+passive native handoff and teardown, denied permission, both real voice
+controls, mute persistence, stopped timer rings, late sentences, and confirmation
+cancellation.
+
+## 2026-09-07 — Barn Door can measure without turning you away
+
+**Why.** The previous attempt both missed the user's voice and admitted
+other voices. Calibration alone could not explain the room's failures:
+`reports/2026-09-06-barn-door-evaluation.md` showed a gap between its base
+threshold and the gate's duration and conversation rules.
+
+**What.**
+
+- *One judgement, two uses.* `[voice] diagnostic = true`, with voice enabled,
+  runs the existing gate while every captured utterance continues. Only a
+  would-accept embedding earns grace; passing through for measurement does
+  not. The same gate serves the local pipeline and the Mac spoke.
+- *Numbers that can be compared with what happened.* Owner-only bounded
+  JSONL readings record scores, thresholds, reasons, grace, and capture
+  measurements. Unavailable results stay explicit, diagnostic failures
+  cannot silence a turn, and diagnostic rejections save no audio or change
+  enrollment. The ordinary process log receives each reading too.
+
+**Probes.** `probe_speaker.py 0 → 39`: enforcing/diagnostic parity, short and
+recent speech, bypass without trust, unavailable measurements, cancellation,
+strict JSON, bounded private storage, failed writes, and both real voice
+handlers with fake speech and a fake encoder. These are policy checks;
+real-room speaker accuracy remains to be measured.
+
 ## 2026-09-06 — a playback request is enough
 
 **Why.** Asking to play or pause Spotify already says what the user wants.
@@ -115,6 +180,43 @@ finding in `reports/2026-09-06-codebase-review.md` reproduced that escape.
 machine setters ask, the display-only forms stay quiet, and a declined
 output write is refused. `probe_tool_rpc.py 32 → 59` includes a real
 unconfirmed Git output write whose destination remains absent.
+
+## 2026-09-07 — Ciel can see and change your playlists
+
+**Why.** "Play my playlist called Morning Run" had nowhere to go: the
+connector searched the public catalogue and never the user's own
+library, and could not make or change a playlist at all. Spotify's
+current API still allows all of that for a development-mode app, on the
+renamed `/items` endpoints and only for playlists the user owns or
+collaborates on.
+
+**What.**
+
+- *Six calls, in the connector's own shape.* `playlists` (a page of the
+  user's own), `playlist_named` (one by name, case aside, from the
+  library and never the catalogue), `playlist_items`, `playlist_create`
+  (private unless asked, so a spoken request never publishes to the
+  profile), `playlist_add` and `playlist_remove` (one to a hundred track
+  or episode URIs, by body, returning the snapshot id the journal keeps).
+  Every argument is bounded before a request is made; someone else's
+  playlist is refused in plain words rather than as a credential problem.
+- *Scopes, remembered.* The login now asks for the three playlist scopes
+  and records what it was granted. A login made before this still works
+  for playback and is told, by name, to connect again the moment a
+  playlist is touched.
+- *Reads and actions, tiered as before.* The three reads join the
+  Witness's observers; the three changes are journaled, read back, and
+  behind the voice gate only when `confirm_controls` says so, and are
+  withheld without a journal like playback control.
+
+**Probes.** `probe_spotify.py 102 → 145`: the browser asks for playlist
+scopes; a saved login remembers its scopes and an older one is
+playback-only; every playlist call reaches its documented endpoint with
+its documented body; bad pages, names, URIs and positions never reach
+Spotify; another's playlist is refused plainly; a login without the
+scopes is told to connect again and makes no request while playback
+still works; the reads are tools, the changes are actions, and the
+Witness denies the changes.
 
 ## 2026-09-07 — two claps never bring Spotify to the front
 

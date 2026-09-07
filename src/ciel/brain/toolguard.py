@@ -119,11 +119,28 @@ def _describe_spotify(args: dict[str, Any]) -> str:
     return phrase
 
 
+def _describe_playlist_create(args: dict[str, Any]) -> str:
+    return f"Create a {'public' if args.get('public') else 'private'} Spotify playlist called {_shorten(args.get('name'))!r}"
+
+
+def _describe_playlist_add(args: dict[str, Any]) -> str:
+    uris = args.get("uris") if isinstance(args.get("uris"), list) else []
+    return f"Add {len(uris)} item{'s' if len(uris) != 1 else ''} to Spotify playlist {_shorten(args.get('playlist'))!r}"
+
+
+def _describe_playlist_remove(args: dict[str, Any]) -> str:
+    uris = args.get("uris") if isinstance(args.get("uris"), list) else []
+    return f"Remove {len(uris)} item{'s' if len(uris) != 1 else ''} from Spotify playlist {_shorten(args.get('playlist'))!r}"
+
+
 # Keyed by the *unprefixed* tool name, matching what goes in a `confirm` list.
 # The dict is small on purpose: only tools someone chose to gate need a voice,
 # and the fallback below keeps unlisted ones askable, just less gracefully.
 _FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "spotify_control": _describe_spotify,
+    "spotify_playlist_create": _describe_playlist_create,
+    "spotify_playlist_add": _describe_playlist_add,
+    "spotify_playlist_remove": _describe_playlist_remove,
     "send_email": _describe_send_email,
     "send_message": _describe_send_message,
     "send_as_ciel": _describe_send_as_ciel,

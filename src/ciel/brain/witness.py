@@ -51,6 +51,7 @@ _CIEL_OBSERVERS = (
     "recall", "recent_actions", "list_timers", "read_messages",
     "find_contact", "open_project", "oura_summary", "where_am_i",
     "search_files", "find_files", "spotify_status", "spotify_devices",
+    "spotify_playlists", "spotify_playlist_named", "spotify_playlist_items",
 )
 
 # The notebook: Ciel's own memory and project state. Internal, never

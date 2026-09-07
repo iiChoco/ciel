@@ -5,7 +5,13 @@ owner-only atomic tokens, refresh rotation and overlapping clients, API
 request shapes and argument bounds, empty playback, rate limits and errors,
 quoted metadata, public-turn refusal, the opt-in registry, confirmation,
 optional confirmation, a direct request's journal and read-back, and the
-Witness rule. All state belongs to a temporary
+Witness rule. Playlists: a saved login remembers its scopes and an older
+one is playback-only; the browser asks for playlist scopes; my playlists,
+a playlist by name, a playlist's contents, creation (private unless asked),
+addition and removal reach their documented endpoints with bounded
+arguments; someone else's playlist is refused in plain words; a login
+without playlist scopes is told to connect again and makes no request; the
+reads are tools and the changes are journaled actions the Witness denies. All state belongs to a temporary
 home; the only socket is the authorization callback on loopback.
 
     uv run --no-sync python scripts/probe_spotify.py
@@ -42,7 +48,7 @@ from ciel.brain.tools import spotify as tools
 from ciel.brain.toolguard import describe_call
 from ciel.brain.witness import WitnessGuard, UnattendedMode, witness_allowed
 from ciel.config import Config, MCPServerConfig, SpotifyConfig, load_config
-from ciel.spotify import API_URL, SCOPES, TOKEN_URL, OAuthTokens, SpotifyClient, SpotifyUnavailable, authorize, pkce_pair, request_json
+from ciel.spotify import API_URL, PLAYBACK_SCOPES, PLAYLIST_SCOPES, SCOPES, TOKEN_URL, OAuthTokens, SpotifyClient, SpotifyUnavailable, authorize, pkce_pair, request_json
 
 CHECKS: list[str] = []
 TRACK = "spotify:track:" + "A" * 22
@@ -108,6 +114,13 @@ def token_checks(root: Path) -> None:
     check("an incomplete authorization cannot replace a working one", fails(lambda: tokens.accept_code("code", "verifier", "redirect")) and config.token_file.read_bytes() == old)
     reply = token_reply(); reply["scope"] = "user-read-playback-state"
     check("missing playback permission refuses the authorization", fails(lambda: tokens.accept_code("code", "verifier", "redirect")))
+    check("a saved login remembers the scopes it was granted", set(json.loads(config.token_file.read_text())["scope"]) == set(SCOPES) and tokens.granted() == frozenset(SCOPES))
+    data = json.loads(config.token_file.read_text()); del data["scope"]
+    config.token_file.write_text(json.dumps(data))
+    check("a login saved before scopes were recorded is taken at its word for playback only", tokens.granted() == frozenset(PLAYBACK_SCOPES))
+    reply = token_reply(); reply["scope"] = " ".join(PLAYBACK_SCOPES)
+    tokens.accept_code("code", "verifier", "redirect")
+    check("playback scopes alone are still a working login", tokens.bearer() == "fixture-access" and tokens.granted() == frozenset(PLAYBACK_SCOPES))
     config.token_file.write_text("not-json")
     check("a damaged token file asks for login without exposing contents", fails(tokens.bearer))
 
@@ -123,7 +136,7 @@ def callback_checks(root: Path) -> None:
         nonlocal challenge
         query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
         challenge = query["code_challenge"]
-        check("the browser asks for only playback scopes with S256", query["code_challenge_method"] == "S256" and set(query["scope"].split()) == set(SCOPES))
+        check("the browser asks for playback and playlist scopes with S256", query["code_challenge_method"] == "S256" and set(query["scope"].split()) == set(SCOPES) and set(PLAYLIST_SCOPES) <= set(query["scope"].split()))
         check("the callback uses a literal loopback address", query["redirect_uri"] == f"http://127.0.0.1:{config.redirect_port}/callback")
 
         def redirect() -> None:
@@ -171,8 +184,14 @@ def callback_checks(root: Path) -> None:
 
 
 class FakeTokens:
+    def __init__(self, scopes: tuple[str, ...] = SCOPES) -> None:
+        self.scopes = frozenset(scopes)
+
     def bearer(self) -> str:
         return "fixture-bearer"
+
+    def granted(self) -> frozenset[str]:
+        return self.scopes
 
 
 class Transport:
@@ -234,8 +253,69 @@ def api_checks() -> tuple[SpotifyClient, Transport]:
     for args in ({"action": "volume", "value": 101}, {"action": "seek", "value": -1}, {"action": "seek", "value": True}, {"action": "transfer"}, {"action": "queue", "uri": ALBUM}, {"action": "play", "uri": "https://other.invalid"}, {"action": "pause", "uri": TRACK}, {"action": "pause", "value": 1}, {"action": "delete"}):
         check("an invalid control cannot reach Spotify " + repr(args), fails(lambda: client.control(**args), ValueError))
     check("rejected controls make no HTTP requests", before == len(transport.calls))
+    PLAYLIST = "spotify:playlist:" + "P" * 22
+    EPISODE = "spotify:episode:" + "E" * 22
+    transport.result = {"items": [{"name": "Morning Run", "uri": PLAYLIST, "id": "P" * 22, "public": False, "collaborative": False, "owner": {"display_name": "Yunhan"}, "tracks": {"total": 12}, "description": ""}, None], "total": 1}
+    mine = client.playlists()
+    call = transport.calls[-1]
+    check("my playlists come from /me/playlists, a page of fifty, shaped and null-free",
+          call[0] == "GET" and call[1].split('?')[0] == API_URL + "/me/playlists" and dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(call[1]).query)) == {"limit": "50", "offset": "0"}
+          and mine["items"] == [{"name": "Morning Run", "uri": PLAYLIST, "id": "P" * 22, "public": False, "collaborative": False, "owner": "Yunhan", "items": 12, "description": ""}] and mine["total"] == 1)
+    found = client.playlist_named("  morning RUN ")
+    check("a playlist is found by name, case and whitespace aside, in my own library", found["found"] and found["playlist"]["uri"] == PLAYLIST)
+    check("an honest miss names what was looked for", client.playlist_named("Evening")["found"] is False and "Evening" in client.playlist_named("Evening")["message"])
+    before = len(transport.calls)
+    for bad in ({"limit": 0}, {"limit": 51}, {"offset": -1}, {"limit": True}):
+        check("an invalid playlist page cannot reach the API " + repr(bad), fails(lambda: client.playlists(**bad), ValueError))
+    check("an invalid playlist name cannot reach the API", fails(lambda: client.playlist_named(""), ValueError) and fails(lambda: client.playlist_named("x" * 201), ValueError) and len(transport.calls) == before)
+    transport.result = {"items": [{"added_at": "2026-09-07T00:00:00Z", "item": {"name": "Uptown Funk", "uri": TRACK, "artists": [{"name": "Mark Ronson"}], "type": "track"}}, {"item": None}], "total": 1}
+    inside = client.playlist_items(PLAYLIST, limit=10, offset=20)
+    call = transport.calls[-1]
+    check("a playlist's contents come from the renamed /items endpoint, by id whether given as id or URI, shaped with added_at",
+          call[1].split('?')[0] == API_URL + "/playlists/" + "P" * 22 + "/items" and dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(call[1]).query)) == {"limit": "10", "offset": "20"}
+          and inside["items"] == [{"name": "Uptown Funk", "uri": TRACK, "artists": ["Mark Ronson"], "type": "track", "added_at": "2026-09-07T00:00:00Z"}])
+    check("the id form reaches the same endpoint", client.playlist_items("P" * 22) and transport.calls[-1][1].split('?')[0] == API_URL + "/playlists/" + "P" * 22 + "/items")
+    transport.error = SpotifyUnavailable("refused", 403)
+    try:
+        client.playlist_items(PLAYLIST)
+    except SpotifyUnavailable as exc:
+        check("someone else's playlist is refused in plain words, not as a credential problem", "not yours" in str(exc) and exc.status == 403)
+    else:
+        check("someone else's playlist is refused in plain words, not as a credential problem", False)
+    transport.error = None
+    transport.result = {"id": "N" * 22, "uri": "spotify:playlist:" + "N" * 22, "name": "Focus", "public": False, "tracks": {"total": 0}, "owner": {"id": "me"}}
+    made = client.playlist_create("  Focus ", "deep work")
+    call = transport.calls[-1]
+    check("a new playlist is posted to /me/playlists, private unless asked, with its name trimmed",
+          call[0] == "POST" and call[1] == API_URL + "/me/playlists" and json.loads(call[3]) == {"name": "Focus", "description": "deep work", "public": False} and made["created"]["uri"] == "spotify:playlist:" + "N" * 22)
+    client.playlist_create("Loud", public=True)
+    check("public is only ever explicit", json.loads(transport.calls[-1][3])["public"] is True)
+    transport.result = {"snapshot_id": "snap-1"}
+    added = client.playlist_add(PLAYLIST, [TRACK, EPISODE], position=0)
+    call = transport.calls[-1]
+    check("adding posts track and episode URIs in the body with the position, and returns the snapshot the journal keeps",
+          call[0] == "POST" and call[1] == API_URL + "/playlists/" + "P" * 22 + "/items" and json.loads(call[3]) == {"uris": [TRACK, EPISODE], "position": 0} and added == {"added": 2, "snapshot_id": "snap-1", "message": added["message"]})
+    client.playlist_add(PLAYLIST, [TRACK])
+    check("without a position the addition appends", json.loads(transport.calls[-1][3]) == {"uris": [TRACK]})
+    removed = client.playlist_remove(PLAYLIST, [TRACK])
+    call = transport.calls[-1]
+    check("removing sends DELETE with the documented items body", call[0] == "DELETE" and call[1] == API_URL + "/playlists/" + "P" * 22 + "/items" and json.loads(call[3]) == {"items": [{"uri": TRACK}]} and removed["removed"] == 1)
+    before = len(transport.calls)
+    for bad in ((PLAYLIST, []), (PLAYLIST, [TRACK] * 101), (PLAYLIST, [ALBUM]), (PLAYLIST, ["https://x"]), ("not-a-playlist", [TRACK]), (ALBUM, [TRACK])):
+        check("an invalid addition cannot reach Spotify " + repr(bad)[:60], fails(lambda: client.playlist_add(*bad), ValueError))
+    check("an invalid removal cannot either", fails(lambda: client.playlist_remove(PLAYLIST, [ALBUM]), ValueError) and fails(lambda: client.playlist_add(PLAYLIST, [TRACK], position=-1), ValueError))
+    check("bad playlist names and descriptions never reach Spotify", fails(lambda: client.playlist_create(""), ValueError) and fails(lambda: client.playlist_create("x" * 101), ValueError) and fails(lambda: client.playlist_create("ok", "d" * 301), ValueError) and fails(lambda: client.playlist_create("ok", public="yes"), ValueError) and len(transport.calls) == before)
+    older = SpotifyClient(SpotifyConfig(), tokens=FakeTokens(PLAYBACK_SCOPES), request=transport)
+    try:
+        older.playlists()
+    except SpotifyUnavailable as exc:
+        check("a login without playlist scopes is told, by name, to connect again — and no request is made", "authorize" in str(exc) and len(transport.calls) == before)
+    else:
+        check("a login without playlist scopes is told, by name, to connect again — and no request is made", False)
+    check("...for every playlist call", all(fails(f) for f in (lambda: older.playlist_items(PLAYLIST), lambda: older.playlist_create("x"), lambda: older.playlist_add(PLAYLIST, [TRACK]), lambda: older.playlist_remove(PLAYLIST, [TRACK]))) and len(transport.calls) == before)
+    check("...while playback still works on it", older.control("pause")["accepted"] == "pause")
     transport.error = SpotifyUnavailable("uncertain transport")
-    check("a failed skip is not automatically repeated", fails(lambda: client.control("next")) and len(transport.calls) == before + 1)
+    check("a failed skip is not automatically repeated", fails(lambda: client.control("next")) and len(transport.calls) == before + 2)
     transport.error = SpotifyUnavailable("slow down", 429, 60)
     check("a rate-limited response is reported", fails(client.status))
     before = len(transport.calls)
@@ -276,9 +356,9 @@ async def integration_checks(root: Path, client: SpotifyClient, transport: Trans
     check("the connector is absent until opted into", not SpotifyConfig().enabled)
     config = replace(config, state_dir=root, files=replace(config.files, enabled=False), memory=replace(config.memory, enabled=False), projects=replace(config.projects, enabled=False), screen=replace(config.screen, enabled=False), timers=replace(config.timers, enabled=False), messages=replace(config.messages, enabled=False), location=replace(config.location, enabled=False), grants=replace(config.grants, enabled=False))
     servers, allowed, _, _, journal, _ = build_tool_server(config)
-    check("opting in registers three reads and one control", len([name for name in allowed if '__spotify_' in name]) == 4)
+    check("opting in registers six reads and four actions", len([name for name in allowed if '__spotify_' in name]) == 10)
     _, off, *_ = build_tool_server(replace(config, spotify=replace(config.spotify, enabled=False)))
-    check("turning Spotify off removes all four schemas", not any('__spotify_' in name for name in off))
+    check("turning Spotify off removes all ten schemas", not any('__spotify_' in name for name in off))
     _, reads, *_ = build_tool_server(replace(config, journal=replace(config.journal, enabled=False)))
     check("without the action journal only Spotify reads are offered", 'mcp__ciel__spotify_control' not in reads and 'mcp__ciel__spotify_status' in reads)
     tools.bind_spotify(client)
@@ -293,6 +373,22 @@ async def integration_checks(root: Path, client: SpotifyClient, transport: Trans
     tools.set_scope(public=False); transport.result = {}
     check("a later private turn can read again", not (await tools.spotify_status.handler({})).get('isError'))
     check("invalid tool arguments return an error, not a successful action", (await tools.spotify_control.handler({"action": "volume", "value": 999})).get('isError') is True)
+    transport.result = {"items": [{"name": "Morning Run", "uri": "spotify:playlist:" + "P" * 22, "id": "P" * 22, "tracks": {"total": 3}}], "total": 1}
+    listed = await tools.spotify_playlists.handler({})
+    check("the playlist reads are tools, quoted like the rest", not listed.get('isError') and "Morning Run" in listed["content"][0]["text"] and "untrusted" in listed["content"][0]["text"])
+    named = await tools.spotify_playlist_named.handler({"name": "morning run"})
+    check("a playlist by name is a tool too", not named.get('isError') and '"found": true' in named["content"][0]["text"])
+    tools.set_scope(public=True)
+    check("a public turn cannot read playlists either", (await tools.spotify_playlists.handler({})).get('isError') is True)
+    tools.set_scope(public=False)
+    check("the playlist changes are actions: gone without a journal, present with one",
+          all(f"mcp__ciel__{n}" in allowed for n in ("spotify_playlist_create", "spotify_playlist_add", "spotify_playlist_remove", "spotify_playlists", "spotify_playlist_items", "spotify_playlist_named"))
+          and not any(f"mcp__ciel__{n}" in reads for n in ("spotify_playlist_create", "spotify_playlist_add", "spotify_playlist_remove"))
+          and all(f"mcp__ciel__{n}" in reads for n in ("spotify_playlists", "spotify_playlist_items", "spotify_playlist_named")))
+    check("the playlist changes are described for a confirmation in their own words",
+          describe_call("mcp__ciel__spotify_playlist_create", {"name": "Focus"}).startswith("Create a private Spotify playlist called 'Focus'")
+          and describe_call("mcp__ciel__spotify_playlist_add", {"playlist": "P" * 22, "uris": [TRACK, TRACK]}).startswith("Add 2 items to Spotify playlist")
+          and describe_call("mcp__ciel__spotify_playlist_remove", {"playlist": "P" * 22, "uris": [TRACK]}).startswith("Remove 1 item from Spotify playlist"))
     questions: list[str] = []
     answer = False
     async def confirm(question: str) -> bool:
@@ -332,6 +428,9 @@ async def integration_checks(root: Path, client: SpotifyClient, transport: Trans
     check("an executed control reaches Inverse with its request and response", bool(entries) and 'spotify_control' in json.dumps(entries) and '30' in json.dumps(entries) and 'accepted' in json.dumps(entries))
     check("a direct Spotify control still schedules read-back verification", verified == [(payload['tool_name'], payload['tool_input'])])
     mode = UnattendedMode(); guard = WitnessGuard(mode, witness_allowed(config))
+    check("the Witness lets an unattended turn read playlists and never change them",
+          all(n in witness_allowed(config) for n in ("mcp__ciel__spotify_playlists", "mcp__ciel__spotify_playlist_named", "mcp__ciel__spotify_playlist_items"))
+          and not any(n in witness_allowed(config) for n in ("mcp__ciel__spotify_playlist_create", "mcp__ciel__spotify_playlist_add", "mcp__ciel__spotify_playlist_remove")))
     with mode.engage():
         check("an unattended turn cannot change playback", bool(await guard(payload, None, None)))
         check("an unattended verification can read playback", await guard({'tool_name': 'mcp__ciel__spotify_status'}, None, None) == {})
