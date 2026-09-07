@@ -1163,6 +1163,18 @@ Train **"hey ciel"**, not bare "Ciel". One-syllable wake words have much higher
 false-trigger rates; the two-syllable prefix gives the detector enough to work
 with. You'd still address it as Ciel.
 
+## When the room seems deaf
+
+The spoke's log names the microphone it opened (`microphone open: MacBook
+Pro Microphone (default)`), because the default shuffles when a phone or a
+headset appears and the wrong one is the first thing to rule out. If frames
+keep arriving but every sample is exactly zero for five seconds, the log says
+so once — a real room always carries hiss — and names the two causes: an
+input device with nothing behind it, or a process macOS has not been allowed
+the microphone (System Settings › Privacy & Security › Microphone). A stall,
+where frames stop arriving altogether, is reported separately and ends the
+capture so the process can be restarted.
+
 ## Snapping and clapping
 
 A finger snap, or two claps, can address Ciel the way the phrase does: the
@@ -1216,6 +1228,7 @@ Each isolates one layer, so when something misbehaves you can tell which half to
 blame:
 
 ```bash
+uv run scripts/probe_input.py         # the microphone's silence watch, no mic
 uv run scripts/probe_audio.py vad     # endpointing, synthetic speech, no mic
 uv run scripts/probe_audio.py hold    # the Cauchy mid-thought judgement
 uv run scripts/probe_audio.py mic     # live capture -> /tmp/ciel_capture.wav

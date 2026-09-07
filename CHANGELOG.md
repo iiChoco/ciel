@@ -2,6 +2,31 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-06 — the log says which microphone, and when it hears only zeros
+
+**Why.** The spoke sat "ready" all evening and heard nothing — not a
+snap, not its name — while a tester opened in a terminal heard every
+sound. Nothing in the log could say why: the microphone's name was a
+debug line, and the stall watchdog only notices frames that stop
+arriving. Frames of pure zeros, which is what macOS delivers to a
+process it has not allowed the microphone or from a device with nothing
+behind it, looked exactly like a quiet room.
+
+**What.**
+
+- *The microphone is named at INFO.* `microphone open: <name>` on every
+  start, with `(default)` when it was the system's choice, because the
+  default shuffles when a phone or a headset appears.
+- *Pure silence is reported once.* `SilenceWatch` in `audio/input.py`
+  counts frames whose every sample is zero and says so after five
+  seconds, naming both causes, then says when the room is back. A real
+  room never produces exact zeros, so a quiet night does not trip it.
+
+**Probes.** `probe_input.py` new, 9 checks: hiss is not silence, zeros
+speak once and only after the window, the message names the permission,
+the room's return is reported, a second stretch is reported again, the
+window is counted in frames.
+
 ## 2026-09-06 — two claps can start the music
 
 **Why.** With the gesture ear in place, the first thing the user wanted
