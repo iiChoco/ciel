@@ -16,7 +16,10 @@ the frame a snap fires on, ``always`` mode has nothing to wake, the hotkey's
 the ``[gestures]`` table loads from TOML and from the environment. In play
 mode two claps run their action once, after the frame loop, and never wake;
 the snap still wakes beside them; the build refuses anything but a Spotify
-URI; the music door passes the URI as an argument, never as script; and with
+URI; the music door passes the URI as an argument, never as script; every play
+launches the app hidden and behind the screen; with no active device the API
+is aimed at this Mac by device id, launching and waiting for the app when it
+is not among the devices; and with
 the Spotify connector on, the Web API is tried first and the desktop app
 answers when the API has no player or no login.
 With ``log_candidates`` on, every gated impulse becomes a log line with its
@@ -363,39 +366,93 @@ def main() -> None:
         calls.append(argv)
         return 0, 'Bruno Mars — Uptown Funk'
 
-    said = asyncio.run(music.play(URI, run=fake_osascript))
+    said = asyncio.run(music.play(URI, run=fake_osascript, launch=lambda: None))
     check('the URI reaches AppleScript as an argument, never spliced into the script',
           calls[0][0] == 'osascript' and calls[0][-1] == URI and URI not in calls[0][2])
     check('what played comes back as a sentence', said == 'Bruno Mars — Uptown Funk')
-    said = asyncio.run(music.play('not a uri', run=fake_osascript))
+    said = asyncio.run(music.play('not a uri', run=fake_osascript, launch=lambda: None))
     check('a bad URI never starts a process', len(calls) == 1 and 'not a Spotify URI' in said)
 
     async def failing(argv: list[str]) -> tuple[int, str]:
         return 1, 'Spotify got an error'
 
-    said = asyncio.run(music.play(URI, run=failing))
+    said = asyncio.run(music.play(URI, run=failing, launch=lambda: None))
     check('a refusal from Spotify is reported, not raised', said.startswith('Spotify would not play'))
 
     from ciel.config import SpotifyConfig
     from ciel.spotify import SpotifyUnavailable
 
     calls.clear()
-    said = asyncio.run(music.play(URI, run=fake_osascript, api=lambda uri: f'playing on Kitchen ({uri[-4:]})'))
+    said = asyncio.run(music.play(URI, run=fake_osascript, api=lambda uri: f'playing on Kitchen ({uri[-4:]})', launch=lambda: None))
     check('with the connector, two claps play through the Web API on the active device and the desktop app is not scripted',
           said == 'Spotify Connect: playing on Kitchen (zA0C)' and calls == [])
 
     def no_player(uri: str) -> str:
         raise SpotifyUnavailable('No active device.', 404)
 
-    said = asyncio.run(music.play(URI, run=fake_osascript, api=no_player))
+    said = asyncio.run(music.play(URI, run=fake_osascript, api=no_player, launch=lambda: None))
     check('when the API has no player to talk to, the desktop app answers', len(calls) == 1 and said == 'Bruno Mars — Uptown Funk')
 
     def not_connected(uri: str) -> str:
         raise SpotifyUnavailable('Spotify is not connected.')
 
     calls.clear()
-    said = asyncio.run(music.play(URI, run=fake_osascript, api=not_connected))
+    said = asyncio.run(music.play(URI, run=fake_osascript, api=not_connected, launch=lambda: None))
     check('...and so it does before the account is authorized', len(calls) == 1 and said == 'Bruno Mars — Uptown Funk')
+
+    class FakeSpotify:
+        """The connector's client, scripted: no active device at first."""
+
+        def __init__(self, devices: list[dict], active_after: int = 1) -> None:
+            self._devices = devices
+            self.calls: list[tuple] = []
+            self.active_after = active_after
+
+        def control(self, action: str, uri: str = '', device_id: str = '') -> dict:
+            self.calls.append((action, uri, device_id))
+            if not device_id and len([c for c in self.calls if c[0] == 'play']) <= self.active_after:
+                raise SpotifyUnavailable('Spotify could not find the player or item.', 404)
+            return {'accepted': action}
+
+        def devices(self) -> dict:
+            return {'devices': self._devices}
+
+        def status(self) -> dict:
+            return {'active': True, 'device': {'name': 'Yunhan\u2019s MacBook Pro (10)'}}
+
+    launched: list[str] = []
+    fake = FakeSpotify([{'id': 'mac-1', 'name': 'Yunhan\u2019s MacBook Pro (10)', 'type': 'Computer'}, {'id': 'phone', 'name': 'iPhone', 'type': 'Smartphone'}])
+    door = music._web_player(fake, launch=lambda: launched.append('open'), wait=lambda s: None)
+    check('with no active device the API is aimed at this Mac by its device id, and nothing is launched',
+          door(URI).startswith('playing on') and fake.calls[-1] == ('play', URI, 'mac-1') and launched == [])
+    fake = FakeSpotify([{'id': 'other', 'name': 'Office iMac', 'type': 'Computer'}])
+    door = music._web_player(fake, launch=lambda: launched.append('open'), wait=lambda s: None)
+    check('with no device named for this Mac, any computer will do', door(URI) and fake.calls[-1][2] == 'other')
+    appearing = FakeSpotify([])
+    def appear() -> None:
+        launched.append('open')
+        appearing._devices.append({'id': 'mac-2', 'name': 'Yunhan\u2019s MacBook Pro (10)', 'type': 'Computer'})
+    door = music._web_player(appearing, launch=appear, wait=lambda s: None)
+    check('with no device at all the app is launched hidden, waited for, and then aimed at',
+          door(URI) and launched == ['open'] and appearing.calls[-1][2] == 'mac-2')
+    never = FakeSpotify([])
+    ticks: list[float] = []
+    door = music._web_player(never, launch=lambda: launched.append('open'), wait=ticks.append)
+    try:
+        door(URI)
+    except SpotifyUnavailable as exc:
+        check('an app that never appears gives up after the wait, and says so', 'did not appear' in str(exc) and len(ticks) >= 1)
+    else:
+        check('an app that never appears gives up after the wait, and says so', False)
+    fine = FakeSpotify([], active_after=0)
+    door = music._web_player(fine, launch=lambda: launched.append('open'), wait=lambda s: None)
+    launched.clear()
+    check('with an active device nothing else is asked or launched', door(URI).startswith('playing on') and launched == [] and len(fine.calls) == 1)
+    opened: list[str] = []
+    calls.clear()
+    asyncio.run(music.play(URI, run=fake_osascript, launch=lambda: opened.append('hidden')))
+    check('every play launches the app hidden and behind the screen before any door is tried', opened == ['hidden'])
+
     check('a connector that is off, or has no app, leaves the desktop app alone as the only door',
           music.web_player(SpotifyConfig()) is None and music.web_player(SpotifyConfig(enabled=True)) is None
           and music.web_player(None) is None)

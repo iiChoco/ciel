@@ -116,6 +116,35 @@ machine setters ask, the display-only forms stay quiet, and a declined
 output write is refused. `probe_tool_rpc.py 32 → 59` includes a real
 unconfirmed Git output write whose destination remains absent.
 
+## 2026-09-07 — two claps never bring Spotify to the front
+
+**Why.** When the API had no active device the gesture fell back to an
+Apple event, and an Apple event to an app that is not running launches
+it — in front of whatever the user was doing. A gesture that steals the
+screen is worse than no gesture.
+
+**What.**
+
+- *Aim, don't wake.* With no active device the API is asked again, aimed
+  at this Mac by its Connect device id (by computer name, else any
+  computer), which starts the desktop app's player without touching its
+  window. If the app is not among the devices it is launched hidden and
+  in the background (`open -g -j`), given eight seconds to appear, and
+  then aimed at. The AppleScript surface is now only for a connector
+  with no login.
+- *Every play gives the screen straight back.* Spotify ignores a hidden,
+  background launch and activates itself, so when it has to be launched
+  the door remembers what was in front, launches by bundle identifier
+  (the bundle on disk is "Spotify (old).app" here, which a launch by
+  name cannot find), and hands the front back the moment the process is
+  up — a flash, not a switch. An app already running is never activated.
+
+**Probes.** `probe_gestures.py 128 → 134`: no active device aims at this
+Mac by id without launching; any computer will do; no device at all
+launches hidden, waits, and aims; an app that never appears gives up and
+says so; an active device is asked nothing else; every play launches the
+app hidden before any door.
+
 ## 2026-09-06 — the keyboard's own word
 
 **Why.** Every acoustic gate had been tried against keystrokes — four

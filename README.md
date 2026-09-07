@@ -1295,8 +1295,13 @@ switched on and authorized **on this Mac** (the spoke's host: `[spotify]
 enabled = true`, its `client_id`, and `uv run --no-sync python -m
 ciel.spotify authorize` run here), two claps go through the Web API first
 and play on whichever device is active — the phone in the kitchen included
-— and the desktop app answers only when the API has no player to talk to
-or no login yet. The log says which door opened.
+— and when nothing is active the API is aimed at this Mac by its Connect
+device id, which starts the desktop app's player without touching its
+window. If the app is not running it is launched by bundle identifier and
+the front is handed straight back to whatever you were looking at — Spotify
+ignores a hidden launch, so a flash is the best macOS allows — and an app
+already running is never activated. The AppleScript surface answers only
+when the API has no login yet. The log says which door opened.
 
 The ear (`audio/gestures.py`, part of Characteristic) needs no model. Every
 impulse that clears an onset gate — a twenty-decibel step inside two
