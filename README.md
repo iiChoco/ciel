@@ -2,6 +2,15 @@
 
 A local-first voice assistant. Speech in, speech out, running on your machine.
 
+The source checkout lives at `~/Projects/ciel`; the Git remote is
+`iiChoco/ciel`. Deployment and server configuration are maintained in the independent
+`~/Projects/infrastructure` repository; see [deployment](deploy/README.md).
+`scripts/push_hub.sh` deploys; `--preview` only prints the commands.
+After relocating or rebuilding the Mac environment, use
+`uv sync --locked --all-extras` to retain Piper and speaker verification.
+Fresh environments also need wake-word support assets; see the infrastructure
+README for the one-time provisioning command, including custom wake models.
+
 Speech recognition and synthesis are local and free. Only the reasoning goes to
 Claude, through your existing subscription — there is no API key.
 
@@ -20,9 +29,10 @@ Say **"hey jarvis"**, then talk.
 
 ## What it does
 
-- **Hears you** — `openWakeWord` for the wake phrase, WebRTC VAD for knowing when
-  you've stopped talking, `mlx-whisper` (Metal GPU) for transcription with
-  `faster-whisper` as the CPU fallback. All on-device.
+- **Hears you** — `openWakeWord` for the wake phrase (a finger snap or two
+  claps can stand in for it — see [Snapping and clapping](#snapping-and-clapping)),
+  WebRTC VAD for knowing when you've stopped talking, `mlx-whisper` (Metal GPU)
+  for transcription with `faster-whisper` as the CPU fallback. All on-device.
 - **Thinks** — Claude Opus 5 via the Claude Agent SDK, with web search — and a
   deep-thought escalation agent for the questions that deserve more than a
   conversational answer. Mechanical requests ("ten minute timer") never reach
@@ -128,7 +138,8 @@ uv run ciel -v               # debug logging
 Everything lives in `~/.ciel/config.toml`, or as `CIEL_<SECTION>_<FIELD>`
 environment variables for one-off runs. (Two carve-outs: `[mcp.<name>]`
 connector tables are TOML-only, and `state_dir`/`log_level` sit at the top
-level, outside any section.)
+level, outside any section.) The [Spotify connector](#spotify-from-whichever-device-is-playing)
+uses its own `[spotify]` section, documented with the account setup below.
 
 ```toml
 [brain]
@@ -145,13 +156,18 @@ mlx_model = "mlx-community/whisper-small.en-mlx"
 initial_prompt = "A spoken conversation with an assistant named Ciel."
 
 [tts]
-engine = "piper"
+engine = "native"            # Apple's Premium voices, streamed; "piper" and "say" below it
+native_voice = "Jamie"       # a free download: Accessibility → Spoken Content → System voice → Manage Voices
+rate = 190                   # words per minute, for native and say alike
 piper_voice = "en_US-lessac-medium"
 effect = "none"              # "jarvis" adds the installed-speaker treatment
 
 [wake]
 mode = "wakeword"
 threshold = 0.5              # raise if the TV sets it off, lower if it ignores you
+snap = true                  # a finger snap addresses Ciel too
+double_clap = "play"         # two claps within 0.8 s: "wake" like the snap, or "play" music; the [gestures] table tunes the ear
+double_clap_plays = "spotify:artist:0du5cEVh5yTK9QJze8zA0C"   # Spotify's "Copy Spotify URI"
 
 [audio]
 silence_ms = 500             # how long a pause ends your turn (toward 700 if she interrupts)
@@ -161,6 +177,35 @@ barge_in = false             # see below
 ```bash
 CIEL_WAKE_MODE=hotkey CIEL_BRAIN_MODEL=claude-sonnet-5 uv run ciel
 ```
+
+## Speak back (hearing the voice where you cannot talk)
+
+Typed Chart turns are text: the reply lands on the page and the room
+stays quiet. The **VOICE** chip on the Chart (or a typed "speak back on"
+/ "voice off") flips that for the session: each reply sentence is also
+spoken in the room — through the spoke on the hub, the player locally —
+so the voice can be heard and judged from a lecture-hall seat. None of
+the voice lane's theatre comes with it: no ack filler, no chime, no
+follow-up window (the words were typed). Muted still wins, a Mac that is
+not connected means text alone, and a sentence that will not play (a
+barge-in, a lost device) makes the rest of that reply text only rather
+than cutting it short. `[web] speak_back = true` starts a session with
+it on. Not persisted: it is a session's choice.
+
+## The voice (native, piper, say)
+
+Three engines behind one protocol, best first, each falling to the next if
+it will not warm up. `native` (`tts/native.py`) is Apple's own synthesizer
+driven through a small Swift helper (`tts/native/CielVoice.swift`,
+built once with the command-line tools' `swiftc`, cached by source hash
+under `~/.ciel/bin`) so that its Premium voices — Jamie, Zoe, Ava, free
+downloads about a gigabyte each — reach Ciel as a stream: PCM leaves the
+helper as it is synthesized, first audio in ~30 ms once warm, a five-second
+sentence rendered in ~120 ms. `piper` is the local neural voice that beat
+`say` before the Premium voices were tried, and stays the hub's engine
+(Linux). `say` is the compact-voice fallback that is always there.
+`scripts/probe_native_voice.py --ab DIR` writes the same four sentences
+through native and piper for listening, with the numbers.
 
 ## The status pill
 
@@ -252,12 +297,13 @@ correspondingly thorough. Refused anywhere under home:
 |---|---|
 | `.zshrc`, `.zshenv`, `.bash_profile`, … | A writable shell config is code execution on your next login |
 | `.ssh`, `.aws`, `.gnupg`, `.env`, `.npmrc`, `.docker`, `.kube` | Credentials and keys |
+| `sections-cookie` and the configured `[sections].cookie_file` name | The signup site's authenticated session |
 | `.claude`, `.claude.json`, `.config` | Agent state and auth tokens — `.claude` also holds session transcripts |
 | `~/Library` | Keychains, browser cookies and history, Messages, Mail |
 | `LaunchAgents`, `LaunchDaemons` | Login persistence |
 
 Everything else under home is fair game, including every repo you have checked
-out — Ciel can edit her own source at `~/jarvis`.
+out — Ciel can edit her own source at `~/Projects/ciel`.
 
 ## Voice identity (Barn Door)
 
@@ -324,7 +370,11 @@ Every command is classified into one of three tiers:
 - **Quietly allowed**: a conservative read-only allowlist (`git status`,
   `git log`, `ls`, `pwd`, …) runs without asking. Configurable via
   `auto_allow`; asking aloud for every status check would train you to say
-  yes reflexively.
+  yes reflexively. Arguments must also be known to be read-only: `git log`
+  accepts `--oneline`, `--graph`, `--all`, `--decorate`, `--no-decorate`,
+  `--no-patch`, `-N`, and `--max-count=N`. Other log forms, Git's
+  diff/show/branch/blame commands, and `file` ask first; arguments to
+  `date` or `hostname` ask too. Adding a prefix does not skip these checks.
 - **Confirmed**: everything else. Ciel reads the command aloud — *"Run: touch
   notes dot txt — okay?"* — and waits for a spoken yes or no. Silence (about
   eight seconds), a "no", or two unclear answers all refuse the command.
@@ -433,8 +483,10 @@ Off by default. Turn it on and Ciel serves a small chat page on loopback —
 a live window onto the whole conversation, and a place to type when the
 room must stay quiet: a lecture, a library, a call. Every lane's turns
 appear as they happen (spoken ones included — you see what Ciel heard),
-the status pill mirrors the HUD, confirm-tier questions become Yes/No
-buttons, and the mute switch lives in the header. Next to the status
+the status pill mirrors the HUD and, while listening, says what opened the
+window — `listening · spoken`, `listening · snap`, `listening · clap twice`,
+and bare `listening` for a follow-up window nothing opened — confirm-tier
+questions become Yes/No buttons, and the mute switch lives in the header. Next to the status
 pill, an agents chip counts everything working on your behalf right now
 — a deep-thought pass mid-flight, background watches, running timers —
 and expands into a list with live countdowns; it disappears when
@@ -566,6 +618,19 @@ ordinary Bash and file tools on the hub act on the hub's own workspace.
 and audio module and constructing the hub anyway; `probe_tool_rpc.py`
 and `probe_presence.py` drive the calls and the publishers.
 
+A canceled Mac shell command stops its whole process group and waits for the
+shell to exit; the RPC deadline, the command's own deadline, and shutdown do
+the same. Canceling the hub's wait also sends cancellation to the spoke.
+
+With the journal enabled, a Mac overwrite first sends the previous contents
+to the hub's journal as a complete, owner-only snapshot. `recent_actions`
+names that hub file: ordinary `Read` can read it, then `mac_write_file` can
+restore the Mac file through its usual guards. The smaller of the two
+`[journal].max_snapshot_kb` settings bounds the copy. A missing, oversized,
+or unreachable original leaves an explicit note, so Ciel can say when undo
+has no saved contents. The snapshot path itself is read-only outside the
+workspace, and an undo gets its own journal entry and snapshot.
+
 **When the hub is away.** The alarm clock never depends on the server:
 the hub broadcasts its timer set, the spoke keeps a mirror
 (`~/.ciel/spoke-timers.json`) and rings a timer itself when the hub
@@ -618,7 +683,23 @@ piper_voice = "en_US-lessac-medium"
 
 Accounts are the owner's to make. `ciel interview add-user alice` prints
 a generated password once; the admin panel on the page does the same, and
-can reset, disable, or delete. There is no signup. Public reach is the
+can reset, disable, or delete. There is no signup. A session belongs to
+the account that made it, not to the username: deleting an account ends
+its live interviews, closes their sockets, and moves its directory to
+`users/.retired/<username>.<id>` so a name given to someone else starts
+empty. A password change or a disable closes every socket open under the
+old sign-in at once. The accounts can also
+be the door's — yunhan.me's shared login (`yunhan.me/door`), the same
+module and the same cookie scheme, so one sign-in covers the room and
+every other surface on the domain:
+
+```toml
+[interview]
+accounts_dir = "~/.door"       # the door's accounts.json and secret, instead of the room's own
+cookie_name = "yh_session"     # the door's cookie, set on the parent domain
+cookie_domain = ".yunhan.me"
+cookie_path = "/"
+``` Public reach is the
 Chart's Cloudflare Tunnel plus a second Access application on
 `ciel.yunhan.me/interview` with a Bypass policy, so friends reach the
 room's own login while the Chart itself stays behind the owner's PIN.
@@ -709,26 +790,126 @@ a tool result and "as of two minutes ago" for a reading here. The
 things that *happen* stay in Vigil's one queue.
 
 **Who writes it.** The pipeline (mute, hold, the timers and watches once
-a second, presence per turn or per heartbeat, the spoke's seat), the
-locator on every fix, the ring watcher and tool on every fetch, the
-sections watcher on every scan, and a calendar refresh every fifteen
-minutes (`agenda_refresh_s`). On the hub the Mac's readings arrive as
-`fact` frames from the spoke's relay — last-value, resent after a
-reconnect — and the whole table rides to every Chart as a `world` frame
-when it changes. `~/.ciel/world.json` mirrors it across the
-autoreloader's re-execs, so a place or a ring score never blanks for
-minutes after a source edit; a carried-over reading shows its true age.
+a second, presence once a second locally or per heartbeat on the hub,
+the spoke's seat), the locator on every fix, the ring watcher and tool
+on every fetch, the sections watcher on every scan, and a calendar
+refresh every fifteen minutes (`agenda_refresh_s`). On the hub the
+Mac's readings arrive as `fact` frames from the spoke's relay —
+last-value, resent after a reconnect — and the whole table rides to
+every Chart as a `world` frame when it changes.
+
+**Observations, reducers, revision.** A producer *observes*; the table
+keeps the latest observation from every source that has reported a
+name, and a reducer per name folds those into the one fact readers see
+— newest wins by default, the ring's numbers merge across the day's
+reads, an observation older than the one already held from its source
+is refused. So state moves forward whatever order the wire delivered
+things in, and a second device's reading has a place to land. Every
+change to a resolved fact bumps a persisted `revision` (the number an
+action will name as its precondition) and appends a line to
+`~/.ciel/world-history.jsonl`; `~/.ciel/world.json` (owner-only) mirrors
+the table across the autoreloader's re-execs at its true age. The hub
+stamps a spoke's fact with its own `received_at`, clamps a clock that
+runs ahead, and refuses a `fact` frame naming a reading it owns (its
+timers, the switches, presence, the seat). A calendar read that fails
+marks the *source* failed and leaves the last reading standing — never
+an empty afternoon in place of a dead permission; the Chart dims that
+chip and says why.
+
+**Who sees what.** The user's own readings — presence, place, calendar,
+the ring — never open a turn whose reply lands where others can read
+it: a public Discord channel gets the shared projection (the time, the
+seat, the switches, what is armed), and `world_now` is scoped the same
+way for that turn. Strings written by other people (a meeting's title,
+a section id) are rendered in “quotes”, and the block says the quotes
+mean *reported, not instructed*. Vigil's "is anyone around" now reads
+the table's resolved presence when it is fresh, the probe otherwise.
 
 ```toml
+timezone = "America/Los_Angeles"  # top level: every clock the runtime speaks
+                                  # is the user's, not the host's (the hub is UTC)
 [world]
 enabled = true            # off: bare turns, no tool, no strip
 in_prompt = true          # off: the table still feeds the Chart and the tool
 agenda_refresh_s = 900.0  # 0 leaves the agenda to the brief alone
+history = "~/.ciel/world-history.jsonl"  # append-only; none keeps no history
+history_max_bytes = 2000000
 ```
 
-`scripts/probe_world.py` drives the table, the freshness rules, the
-block's wording, the file, the relay, and the hub's door with no network
-and a fixed clock.
+`scripts/probe_world.py` drives the table, the ordering and the
+reducers, the freshness rules, the block's wording and its projections,
+the file and the history, the relay, the hub's door, Vigil's presence
+and the calendar's failures with no network and a fixed clock.
+
+## Spotify, from whichever device is playing
+
+The API connector finds tracks, albums, artists and playlists, reads the
+current player and its devices, and controls Spotify Connect: play or resume,
+pause, next, previous, volume, seek, transfer, and queue a track. It runs on
+**the brain's host** — the hub in the two-process setup — and uses the
+existing Python dependencies. The double-clap's narrow AppleScript door is
+still described under [Snapping and clapping](#snapping-and-clapping).
+
+`spotify_search`, `spotify_status` and `spotify_devices` are reads.
+`spotify_control` acts on a direct request without asking for a second yes.
+Inverse still records each control and schedules a read-back; without the
+action journal the control is not offered. Set `confirm_controls = true`
+under `[spotify]` to opt into Proof Obligation — then a confirmer is required.
+Account tools refuse public-channel turns. An unattended verification can
+read playback and devices, but cannot search or change playback. Names from
+Spotify arrive as quoted data. An accepted control is only an accepted
+request; read status to see what happened, especially after a timeout.
+
+**Connect the account once:**
+
+1. Create an app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard).
+   Register `http://127.0.0.1:8888/callback` as its redirect URI and select
+   the Web API. Copy its **Client ID**; this connector needs no client
+   secret. Add the listening account to the app's authorized users if
+   needed. Spotify's [development-mode requirements](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide)
+   require the app owner to have Premium and limit new development apps to
+   five authorized users. Playback control also requires Premium and a
+   running Spotify player.
+2. On the brain's host, put this section in `~/.ciel/config.toml`:
+
+   ```toml
+   [spotify]
+   enabled = false                 # true after browser approval
+   confirm_controls = false        # a direct playback request is enough
+   client_id = "YOUR_CLIENT_ID"     # public identifier, not a secret
+   token_file = "~/.ciel/spotify.json"
+   redirect_port = 8888
+   timeout_s = 15.0
+   authorize_timeout_s = 300.0
+   ```
+
+3. From the Ciel checkout on that host, run
+   `uv run --no-sync python -m ciel.spotify authorize`. Approve in your
+   browser. The callback uses PKCE and checks its state; tokens and their
+   refresh lock stay owner-only. Default and configured token filenames
+   are forbidden to both file and shell tools. Only playback-read and
+   playback-modify scopes are requested; there is no library or playlist
+   editing permission.
+4. Set `enabled = true`, restart the brain so it offers the tools, and open
+   Spotify on a device. `uv run --no-sync python -m ciel.spotify status`
+   is a live, read-only check. Then ask Ciel to find a track or say what is
+   playing. A 404 usually means the player needs opening; a 403 calls for
+   checking Premium, the app's users, and its grants. Rate limits hold
+   subsequent requests until Spotify's retry interval has passed.
+
+For the Azure hub, keep the login on the hub: open
+`ssh -L 8888:127.0.0.1:8888 ciel@172.184.253.239` from the Mac, then run
+`cd ~/ciel` and `uv run --no-sync python -m ciel.spotify authorize --no-browser`
+in that SSH session. Open the printed approval link in the Mac's browser;
+the callback crosses the tunnel and the tokens stay on the hub. Keep the
+session open until authorization completes. If port 8888 is occupied,
+change the config, the registered redirect, and both tunnel ports together.
+
+Search uses the current development API's maximum of ten results. It does
+not read other people's playlist items or use the removed recommendations
+and audio-feature endpoints. The connector streams no audio itself; Spotify
+Connect controls the Spotify application. The [Spotify probe](scripts/probe_spotify.py)
+checks the client, browser callback and Ciel gates using only fixture state.
 
 ## The ring (Oura)
 
@@ -911,7 +1092,11 @@ then holds the bCourses session (Duo's "remember this device" keeps it
 alive for days). After that, `scripts/refresh_sections_cookie.py` follows
 the OAuth round-trip silently in a headless Chrome and writes the fresh
 cookie to `~/.ciel/sections-cookie`, where the watcher reads it on the next
-poll. **One-time setup:**
+poll. The file is owner-only and its name is on both the file and shell
+credential blocklists. A different `[sections].cookie_file` reserves that
+filename too; moving the cookie does not grant the brain access to it.
+
+**One-time setup:**
 
 1. Make a small venv with Playwright (kept out of Ciel's own dependencies):
 
@@ -1051,8 +1236,10 @@ threshold, so it survives both a silent room and a noisy one.
 `TOOLS` in that package's `__init__.py`. Nothing else changes; they're exposed
 through an in-process MCP server and auto-allowed.
 
-**An external service** (Google Calendar, Gmail, Slack) — those are MCP servers,
-so they're a connection entry in config and need no code at all.
+**An external service** (Google Calendar, Gmail, Slack) — an existing MCP server
+is a connection entry in config. The first-party Oura and Spotify clients
+live beside the other services and are exposed through Ciel's in-process
+tools; their authorization and narrower permission boundaries live here.
 
 **A different speech engine** — implement the `SpeechToText` or `TextToSpeech`
 protocol and add it to the factory that names the engines (`build_stt` in
@@ -1073,19 +1260,128 @@ Train **"hey ciel"**, not bare "Ciel". One-syllable wake words have much higher
 false-trigger rates; the two-syllable prefix gives the detector enough to work
 with. You'd still address it as Ciel.
 
+## When the room seems deaf
+
+The spoke's log names the microphone it opened (`microphone open: MacBook
+Pro Microphone (default)`), because the default shuffles when a phone or a
+headset appears and the wrong one is the first thing to rule out. If frames
+keep arriving but every sample is exactly zero for five seconds, the log says
+so once — a real room always carries hiss — and names the two causes: an
+input device with nothing behind it, or a process macOS has not been allowed
+the microphone (System Settings › Privacy & Security › Microphone). A stall,
+where frames stop arriving altogether, is reported separately and ends the
+capture so the process can be restarted.
+
+## Snapping and clapping
+
+A finger snap, or two claps, can address Ciel the way the phrase does: the
+same acknowledgement, the same listening window, the same log line. Switch
+either on under `[wake]` (`snap = true`, `double_clap = "wake"`); the ear sits
+*beside* the wake word, never instead of it, and is not built in `always`
+mode where there is nothing to wake.
+
+Two claps can also do something rather than wake: `double_clap = "play"`
+starts `double_clap_plays` in Spotify — an artist, album, playlist, or track,
+as Spotify's "Copy Spotify URI" gives it — the way a switch on the wall
+starts music. Nothing is asked first: the pair is itself a deliberate
+gesture, mute gates it, and a wrong song costs one tap. The door
+(`music.py`) is deliberately narrow — the shell guard still denies
+`osascript` to the brain — and only a string of the URI's exact shape is ever
+handed to Spotify, as an argument rather than as script. What played is
+logged.
+
+With the [Spotify connector](#spotify-from-whichever-device-is-playing)
+switched on and authorized **on this Mac** (the spoke's host: `[spotify]
+enabled = true`, its `client_id`, and `uv run --no-sync python -m
+ciel.spotify authorize` run here), two claps go through the Web API first
+and play on whichever device is active — the phone in the kitchen included
+— and the desktop app answers only when the API has no player to talk to
+or no login yet. The log says which door opened.
+
+The ear (`audio/gestures.py`, part of Characteristic) needs no model. Every
+impulse that clears an onset gate — a twenty-decibel step inside two
+milliseconds, well above the room's floor — is measured four ways: its peak,
+the width of its body above half that peak, its *tilt* (energy above 2 kHz
+against the band below), and how far it has fallen ten milliseconds on. At
+the pipeline's 16 kHz a snap and a clap are both one to three milliseconds
+wide, so tilt is what tells them apart (a snap is bright, a clap dark), and
+loudness is what tells a clap from a keystroke. A single clap never wakes:
+on a laptop microphone it is the same sound as a knuckle on the desk, which
+is why the gesture is a pair. Reach is the same room and line of sight —
+snaps to about five metres in a quiet room, claps further — and it shrinks
+with music on or the lid closed.
+
+Every boundary is a field in `[gestures]`, read off one MacBook's lid
+microphone on 2026-09-06. Rooms differ, so before trusting it, listen with
+the tester, which prints the four numbers and a verdict for every impulse
+and names the cue a miss failed on:
+
+```bash
+uv run scripts/listen_gestures.py                       # live, through Ciel's own microphone path
+uv run scripts/listen_gestures.py --csv /tmp/hands.csv  # ...and log every impulse (owner-only)
+uv run scripts/listen_gestures.py --wav /tmp/hands.wav  # replay a 16 kHz mono recording instead
+uv run scripts/listen_gestures.py --snap-min-tilt 2.0   # try a boundary before writing it to config
+```
+
+Snap ten times, clap ten times, then type and knock on the desk, and move
+each boundary to sit midway between the clusters. A boundary that separates
+one room's snaps from its claps is not a promise about another room.
+
+**The keyboard's own word.** A mechanical key is a snap by shape and by
+loudness, and a lone key in a quiet second does not sound like typing to
+any model. But the sound of a key is made by a key, and macOS reports to
+any process in the session how long ago a key went down or up — timestamps
+only, never which key, and no permission dialog. A snap or a clap inside
+`keyboard_veto_ms` (300) of a key event is rejected as that keystroke, and
+the log says so: `sounds like a keystroke 41 ms ago`. The keyboard is asked
+before the model, since its answer is certain and costs nothing. A snap made
+while typing is lost, which every gate below was already going to cost. Off
+the Mac the veto is inert; 0 switches it off. `audio/keys.py`.
+
+**A snap is solitary.** A keystroke arrives in a run and a snap does not,
+so a would-be snap that follows any other gated impulse inside
+`snap_quiet_ms` (400) is rejected as typing cadence, whatever its shape.
+Claps are not held to it. The cost is a snap made mid-typing, which the
+next paragraph was already going to take for a keystroke.
+
+**A second opinion that only says no.** The sounds that fool the rules are
+not other hand sounds but the room's ordinary ones: a keystroke has a snap's
+shape at a snap's loudness, a plosive has a clap's. Set `veto_model =
+"yamnet"` in `[gestures]` and the ear fetches Google's AudioSet classifier
+(YAMNet, 16 MB, Apache 2.0, checked against a pinned hash) into
+`~/.ciel/models` on first start, then asks it, about each snap or clap the
+rules accept, whether the second of audio around it was really *typing*,
+*computer keyboard*, *speech*, *conversation*, or *music*. Above
+`veto_threshold` the gesture is dropped, and the log says what was heard
+instead: `ear: rejected (…) — sounds like typing 0.82`. The model is not the
+judge, on purpose: on 2026-09-06 it missed half of a set of real snaps and
+called a loud clap a snap, but it named typing and speech every time. One
+cost to know: a snap made *while* typing is taken for a keystroke — pause
+your hands. `audio/audioset.py` says the rest.
+
+The spoke can narrate the same thing itself: with `log_candidates = true` in
+`[gestures]`, every impulse the ear gates becomes a line in the spoke's log —
+`ear: rejected (peak 0.03, width 2.1 ms, tilt 0.40, fall 21 dB) — snap: tilt;
+clap: peak` — beside the `wake: snap` and `gesture: double clap` lines it
+acts on. Follow it live with `tail -F ~/.ciel/log/ciel-spoke.err.log`; switch
+it off once the boundaries are set, since typing produces a few lines a minute.
+
 ## Development probes
 
 Each isolates one layer, so when something misbehaves you can tell which half to
 blame:
 
 ```bash
+uv run scripts/probe_input.py         # the microphone's silence watch, no mic
 uv run scripts/probe_audio.py vad     # endpointing, synthetic speech, no mic
 uv run scripts/probe_audio.py hold    # the Cauchy mid-thought judgement
 uv run scripts/probe_audio.py mic     # live capture -> /tmp/ciel_capture.wav
 uv run scripts/probe_voice.py speak   # TTS + playback only
 uv run scripts/probe_voice.py barge   # interrupt path
 uv run scripts/probe_voice.py echo    # mic -> STT -> TTS, no model in the loop
-uv run scripts/probe_shellguard.py    # the shell gate's full confirmation choreography
+uv run --no-sync python scripts/probe_shellguard.py  # confirmation and mutating command options
+uv run --no-sync python scripts/probe_files.py       # file/search boundaries and session credentials
+uv run --no-sync python scripts/probe_tool_rpc.py    # Mac snapshots, undo, and process cancellation
 uv run scripts/probe_closure.py       # Closure + Atlas: rotation, turn lock, atomic writes
 uv run scripts/probe_vigil.py         # Vigil: queue, policy, presence, the Witness guard
 uv run scripts/probe_discord.py       # the Discord lane's scripted checks
@@ -1095,6 +1391,7 @@ uv run scripts/probe_web.py           # the GUI lane: queue, origin gate, mute r
 uv run scripts/probe_web.py --live    # serve the real page and echo, no mic or model
 uv run scripts/probe_grants.py        # capability granting: catalog + surgery
 uv run scripts/probe_stt.py           # transcript filters: hallucinations, loops
+uv run --no-sync python scripts/probe_spotify.py  # Spotify: PKCE, refresh, API shapes, gates
 uv run scripts/probe_oura.py          # the ring: summaries, the nudge, tokens
 uv run scripts/probe_oura.py --authorize  # connect the ring (one browser approval)
 uv run scripts/probe_oura.py --live   # read today from the ring for real
@@ -1102,6 +1399,8 @@ uv run scripts/probe_location.py      # places, both sources, move notes
 uv run scripts/probe_location.py --live  # read where this Mac is right now
 uv run scripts/probe_world.py         # the world table: facts, freshness, the block, the relay
 uv run scripts/probe_wake_model.py ~/.ciel/models/hey_ciel.onnx  # qualify a custom wake model
+uv run scripts/probe_gestures.py      # the gesture ear: snaps, pairs, and its seat beside the wake word
+uv run scripts/listen_gestures.py     # hear snaps and claps for real, with the numbers behind each verdict
 ```
 
 `enroll_voice.py` (Barn Door's enrollment and tuning) is documented in the
@@ -1145,7 +1444,7 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `config.py` | Every swappable choice, in one place |
 | `commands.py` | The no-brain fast path — mechanical requests matched locally |
 | `confirm.py` | Proof Obligation — the spoken/texted yes-or-no broker |
-| `audio/` | Capture, endpointing, playback, wake, speaker identity |
+| `audio/` | Capture, endpointing, playback, wake (the phrase and the gesture ear), speaker identity |
 | `stt/`, `tts/` | Engine protocols and implementations (plus the voice effect) |
 | `brain/` | Claude client, system prompt, sessions, guards, tools |
 | `memory/` | The durable file-backed store (Invariant) |
@@ -1154,6 +1453,8 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `messages/` | iMessage — reading the database, sending through Messages |
 | `journal.py` | Inverse — the action journal and snapshots, so actions can be undone |
 | `timers.py` | Timers and alarms, ringing or held while muted |
+| `music.py` | Spotify on the Mac, through one narrow AppleScript door |
+| `spotify.py` | Spotify Web API — browser login, search and Connect playback from the brain's host |
 | `projects.py` | Atlas — durable working state per project |
 | `transcript.py` | Trace — the record of the path actually taken |
 | `reload.py` | Analytic Continuation — watch the source, re-exec, resume |

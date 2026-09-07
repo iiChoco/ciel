@@ -37,7 +37,7 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
-from ciel.brain.permissions import FILE_TOOLS, WorkspaceGuard
+from ciel.brain.permissions import FILE_TOOLS, WorkspaceGuard, forbidden_names
 from ciel.brain.prompt import build_system_prompt, sections_watch_line
 from ciel.brain.sentences import flush_point, split_sentences
 from ciel.brain.session import SessionStore
@@ -57,6 +57,24 @@ log = logging.getLogger(__name__)
 # terminated process underneath the SDK's own wrappers.
 _TRANSPORT_ERRORS = (CLIConnectionError, ProcessError, BrokenPipeError, ConnectionError)
 
+
+class StreamDied(ConnectionError):
+    """The SDK's message reader gave up mid-turn — a line it could not
+    frame (a tool result past its buffer), a broken pipe it wrapped in a
+    plain Exception. The subprocess may still be alive, but nothing will
+    ever be read from it again: every later receive_response() ends at
+    once with nothing said. A ConnectionError, so the eviction that
+    follows a dead transport follows this too."""
+
+
+_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+"""The SDK frames the CLI's stdout one JSON line at a time and refuses a
+line past its buffer — one megabyte by default, which two displays'
+screenshots in a tool result overflow (2026-09-05: 'JSON message exceeded
+maximum buffer size', and the brain never heard another word). Sixty-four
+is a bound on memory per line, not a target; the screen tool keeps its own
+payload far under it."""
+
 class Brain:
     """A conversational Claude session that yields speakable sentences."""
 
@@ -69,6 +87,7 @@ class Brain:
         projects_index_provider: "Callable[[], str | None] | None" = None,
         verify_emitter: "Callable[[str, dict], None] | None" = None,
         mac_tools: bool = False,
+        mac_snapshot: Callable[[str, int], Awaitable[tuple[bytes | None, str | None]]] | None = None,
     ) -> None:
         self._config = config
         self._mac_tools = mac_tools
@@ -115,17 +134,7 @@ class Brain:
 
         self._guard: WorkspaceGuard | None = None
         if config.files.enabled:
-            self._guard = WorkspaceGuard(
-                config.files.workspace,
-                config.files.read_only_outside,
-                # The undo carve-out: snapshots live outside any workspace,
-                # and restoring one is an ordinary Read the guard must allow.
-                snapshot_dir=(
-                    config.journal.dir.expanduser() / "snapshots"
-                    if config.journal.enabled
-                    else None
-                ),
-            )
+            self._guard = WorkspaceGuard.from_config(config)
             self._guard.ensure_workspace()
             log.info("file access enabled, confined to %s", self._guard.workspace)
 
@@ -134,7 +143,7 @@ class Brain:
         # stays in disallowed_tools exactly as before.
         self._shell_guard: ShellGuard | None = None
         if config.shell.enabled and confirmer is not None:
-            self._shell_guard = ShellGuard(config.shell, confirmer)
+            self._shell_guard = ShellGuard(config.shell, confirmer, forbidden=forbidden_names(config))
             log.info("shell enabled behind the voice gate")
         # The Mac's shell, from the hub: the same tiers and the same gate,
         # matched on the RPC tool's name, and the question says where.
@@ -143,6 +152,7 @@ class Brain:
             self._mac_shell_guard = ShellGuard(
                 config.shell, confirmer,
                 tool_name="mcp__ciel__run_on_mac", where="the Mac",
+                forbidden=forbidden_names(config),
             )
             log.info("the Mac's shell enabled behind the voice gate")
 
@@ -165,6 +175,12 @@ class Brain:
         # rather than letting it run silently on the tool description's say-so.
         if config.messages.enabled and config.messages.allow_send:
             gated.add("mcp__ciel__send_message")
+        spotify_actions = (
+            frozenset({"mcp__ciel__spotify_control"})
+            if config.spotify.enabled else frozenset()
+        )
+        if config.spotify.confirm_controls:
+            gated.update(spotify_actions)
         # Mail from Ciel's own address: outward, irreversible, same gate.
         if config.mail.armed:
             gated.add("mcp__ciel__send_as_ciel")
@@ -213,9 +229,12 @@ class Brain:
                 # an unattended re-check would add a turn to observe what
                 # the tool already proved. The Mac's shell and writes are
                 # journaled like the local ones.
-                self._gated_tools | grant_tools | mac_mutators,
+                # A direct Spotify request is sufficient permission, but
+                # its record and read-back must not depend on asking again.
+                self._gated_tools | grant_tools | mac_mutators | spotify_actions,
                 verify_emitter=verify_emitter,
-                verify_for=self._gated_tools - grant_tools,
+                verify_for=(self._gated_tools | spotify_actions) - grant_tools,
+                mac_snapshot=mac_snapshot,
             )
 
     @property
@@ -315,6 +334,7 @@ class Brain:
         return ClaudeAgentOptions(
             model=self._brain_config.model,
             tools=base_tools,
+            max_buffer_size=_MAX_MESSAGE_BYTES,
             system_prompt=build_system_prompt(
                 self._memory_index_provider() if self._memory_index_provider else None,
                 personality=self._brain_config.personality,
@@ -402,6 +422,11 @@ class Brain:
                 *([] if self._shell_guard else ["Bash"]),
                 "KillShell",
                 "BashOutput",
+                # The built-in walkers: they search past the guard's sight
+                # (it sees the root, not the files the walk opens). Ciel's
+                # own search_files / find_files sieve every candidate.
+                "Glob",
+                "Grep",
             ],
             # PreToolUse hooks, deliberately not can_use_tool: an
             # allowed_tools entry auto-approves its tool *before* that callback
@@ -642,7 +667,18 @@ class Brain:
             await self._client.query(text)
             query_sent = True
 
-            async for message in self._client.receive_response():
+            stream = self._client.receive_response()
+            while True:
+                try:
+                    message = await stream.__anext__()
+                except StopAsyncIteration:
+                    break
+                except _TRANSPORT_ERRORS:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - the SDK raises a bare Exception here
+                    # Raised by the stream itself, not by anything below:
+                    # the reader is gone, and so is the client.
+                    raise StreamDied(str(exc)) from exc
                 if isinstance(message, StreamEvent):
                     # Deep-thought subagent output carries its spawner's
                     # tool-use id. Its internal streaming must never be spoken —

@@ -199,6 +199,125 @@ class WakeConfig:
     nothing is waiting on this one to finish (no command follows in the same
     breath), so a slightly longer phrase is fine."""
 
+    snap: bool = False
+    """A finger snap addresses Ciel the way the phrase does: the same
+    acknowledgement, the same listening window. Heard alongside the wake
+    word, not instead of it, and ignored in ``always`` mode where there is
+    nothing to wake. Tune the ear in ``[gestures]``."""
+
+    double_clap: Literal["off", "wake", "play"] = "off"
+    """What two claps within the pair window do. ``wake`` addresses Ciel
+    like the snap; ``play`` starts ``double_clap_plays`` in Spotify without
+    waking, the way a switch on the wall starts music. Two claps rather
+    than one because on a laptop microphone a single clap and a knuckle on
+    the desk are the same sound; a pair is something the desk rarely
+    produces. Gated by mute either way."""
+
+    double_clap_plays: str = ""
+    """The Spotify URI two claps start when ``double_clap = "play"`` —
+    an artist, album, playlist, or track, as Spotify's "Copy Spotify URI"
+    gives it (``spotify:artist:...``). Only a URI of that shape is ever
+    handed to Spotify. With the ``[spotify]`` connector switched on and
+    authorized on this Mac it plays through the Web API on whichever
+    device is active, the desktop app being the fallback; see ``music.py``."""
+
+
+@dataclass(frozen=True, slots=True)
+class GestureConfig:
+    """The ear for hand sounds — snaps and claps on the wake microphone.
+
+    An impulse that clears the onset gate is measured four ways: its peak,
+    how long its body stays above half that peak, how much energy sits
+    above 2 kHz against the band below it (the *tilt*), and how far the
+    envelope has fallen 10 ms later. Tilt is what separates a snap from a
+    clap at 16 kHz; loudness is what separates a clap from a keystroke.
+    Every boundary here was read off one MacBook's lid microphone on
+    2026-09-06, and ``scripts/listen_gestures.py`` prints the same four
+    numbers for every impulse so they can be re-read in another room."""
+
+    warmup_ms: int = 600
+    """Frames ignored after start while the noise floor settles."""
+
+    min_peak: float = 0.01
+    """Full-scale fraction an impulse must reach to be looked at at all."""
+
+    noise_ratio: float = 6.0
+    """...and how far above the room's floor (a median of recent frames)."""
+
+    rise_ratio: float = 10.0
+    """The onset gate: the peak must be this many times the envelope 2 ms
+    earlier. A 20 dB step inside 2 ms is an impact; speech never does it."""
+
+    highpass_hz: float = 500.0
+    """Hum and vowels are dropped before anything is measured."""
+
+    refractory_ms: int = 60
+    """No second impulse is counted this soon after one: a clap's ring-down
+    is gone in 60 ms, and a fast double clap's second hit lands at 100."""
+
+    double_min_ms: int = 60
+    double_max_ms: int = 800
+    """The pair window: a second clap this long after the first completes
+    a double clap. Wider than 800 ms and unrelated bumps start pairing."""
+
+    snap_max_peak: float = 0.25
+    """No snap measured louder than this; above it a bright impulse is a
+    clap close to the microphone, which carries more top end than one
+    across the room."""
+
+    snap_max_ms: float = 5.0
+    snap_min_tilt: float = 1.5
+    snap_min_fall_db: float = 15.0
+
+    clap_min_peak: float = 0.1
+    """Claps at the desk peaked at 0.55 and up, typing at 0.02: loudness
+    is the only cue that tells them apart."""
+
+    clap_max_ms: float = 20.0
+    clap_max_tilt: float = 2.0
+    clap_min_fall_db: float = 3.0
+    """Loud claps overload the microphone and ring, so their fall barely
+    clears this."""
+
+    second_clap_min_peak: float = 0.05
+    """The second clap of a pair is often quieter and lands in the first
+    one's reverberation, so it is held only to this and to tilt."""
+
+    veto_model: str = ""
+    """A second opinion that only says no. ``"yamnet"`` fetches Google's
+    AudioSet classifier (16 MB, Apache 2.0, hash-pinned) into the models
+    directory on first start and asks it, about each snap or clap the
+    rules accept, whether the room was really typing, talking, or playing
+    music — the sounds those rules mistake for hands. A path names a
+    custom ONNX model with the same interface. Empty, the rules stand
+    alone. See ``audio/audioset.py`` for why it is not the judge."""
+
+    veto_threshold: float = 0.3
+    """How sure the model must be that the room was doing something else
+    before a snap or a clap is dropped. Typing at the desk scores 0.6 to
+    0.8; speech 0.9 and up; a real snap in a quiet room gives them 0.1."""
+
+    keyboard_veto_ms: int = 300
+    """The keyboard's own word: a snap or a clap that lands this soon
+    after a key went down or up on this Mac is a keystroke, whatever it
+    sounded like. macOS reports the time since the last key event to any
+    process in the session — timestamps only, never which key, and no
+    permission dialog. See ``audio/keys.py``. 0 switches it off; off the
+    Mac it is inert."""
+
+    snap_quiet_ms: int = 400
+    """A snap must be the only impulse in this much time: a snap is
+    solitary, a keystroke arrives in a run. Any gated impulse in the
+    window before a would-be snap turns it into a rejection that says
+    "typing cadence". The cost is a snap made mid-typing, which was
+    already taken for a keystroke. 0 switches the gate off."""
+
+    log_candidates: bool = False
+    """Log every impulse the ear gates, not only the gestures it fires —
+    each with its four numbers and, for a miss, the cue it failed — so
+    the spoke's own log shows what the room sounded like while you tune.
+    A few lines per minute of typing; off once the boundaries are set."""
+
 
 @dataclass(frozen=True, slots=True)
 class VoiceConfig:
@@ -338,20 +457,29 @@ class STTConfig:
 
 @dataclass(frozen=True, slots=True)
 class TTSConfig:
-    engine: Literal["say", "piper"] = "piper"
-    """``piper`` is a local neural voice; ``say`` is the macOS built-in.
+    engine: Literal["say", "piper", "native"] = "piper"
+    """``piper`` is a local neural voice; ``say`` is the macOS built-in
+    rendered to a file; ``native`` is Apple's synthesizer streamed through
+    a Swift helper (``tts/native.py``), which is how the Premium voices
+    (Jamie, Zoe, Ava — free downloads under Accessibility → Spoken
+    Content) reach Ciel.
 
-    Piper is the default on measurement, not taste: it reached first audio in
-    ~140 ms against ~500 ms for `say` — because it streams chunks as it
-    synthesizes rather than rendering a whole file first — *and* it sounds
-    considerably more human. The only cost is a one-time ~60 MB voice download,
-    after which it is strictly better on both axes.
-
-    Falls back to ``say`` automatically if the voice can't be loaded, so a
-    failed download degrades to a working assistant rather than a broken one."""
+    Piper was the default on measurement against ``say``'s compact voice:
+    first audio in ~140 ms against ~500 ms, and more human. ``native``
+    with a Premium voice beats it on both — first audio ~40 ms once warm,
+    and Apple's neural prosody — but is Mac-only and needs the command-line
+    tools' ``swiftc`` once to build the helper; ``probe_native_voice.py``
+    has the numbers. Falls back native → piper → ``say``, so a missing
+    voice or toolchain degrades quality, never speech."""
 
     voice: str = "Samantha"
-    """A macOS voice name for ``say``; ignored by Piper."""
+    """A macOS voice name for ``say``; ignored by Piper and ``native``."""
+
+    native_voice: str = "Jamie"
+    """The voice for ``native``: a name (the best quality installed under
+    it wins — Premium over Enhanced over compact) or an identifier
+    (``com.apple.voice.premium.en-GB.Malcolm``, which is what Jamie is
+    called inside). Paced by ``rate`` like ``say``."""
 
     rate: int = 190
     """Words per minute for ``say``. macOS default is 175, which drags a little
@@ -426,9 +554,9 @@ class ShellConfig:
     the gate is the defense."""
 
     auto_allow: tuple[str, ...] = (
-        # Version control, read-only.
-        "git status", "git log", "git diff", "git show", "git branch",
-        "git blame",
+        # Git's diff and branch families can write files or run helpers.
+        # Log stays quiet only for the guard's display-only arguments.
+        "git status", "git log",
         # The machine describing itself.
         "ls", "pwd", "date", "whoami", "uname", "id", "hostname", "uptime",
         "df", "du", "ps", "pmset -g",
@@ -447,13 +575,15 @@ class ShellConfig:
         # workspace. What still holds is the credential blocklist — a command
         # naming .ssh, .aws, .zshrc and kin is denied outright, quiet tier or
         # not — and redirection still confirms, so reading is all these get.
-        "cat", "file", "stat", "which",
+        "cat", "stat", "which",
     )
     """Command prefixes that run without a spoken confirmation. Matched per
     pipeline segment against leading whole tokens — "git status" covers
     "git status -sb", and every segment of a pipe must match for the pipeline
-    to stay quiet. Only for commands with no redirection, substitution, or
-    backgrounding, which escalate to a confirmation regardless (merging or
+    to stay quiet. The guard also checks arguments: Git log accepts only
+    its display-only forms; diff/show/branch/blame and unfamiliar date,
+    hostname, or file arguments still ask, even with an added prefix.
+    Only for commands with no redirection, substitution, or backgrounding, which escalate to a confirmation regardless (merging or
     discarding a stream — 2>&1, >/dev/null — doesn't count; those can't
     touch a file)."""
 
@@ -563,7 +693,8 @@ class JournalConfig:
     max_snapshot_kb: int = 1024
     """Files larger than this are not snapshotted before an edit; the journal
     entry says so instead. Bounds the cost of editing something huge — and a
-    file that size is usually generated, not precious."""
+    file that size is usually generated, not precious. Mac snapshots use
+    the smaller of the hub's and spoke's limits, before sending any bytes."""
 
     dir: Path = field(default_factory=lambda: Path.home() / ".ciel" / "undo")
     """Where the journal and its snapshots live. The workspace guard carves
@@ -732,6 +863,38 @@ class MessagesConfig:
     """How long to wait on osascript. A first call often blocks on a macOS
     permission dialog, which needs longer than a normal call but must not hang
     the assistant forever."""
+
+
+@dataclass(frozen=True, slots=True)
+class SpotifyConfig:
+    """Spotify Web API search and Connect playback, from the brain's host."""
+
+    enabled: bool = False
+    """Offer Spotify tools after browser authorization. Off until opted in;
+    playback controls also require the action journal to be enabled."""
+
+    confirm_controls: bool = False
+    """Ask before a playback change. Off: a direct user request is enough.
+    Controls still enter the action journal and remain unavailable in
+    public or unattended turns."""
+
+    client_id: str = ""
+    """The developer app's public Client ID. PKCE needs no client secret.
+    The authorized Client ID is saved with the tokens for refresh."""
+
+    token_file: Path = field(default_factory=lambda: Path.home() / ".ciel" / "spotify.json")
+    """Owner-only OAuth tokens on the brain's host. This name, any configured
+    replacement, and its .lock companion are forbidden to the model."""
+
+    redirect_port: int = 8888
+    """The explicit login command listens on 127.0.0.1 at this port.
+    Register http://127.0.0.1:8888/callback (with the chosen port) in Spotify."""
+
+    timeout_s: float = 15.0
+    """Deadline for each Spotify HTTP request, off the event loop."""
+
+    authorize_timeout_s: float = 300.0
+    """How long the login command waits for browser approval."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1210,6 +1373,12 @@ class WebConfig:
     origins are refused by the Origin check either way."""
 
     port: int = 8765
+
+    speak_back: bool = False
+    """Start with typed replies spoken aloud too. Normally the Chart's
+    replies are text and the room stays quiet; the VOICE chip on the
+    page (or a typed "speak back on") flips this for a session — the
+    way to hear the voice from somewhere you cannot talk."""
     """Where the GUI lives: http://127.0.0.1:8765 by default."""
 
     max_inbound_chars: int = 4000
@@ -1508,6 +1677,14 @@ class InterviewConfig:
     long interview."""
 
     daily_sessions_per_user: int = 4
+    """Interviews a user may start per day. Reserved before the brief is
+    generated (the model call is the expensive part), kept in a ledger of
+    its own — deleting a session does not hand the slot back."""
+
+    daily_regenerations_per_user: int = 8
+    """"Give me a different brief" is a model call too, on a prepared
+    session, so it has a budget of its own rather than riding free."""
+
     max_concurrent: int = 3
     """Live interviews at once — each is an SDK subprocess of a few hundred
     megabytes, and the hub is a small machine. A fourth caller is told the
@@ -1543,6 +1720,17 @@ class InterviewConfig:
 
     cookie_days: int = 30
     """How long a login lasts."""
+    accounts_dir: Path | None = None
+    """When set, the accounts file and the cookie secret live here instead
+    of ``dir`` — the door's directory (``accounts.json``, ``secret``), so one
+    login covers every yunhan.me surface. Sessions stay under ``dir``."""
+    cookie_name: str = "ciel_iv"
+    """The login cookie's name — ``yh_session`` when sharing the door's."""
+    cookie_domain: str = ""
+    """Cookie domain — ``.yunhan.me`` to share the login across subdomains;
+    empty is host-only, the room alone."""
+    cookie_path: str = "/interview"
+    """Cookie path — ``/`` when shared, so every surface receives it."""
 
     reload_max_wait_s: float = 1200.0
     """How long a pending source reload waits for live interviews to end
@@ -1831,17 +2019,29 @@ class WorldConfig:
     0 disables the refresh (the brief still reads the agenda itself)."""
 
     file: Path = field(default_factory=lambda: Path.home() / ".ciel" / "world.json")
-    """The table's mirror, written at most once a second when something
-    changed, read at startup — the autoreloader re-execs on every source
-    edit, and a place or a ring score should not blank for minutes each
-    time. Every fact keeps its own timestamp, so a carried-over reading
-    is shown at its true age, never as new."""
+    """The table's mirror, owner-only, written when a fact changed (and
+    at most every five minutes for a mere refresh of an unchanged one),
+    read at startup — the autoreloader re-execs on every source edit,
+    and a place or a ring score should not blank for minutes each time.
+    Every fact keeps its own timestamp, so a carried-over reading is
+    shown at its true age, never as new. Carries the revision."""
+
+    history: Path | None = field(
+        default_factory=lambda: Path.home() / ".ciel" / "world-history.jsonl"
+    )
+    """Append-only: one line per change to a resolved fact, with the
+    revision it made — what "when was I last home" or a post-mortem
+    reads. None keeps no history."""
+
+    history_max_bytes: int = 2_000_000
+    """Past this size the history keeps its newer half."""
 
 
 @dataclass(frozen=True, slots=True)
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
+    gestures: GestureConfig = field(default_factory=GestureConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     stt: STTConfig = field(default_factory=STTConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
@@ -1857,6 +2057,7 @@ class Config:
     web: WebConfig = field(default_factory=WebConfig)
     hub: HubConfig = field(default_factory=HubConfig)
     spoke: SpokeConfig = field(default_factory=SpokeConfig)
+    spotify: SpotifyConfig = field(default_factory=SpotifyConfig)
     oura: OuraConfig = field(default_factory=OuraConfig)
     sections: SectionsConfig = field(default_factory=SectionsConfig)
     mail: MailConfig = field(default_factory=MailConfig)
@@ -1876,6 +2077,11 @@ class Config:
 
     state_dir: Path = field(default_factory=lambda: Path.home() / ".ciel")
     log_level: str = "INFO"
+    timezone: str = ""
+    """The user's zone (``America/Los_Angeles``), applied to the process
+    at startup: every clock the runtime speaks — the opening block, an
+    alarm's time, the brief's quiet hours — is the user's, not the
+    host's. Empty leaves the host's zone, which on a cloud hub is UTC."""
 
     @property
     def session_file(self) -> Path:
@@ -1887,6 +2093,7 @@ class Config:
 _SECTIONS = {
     "audio": AudioConfig,
     "wake": WakeConfig,
+    "gestures": GestureConfig,
     "voice": VoiceConfig,
     "stt": STTConfig,
     "tts": TTSConfig,
@@ -1902,6 +2109,7 @@ _SECTIONS = {
     "web": WebConfig,
     "hub": HubConfig,
     "spoke": SpokeConfig,
+    "spotify": SpotifyConfig,
     "oura": OuraConfig,
     "sections": SectionsConfig,
     "mail": MailConfig,
@@ -2021,7 +2229,7 @@ def load_config(path: Path | None = None) -> Config:
                 for name, entry in raw["mcp"].items()
                 if isinstance(entry, dict)
             }
-        for key in ("state_dir", "log_level"):
+        for key in ("state_dir", "log_level", "timezone"):
             if key in raw:
                 updates[key] = _coerce(raw[key], Path if key == "state_dir" else str)
         cfg = replace(cfg, **updates)

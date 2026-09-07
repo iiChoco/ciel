@@ -80,6 +80,11 @@ class HubServer(WebLink):
         """The spoke's last reported listening state — a window is open."""
         self.spoke_speaking = False
         """The spoke's last reported endpointer state — speech in hand."""
+        self.spoke_wake_source: str | None = None
+        """How the spoke's open window was opened, if it said."""
+        self.on_voice_state: Callable[[bool, str | None], None] | None = None
+        """Every ``voice.state``: the listening flag and its source — the
+        Chart's chip is drawn from this."""
         self.on_confirm_answer: Callable[[str], bool] | None = None
         """The broker's ``answer``: a spoken yes or no came back."""
         self.on_turn_cancel: Callable[[str, str], None] | None = None
@@ -172,6 +177,9 @@ class HubServer(WebLink):
             except asyncio.TimeoutError:
                 self.send_spoke({"type": "tool.cancel", "rpc_id": rpc_id})
                 raise RpcUnavailable(f"the Mac did not answer in {timeout:.0f}s")
+            except asyncio.CancelledError:
+                self.send_spoke({"type": "tool.cancel", "rpc_id": rpc_id})
+                raise
         finally:
             self._rpc.pop(rpc_id, None)
 
@@ -221,6 +229,17 @@ class HubServer(WebLink):
                 self._peers.pop(old, None)
                 asyncio.get_running_loop().create_task(self._drop(old))
             log.info("spoke seated (%s)", verdict.client_id or "-")
+            # The authoritative timer set, straight to the seat. The
+            # broadcast in note_timers is deduped against the last set
+            # *sent* — which a spoke that was away for the change never
+            # received, and the unchanged polls that follow say nothing.
+            # A private frame here owes nothing to that dedupe (and to
+            # the replay ring: it is state, not an event), so a reconnect
+            # is a reconciliation whether or not the resume claim held.
+            if self._timers_sent is not None:
+                self._send_to(ws, wire.validate(
+                    {"type": "timers.sync", "timers": self._timers_sent}, "h2c"
+                ))
             if self.on_spoke_change is not None:
                 self.on_spoke_change(True)
         return queue, resumed
@@ -307,6 +326,9 @@ class HubServer(WebLink):
             elif kind == "voice.state":
                 self.spoke_listening = frame["listening"]
                 self.spoke_speaking = frame["speaking"]
+                self.spoke_wake_source = frame.get("source") if frame["listening"] else None
+                if self.on_voice_state is not None:
+                    self.on_voice_state(self.spoke_listening, self.spoke_wake_source)
             elif kind == "mute":
                 if self.on_spoke_mute is not None:
                     self.on_spoke_mute(frame["muted"])

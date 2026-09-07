@@ -162,14 +162,15 @@ class GoogleCalendarWatcher:
 
     # ── the brief's agenda ───────────────────────────────────────────────────
 
-    async def agenda_today(self) -> list[str]:
+    async def agenda_today(self) -> list[str] | None:
         """Today's remaining events as spoken-ready lines — the same
-        degrade-to-empty contract as the EventKit watcher."""
+        contract as the EventKit watcher: None when the read failed,
+        never an empty list standing in for a failure."""
         try:
             return await asyncio.to_thread(self._agenda_sync)
         except Exception:  # noqa: BLE001 - a failed agenda must not kill the brief
             log.exception("google agenda fetch failed")
-            return []
+            return None
 
     def _agenda_sync(self) -> list[str]:
         now = time.time()

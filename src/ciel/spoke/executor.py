@@ -18,6 +18,12 @@ unless the hub says it asked, and only the quiet tier runs on the
 hub's word alone. The file handlers run the workspace guard's path
 check the same way. Defense in depth, because this socket is the whole
 distance between "the user's assistant" and "whatever reached the port".
+
+**Cancellation owns the process, not just its coroutine.** Each shell has
+its own process group, stopped and reaped on cancellation or either
+deadline. Shutdown waits for that cleanup. **Undo reads the Mac first:**
+the recorder's private snapshot request applies the write boundary and
+returns bounded bytes for the hub to save before the write is allowed on.
 """
 
 from __future__ import annotations
@@ -26,10 +32,12 @@ import asyncio
 import base64
 import contextlib
 import logging
+import os
+import signal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from ciel.brain.permissions import WorkspaceGuard
+from ciel.brain.permissions import WorkspaceGuard, forbidden_names
 from ciel.brain.shellguard import classify
 
 if TYPE_CHECKING:
@@ -66,7 +74,7 @@ class Executor:
         self._calendar = calendar
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._workspace: WorkspaceGuard | None = (
-            WorkspaceGuard(config.files.workspace, config.files.read_only_outside)
+            WorkspaceGuard.from_config(config)
             if config.files.enabled
             else None
         )
@@ -82,6 +90,7 @@ class Executor:
             "calendar.agenda_today": self._calendar_agenda,
             "shell.run": self._shell_run,
             "files.read": self._files_read,
+            "files.snapshot": self._files_snapshot,
             "files.write": self._files_write,
             "files.list": self._files_list,
         }
@@ -91,15 +100,25 @@ class Executor:
     def handle(self, frame: dict[str, Any]) -> None:
         """A ``tool.request`` or ``tool.cancel``; returns at once."""
         if frame["type"] == "tool.cancel":
-            task = self._tasks.pop(frame["rpc_id"], None)
-            if task is not None and not task.done():
+            task = self._tasks.get(frame["rpc_id"])
+            if task is not None and not task.done() and not task.cancelling():
                 task.cancel()
             return
         rpc_id = frame["rpc_id"]
-        self._tasks[rpc_id] = asyncio.create_task(
+        if rpc_id in self._tasks:
+            return  # a retry cannot orphan the task whose cleanup still owns this id
+        task = asyncio.create_task(
             self._run(rpc_id, frame["tool"], frame.get("args") or {},
                       float(frame.get("timeout_s") or 30.0))
         )
+        self._tasks[rpc_id] = task
+
+        def finished(done: asyncio.Task[None]) -> None:
+            # A task canceled before its first instruction never enters
+            # _run; its ledger entry still has to leave.
+            self._tasks.pop(rpc_id, None)
+
+        task.add_done_callback(finished)
 
     async def _run(self, rpc_id: str, tool: str, args: dict[str, Any], timeout: float) -> None:
         handler = self._handlers.get(tool)
@@ -116,14 +135,14 @@ class Executor:
         except Exception as exc:  # noqa: BLE001 - every failure is a sentence on the wire
             log.debug("tool %s failed", tool, exc_info=True)
             result = {"type": "tool.result", "rpc_id": rpc_id, "ok": False, "error": str(exc)}
-        finally:
-            self._tasks.pop(rpc_id, None)
         self._send(result)
 
     async def close(self) -> None:
-        for task in list(self._tasks.values()):
-            task.cancel()
-        self._tasks.clear()
+        tasks = list(self._tasks.values())
+        for task in tasks:
+            if not task.cancelling():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     # ── the senses ───────────────────────────────────────────────────────────
 
@@ -194,34 +213,45 @@ class Executor:
             return []
         return [_watch_dict(w) for w in self._watcher.active()]
 
-    async def _calendar_agenda(self) -> list[str]:
+    async def _calendar_agenda(self) -> list[str] | None:
         if self._calendar is None:
-            return []
-        return list(await self._calendar.agenda_today())
+            return None
+        rows = await self._calendar.agenda_today()
+        return None if rows is None else list(rows)
 
     # ── the machine ──────────────────────────────────────────────────────────
 
     async def _shell_run(self, command: str, confirmed: bool = False) -> dict[str, Any]:
         if not self._config.shell.enabled:
             raise RuntimeError("the shell is off on the Mac")
-        tier, reason = classify(command, self._config.shell)
+        tier, reason = classify(command, self._config.shell, forbidden=forbidden_names(self._config))
         if tier == "deny":
             raise RuntimeError(f"refused on the Mac — {reason}")
         if tier != "quiet" and not confirmed:
             raise RuntimeError("refused on the Mac — that command needs the user's yes, and none was given")
-        proc = await asyncio.create_subprocess_shell(
+        starting = asyncio.create_task(asyncio.create_subprocess_shell(
             command,
+            start_new_session=True,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self._config.files.workspace.expanduser()) if self._config.files.enabled else None,
-        )
+        ))
+        try:
+            proc = await asyncio.shield(starting)
+        except asyncio.CancelledError:
+            # Creation may already have forked while its await is pending.
+            # Keep ownership until we have the handle needed to stop it.
+            proc = await starting
+            await _stop_shell(proc)
+            raise
         try:
             out, err = await asyncio.wait_for(
                 proc.communicate(), self._config.shell.command_timeout_s
             )
-        except asyncio.TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            await _stop_shell(proc)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise RuntimeError(
                 f"the command ran past {self._config.shell.command_timeout_s:.0f}s and was killed"
             ) from None
@@ -244,6 +274,25 @@ class Executor:
         target = self._path(path, write=False)
         return _cut(await asyncio.to_thread(target.read_text, "utf-8", "replace"))
 
+    async def _files_snapshot(self, path: str, max_bytes: int) -> dict[str, Any]:
+        """The recorder's bounded read, before a write; never a model tool."""
+        target = self._path(path, write=True)
+        limit = max(0, min(int(max_bytes), self._config.journal.max_snapshot_kb * 1024))
+
+        def read() -> dict[str, Any]:
+            try:
+                # Read one byte past the bound: a file growing after stat
+                # must not turn the snapshot into an unbounded wire frame.
+                with target.open("rb") as source:
+                    data = source.read(limit + 1)
+            except FileNotFoundError:
+                return {"data": None, "note": "file did not exist before this call"}
+            if len(data) > limit:
+                return {"data": None, "note": "file too large to snapshot"}
+            return {"data": base64.b64encode(data).decode("ascii"), "note": None}
+
+        return await asyncio.to_thread(read)
+
     async def _files_write(self, path: str, content: str) -> str:
         target = self._path(path, write=True)
 
@@ -258,6 +307,20 @@ class Executor:
         target = self._path(path, write=False)
         names = await asyncio.to_thread(lambda: sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir()))
         return names[:500]
+
+
+async def _stop_shell(proc: asyncio.subprocess.Process) -> None:
+    """Stop the owned process group and wait for its shell to be reaped."""
+    # The shell may be waiting for children that still own its pipes.
+    # Killing just its PID abandons those children to keep working.
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    cleanup = asyncio.create_task(proc.communicate())
+    try:
+        await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        await cleanup
+        raise
 
 
 def _watch_dict(watch: Any) -> dict[str, Any]:

@@ -74,7 +74,7 @@ CATALOG: dict[str, FrameSpec] = {
     "ping": FrameSpec("c2h", {}, {}),
     # hub → client
     "hello.ok": FrameSpec("h2c", {"v": _I, "state": _S, "tts": _S, "turn": _I, "elapsed_s": _F, "history": _L}, {}),
-    "state": FrameSpec("h2c", {"state": _S}, {"hold_ms": _I}),
+    "state": FrameSpec("h2c", {"state": _S}, {"hold_ms": _I, "reason": _S}),
     "say": FrameSpec("h2c", {"n": _I, "turn": _I, "text": _S}, {"audio": _S}),
     "turn.end": FrameSpec("h2c", {"turn": _I}, {}),
     "exhibit": FrameSpec("h2c", {"id": _S, "title": _S, "kind": _S}, {"columns": _L, "rows": _L, "note": _S}),

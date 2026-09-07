@@ -43,6 +43,7 @@ import secrets
 import sys
 import time
 from collections import deque
+import contextlib
 from contextlib import AsyncExitStack, aclosing
 from dataclasses import replace as dc_replace
 from pathlib import Path
@@ -67,12 +68,14 @@ from ciel.proactive.location import LocationWatcher
 from ciel.proactive.oura import OuraWatcher
 from ciel.proactive.events import EventQueue, ProactiveEvent
 from ciel.proactive.policy import Decision, InterruptionPolicy
-from ciel.proactive.presence import PresenceProbe
+from ciel.proactive.presence import PresenceProbe, PresenceState
 from ciel.proactive.sections import SectionsWatcher
 from ciel.proactive.watchers import ScheduleWatcher
 from ciel.proactive.work import WorkWatcher
 from ciel.brain.tools.location import bind_locator
 from ciel.brain.tools.watch import bind_watcher
+from ciel.brain.tools.world import set_scope as set_world_scope
+from ciel.brain.tools.spotify import set_scope as set_spotify_scope
 from ciel.location import Locator
 from ciel import world as W
 from ciel.world import World
@@ -150,21 +153,43 @@ def build_tts(config: Config) -> "TextToSpeech":
     config value, which is the whole point of the protocol. (``_warm_up_tts``
     names ``SayTTS`` once more, on the runtime fallback path.)
     """
+    return _apply_effect(_engine_for(config.tts.engine, config.tts), config)
+
+
+_ENGINE_CHAIN = ("native", "piper", "say")
+"""Best first; a failure at one step falls to the next."""
+
+
+def _engine_for(engine: str, tts: "TTSConfig") -> "TextToSpeech":
+    """The engine named, or the next one down that can be constructed."""
     from ciel.tts.macos_say import SayTTS
 
-    engine: TextToSpeech | None = None
-    if config.tts.engine == "piper":
+    if engine == "native":
+        from ciel.tts.native import NativeTTS
+
+        return NativeTTS(tts)
+    if engine == "piper":
         try:
             from ciel.tts.piper import PiperTTS
 
-            engine = PiperTTS(config.tts)
+            return PiperTTS(tts)
         except ImportError:
             # Piper is an optional extra. A missing install should cost voice
             # quality, not the whole assistant.
             log.warning("piper is not installed — falling back to `say`")
-    if engine is None:
-        engine = SayTTS(config.tts)
-    return _apply_effect(engine, config)
+    return SayTTS(tts)
+
+
+def fallback_tts(failed: "TextToSpeech", config: Config) -> "TextToSpeech":
+    """The engine to try after ``failed`` would not warm up: the next
+    down the chain (native → piper → say), wrapped like the first."""
+    from ciel.tts.effect import VoiceEffect
+
+    inner = failed.inner if isinstance(failed, VoiceEffect) else failed
+    name = type(inner).__name__.removesuffix("TTS").lower()
+    later = _ENGINE_CHAIN[_ENGINE_CHAIN.index(name) + 1:] if name in _ENGINE_CHAIN else ()
+    next_name = later[0] if later else "say"
+    return _apply_effect(_engine_for(next_name, config.tts), config)
 
 
 def _apply_effect(engine: "TextToSpeech", config: Config) -> "TextToSpeech":
@@ -179,6 +204,12 @@ def _apply_effect(engine: "TextToSpeech", config: Config) -> "TextToSpeech":
 
         return VoiceEffect(engine)
     return engine
+
+
+_LOCAL_PRESENCE_TTL_S = 10.0
+"""How long the local presence reading (taken once a second by the
+world tick, and per turn) stays trustworthy — a few missed ticks, no
+more, so Vigil never decides on a reading the probe would contradict."""
 
 
 class _TextSink:
@@ -218,6 +249,75 @@ class _TextSink:
 
     async def cleanup(self) -> None:
         return None
+
+
+class _SpokenTextSink(_TextSink):
+    """Delivery for a typed Chart turn the user asked to *hear* as well
+    (the speak-back switch): the transcript tap still feeds the page,
+    and each reply sentence is also spoken in the room — through the
+    spoke on the hub, the player locally. None of the voice lane's
+    theatre: no ack filler, no chime, no follow-up window afterwards —
+    the words were typed, and the room may be a library. A sentence
+    that will not play (a barge-in, a lost device, the Mac gone) makes
+    the rest of the turn text only; it never cuts the reply short.
+    """
+
+    def __init__(
+        self, pipeline: "Pipeline", *, confirm_send=None,
+        server: "HubServer | None" = None, player: "Player | None" = None,
+    ) -> None:
+        super().__init__(pipeline, confirm_send)
+        self._server = server
+        self._player = player
+        self.turn_id = secrets.token_urlsafe(6)
+        self._n = 0
+        self._silent = False
+        self._ended = False
+
+    async def begin(self, started: float) -> None:
+        if self._server is not None:
+            self._server.send_spoke({
+                "type": "turn.begin", "turn_id": self.turn_id, "lane": "web",
+            })
+
+    async def reply(self, sentence: str) -> bool:
+        self._flags()
+        await self._speak(sentence)
+        return True
+
+    async def _speak(self, sentence: str) -> None:
+        if self._silent:
+            return
+        p = self._p
+        self._n += 1
+        try:
+            if self._server is not None:
+                ok = await self._server.speak(
+                    self.turn_id, self._n, "reply", sentence, p._config.hub.speak_timeout_s
+                )
+            else:
+                assert self._player is not None and p._tts is not None
+                p._indicator.set_state("speaking")
+                ok = await self._player.play(p._tts.stream(sentence))
+                p._indicator.set_state("thinking")
+        except Exception:  # noqa: BLE001 - the page has the words; the room goes quiet
+            log.debug("speak back failed", exc_info=True)
+            ok = False
+        if not ok:
+            self._silent = True
+            log.info("speak back stopped mid-turn — the rest is text only")
+
+    async def finish(self, started: float) -> None:
+        self._end()
+
+    async def cleanup(self) -> None:
+        self._end()
+
+    def _end(self) -> None:
+        if self._ended or self._server is None:
+            return
+        self._ended = True
+        self._server.send_spoke({"type": "turn.end", "turn_id": self.turn_id, "status": "done"})
 
 
 class _DiscordSink(_TextSink):
@@ -664,6 +764,7 @@ class Pipeline:
     attribute so a probe that builds a pipeline by ``__new__`` runs with
     no table and bare prompts, as every probe did before the table."""
     _next_world_push = 0.0
+    _speak_back = False
     _world_seen = -1
     _agenda_task: "asyncio.Task[None] | None" = None
     """The table's poll clock and the agenda refresher — class defaults
@@ -692,7 +793,7 @@ class Pipeline:
 
             self._stt = build_stt(config.stt)
             self._tts = build_tts(config)
-            self._wake = build_wake_detector(config.wake)
+            self._wake = build_wake_detector(config.wake, config.gestures, config.state_dir, config.spotify)
             # The lambda defers to the running noise-floor estimate (tracked in
             # the frame loop) so endpointing in a noisy room demands speech
             # louder than the room — see Endpointer._clears_floor.
@@ -735,7 +836,13 @@ class Pipeline:
         # currently holds true, fed below by every producer, opening every
         # turn, mirrored to the Chart. Built before the tools so the ring
         # tool and world_now can bind it.
-        self._world = World(config.world.file) if config.world.enabled else None
+        self._world = (
+            World(
+                config.world.file, history=config.world.history,
+                history_max_bytes=config.world.history_max_bytes,
+            )
+            if config.world.enabled else None
+        )
         self._next_world_push = 0.0
         """The table's once-a-second poll deadline: timers and watches
         are re-observed, the file flushed, the Chart told if the version
@@ -763,7 +870,12 @@ class Pipeline:
 
         if self._web_link is not None:
             self._web_link.on_mute = self._set_muted
+            self._web_link.on_speak_back = self._set_speak_back
             self._web_link.on_restart = self._request_restart
+        self._speak_back = config.web.speak_back
+        """The speak-back switch: typed Chart replies are spoken in the
+        room too. In memory only — it is a session's choice, flipped from
+        the page's VOICE chip or a typed "speak back on"."""
 
         self._mute_sentinel = config.state_dir / "mute"
         """The quiet brake, the hold sentinel's sibling: while this file
@@ -777,6 +889,7 @@ class Pipeline:
         if self._web_link is not None:
             # No clients yet — this just sets what the hello frame claims.
             self._web_link.note_muted(self._muted)
+            self._web_link.note_speak_back(self._speak_back)
         if self._world is not None:
             self._world.observe(W.MUTED, self._muted, source=self._who)
         self._next_mute_check = 0.0
@@ -820,6 +933,7 @@ class Pipeline:
             server.on_spoke_mute = lambda muted: self._set_muted(muted, from_spoke=True)
             server.on_spoke_change = self._on_spoke_change
             server.on_fact = self._on_fact
+            server.on_voice_state = self._on_spoke_voice_state
             if self._world is not None:
                 # Until the spoke says hello, the honest reading is "not
                 # here" — a carried-over "connected" from the last process
@@ -844,6 +958,7 @@ class Pipeline:
             # The Mac tools exist when the Mac is elsewhere.
             mac_tools=self._remote is not None
             and (config.shell.enabled or config.files.enabled),
+            mac_snapshot=self._remote.mac.snapshot_file if self._remote is not None else None,
         )
         # Memory writes carry provenance: "proactive" when a Vigil turn with
         # nobody around is writing, "conversation" otherwise — reflection
@@ -1253,7 +1368,7 @@ class Pipeline:
                     elif self._state is State.BUSY:
                         self._check_barge_in(frame, player)
                         if self._turn is not None and self._turn.done():
-                            self._turn.result()  # surface any exception from the turn
+                            self._turn_crashed()  # surface any exception from the turn
                             self._turn = None
                             if self._continue_listening:
                                 # The utterance ended mid-thought; go straight
@@ -1661,7 +1776,7 @@ class Pipeline:
 
                 if self._state is State.BUSY:
                     if self._turn is not None and self._turn.done():
-                        self._turn.result()
+                        self._turn_crashed()
                         self._turn = None
                         self._enter_waiting()
                 elif self._state is State.WAITING:
@@ -1699,6 +1814,23 @@ class Pipeline:
             self._indicator.set_state("error")
             self._record("event", "turn failed")
             await sink.apologize()
+
+    def _turn_crashed(self) -> bool:
+        """Surface a finished turn task's exception as a log line, not as
+        the end of the loop. The handlers catch their own failures and
+        apologize; this is for the failure *in* that handling (2026-09-05:
+        a NameError in the apology took the hub down with it, and the
+        conversation with it). One turn's crash is one turn's crash."""
+        assert self._turn is not None
+        if self._turn.cancelled():
+            return False
+        exc = self._turn.exception()
+        if exc is None:
+            return False
+        log.error("turn task crashed", exc_info=exc)
+        self._indicator.set_state("error")
+        self._record("event", "turn crashed")
+        return True
 
     def _on_turn_cancel(self, turn_id: str, reason: str) -> None:
         """The spoke barged in between sentences (during a sentence, the
@@ -1749,11 +1881,17 @@ class Pipeline:
         spots — into the table, source-stamped with the node."""
         if self._world is None:
             return
+        name = str(frame["name"])
+        if name not in W.RELAYED:
+            # The hub's own readings — its timers, the switches, presence
+            # from the heartbeat, the seat — are never a peer's to write.
+            log.warning("fact %r from the spoke refused: not a reading the Mac relays", name)
+            return
         node = str(frame.get("node") or self._config.spoke.client_id)
         source = str(frame.get("source") or node)
         stamped = source if source == node else f"{source}@{node}"
-        if not self._world.absorb(str(frame["name"]), frame, source=stamped):
-            log.debug("fact %r from the spoke refused", frame.get("name"))
+        if not self._world.absorb(name, frame, source=stamped, received_at=time.time()):
+            log.debug("fact %r from the spoke refused", name)
 
     def _on_spoke_change(self, connected: bool) -> None:
         """The spoke took or left the seat. Leaving mid-question denies it
@@ -1976,8 +2114,23 @@ class Pipeline:
         assert self._web_link is not None
         await self._run_turn(
             TurnRequest(lane="web", text=text, arrival_wall=time.time()),
-            _TextSink(self, confirm_send=self._web_link.send),
+            self._web_sink(),
         )
+
+    def _web_sink(self) -> TurnSink:
+        """The Chart's delivery: the transcript tap alone, or — with the
+        speak-back switch on and a room able to sound — that plus the
+        speakers. Muted is muted: the switch cannot talk over it."""
+        assert self._web_link is not None
+        send = self._web_link.send
+        if self._speak_back and not self._muted:
+            if self._role == "hub":
+                server = self._web_link
+                if isinstance(server, HubServer) and server.spoke_connected:
+                    return _SpokenTextSink(self, confirm_send=send, server=server)
+            elif self._player is not None and self._tts is not None:
+                return _SpokenTextSink(self, confirm_send=send, player=self._player)
+        return _TextSink(self, confirm_send=send)
 
     async def _run_turn(self, req: TurnRequest, sink: TurnSink) -> None:
         """One user turn, whatever lane it rode in on — the single copy of
@@ -2012,7 +2165,7 @@ class Pipeline:
             # takes the normal path, so a missed match costs nothing new.
             cmd = match_command(req.text) if self._config.commands.enabled else None
             if cmd is not None and (
-                cmd.kind in ("reload", "dismiss") or self._timers is not None
+                cmd.kind in ("reload", "dismiss", "speak_back") or self._timers is not None
             ):
                 await self._run_lane_command(cmd, req, spec, sink)
                 return
@@ -2026,7 +2179,9 @@ class Pipeline:
             # says what is true. Note first (it frames the whole turn),
             # then the readings, then the held notes, then the words.
             note = prompt_note(req, muted=self._muted)
-            prompt = note + self._world_block() + (
+            set_world_scope(public=req.public)
+            set_spotify_scope(public=req.public)
+            prompt = note + self._world_block(public=req.public) + (
                 self._with_held_notes(req.text) if spec.held_notes else req.text
             )
             await sink.begin(started)
@@ -2265,6 +2420,21 @@ class Pipeline:
         if self._world is not None:
             self._world.observe(W.MUTED, muted, source="spoke" if from_spoke else self._who)
 
+    def _set_speak_back(self, on: bool) -> None:
+        """Move the speak-back switch — from the Chart's VOICE chip or the
+        typed command. On, a typed Chart turn's reply is spoken in the
+        room as well as shown; the way to hear the voice from a seat
+        where you cannot talk. Not persisted: a session's choice."""
+        on = bool(on)
+        if on == self._speak_back:
+            return
+        self._speak_back = on
+        notice = "speaking typed replies aloud" if on else "typed replies are text only again"
+        print(f"\n  [{notice}]", flush=True)
+        self._record("event", notice)
+        if self._web_link is not None:
+            self._web_link.note_speak_back(on)
+
     def _request_restart(self) -> None:
         """The GUI's restart button — a typed "reload" without the words.
 
@@ -2366,6 +2536,10 @@ class Pipeline:
             self._reload_pending = True
             return None
 
+        if cmd.kind == "speak_back":
+            self._set_speak_back(cmd.on)
+            return "Speaking back on." if cmd.on else "Speaking back off."
+
         if cmd.kind == "dismiss":
             # Drop whatever this exchange was building — a held partial
             # thought included — and go quietly back to waiting. No spoken
@@ -2433,7 +2607,7 @@ class Pipeline:
         today = time.strftime("%Y-%m-%d", local)
         decision = self._policy.decide(
             event,
-            presence=self._presence.state(time.monotonic()),
+            presence=self._presence_now(),
             spoken_today=self._events.spoken_count(today),
             messaged_today=self._events.messaged_count(today),
             can_message=self._owner_messages is not None
@@ -2565,6 +2739,8 @@ class Pipeline:
         self._unattended_hastened = False
         try:
             extra = await self._proactive_extra(event)
+            set_world_scope(public=False)
+            set_spotify_scope(public=False)
             block = self._world_block().strip()
             if block:
                 # The readings, before the event's own material: an
@@ -3015,6 +3191,11 @@ class Pipeline:
         if world is None:
             return
         who = self._who
+        if self._role != "hub":
+            # Locally the probe is the reading; on the hub the heartbeat
+            # already writes it. A short ttl, so a wedged tick reads as
+            # "unknown" rather than as the last thing the Mac said.
+            self._observe_presence(source=who, ttl_s=_LOCAL_PRESENCE_TTL_S)
         if self._timers is not None:
             world.observe(W.TIMERS, [
                 {"kind": t.kind, "label": t.label, "due_at": t.due_at,
@@ -3032,7 +3213,9 @@ class Pipeline:
         if version != self._world_seen:
             self._world_seen = version
             if self._web_link is not None:
-                self._web_link.note_world(world.snapshot())
+                self._web_link.note_world(
+                    world.snapshot(), revision=world.revision, sources=world.sources(),
+                )
 
     def _observe_presence(self, *, source: str, ttl_s: float | None = None) -> None:
         """Fold the presence view into the table. On the hub this runs
@@ -3056,15 +3239,39 @@ class Pipeline:
             ),
         }, source=source, ttl_s=ttl_s)
 
-    def _world_block(self) -> str:
+    def _world_block(self, *, public: bool = False) -> str:
         """The turn's opening block, or "" when the table is off or kept
         out of the prompt. Locally the presence reading is taken here,
-        so it is never older than the turn it opens."""
+        so it is never older than the turn it opens. ``public`` is the
+        lane's projection: a reply that lands where others can read it
+        opens with the shared readings only."""
         if self._world is None or not self._config.world.in_prompt:
             return ""
         if self._role != "hub":
-            self._observe_presence(source="mac")
-        return self._world.render() + "\n\n"
+            self._observe_presence(source="mac", ttl_s=_LOCAL_PRESENCE_TTL_S)
+        return self._world.render(public=public) + "\n\n"
+
+    def _presence_now(self) -> PresenceState:
+        """Presence as Vigil decides on it: the world's resolved fact
+        when it is fresh — the one place a second device's reading will
+        ever be folded in — and the probe's own read when the table has
+        nothing fresh (no table, a wedged tick, the first second)."""
+        assert self._presence is not None
+        fact = self._world.get(W.PRESENCE) if self._world is not None else None
+        v = fact.value if fact is not None else None
+        # Freshness on the table's own clock: the stamps are its, so the
+        # question must be too, or a fixed test clock reads every reading
+        # as stale.
+        if fact is not None and not fact.stale(self._world.now()) and isinstance(v, dict):
+            idle = v.get("idle_s")
+            conv = v.get("since_conversation_s")
+            return PresenceState(
+                screen_locked=bool(v.get("locked")),
+                seconds_since_input=float(idle) if isinstance(idle, (int, float)) else float("inf"),
+                seconds_since_conversation=float(conv) if isinstance(conv, (int, float)) else None,
+                present=bool(v.get("present")),
+            )
+        return self._presence.state(time.monotonic())
 
     async def _refresh_agenda(self) -> None:
         """Today's remaining calendar into the table, every
@@ -3075,21 +3282,34 @@ class Pipeline:
         assert self._world is not None and self._calendar is not None
         from ciel.proactive.watchers import poll_loop
 
-        async def tick() -> None:
-            if (
-                self._remote is not None
-                and self._calendar is self._remote.calendar
-                and not self._web_link.spoke_connected  # type: ignore[union-attr]
-            ):
-                return
-            lines = await self._calendar.agenda_today()  # type: ignore[union-attr]
-            self._world.observe(  # type: ignore[union-attr]
-                W.AGENDA,
-                {"day": time.strftime("%Y-%m-%d"), "lines": [str(x) for x in lines]},
-                source="calendar",
-            )
+        await poll_loop(self._agenda_kick, self._config.world.agenda_refresh_s, self._agenda_tick)
 
-        await poll_loop(self._agenda_kick, self._config.world.agenda_refresh_s, tick)
+    async def _agenda_tick(self) -> None:
+        """One read of today's remaining calendar into the table. A read
+        that fails (None) leaves the previous reading standing at its
+        true age and marks the *source* failed — a dead permission must
+        never look like an empty afternoon."""
+        world, calendar = self._world, self._calendar
+        assert world is not None and calendar is not None
+        if (
+            self._remote is not None
+            and calendar is self._remote.calendar
+            and not self._web_link.spoke_connected  # type: ignore[union-attr]
+        ):
+            return
+        lines = await calendar.agenda_today()
+        if lines is None:
+            world.note_source("calendar", ok=False, error="agenda read failed")
+            return
+        world.note_source("calendar", ok=True)
+        world.observe(
+            W.AGENDA,
+            {"day": time.strftime("%Y-%m-%d"), "lines": [str(x) for x in lines]},
+            source="calendar",
+            # Two refreshes without a fresh read is a reading to doubt:
+            # "last known" rather than "nothing more today".
+            ttl_s=max(600.0, 2 * self._config.world.agenda_refresh_s),
+        )
 
     def _record(self, speaker: str, text: str) -> None:
         """Append one row to this conversation's transcript, if one is kept.
@@ -3255,6 +3475,21 @@ class Pipeline:
             self._conversed = False
             self._brain_conversed = False
 
+    def _on_spoke_voice_state(self, listening: bool, source: str | None) -> None:
+        """The Chart's listening light, in hub role.
+
+        The room's window is the spoke's, so the hub only ever learns of
+        it by report; the chip says how it was opened (spoken, snap, clap
+        twice) so a wake by hand reads differently from a wake by name.
+        A closed window goes back to idle unless a turn is already
+        running here, in which case the turn's own states own the chip.
+        """
+        assert self._web_link is not None
+        if listening:
+            self._web_link.note_state("listening", source)
+        elif self._state is not State.BUSY:
+            self._web_link.note_state("idle")
+
     def _on_wake_from_sleep(self, gap_s: float) -> None:
         """Reconcile the loop with a wall clock that jumped (the machine slept).
 
@@ -3335,15 +3570,20 @@ class Pipeline:
             assert self._web_link is not None
             print(f"\nHub ready. Wire: {self._web_link.url}/ws — run `ciel spoke` for the room.")
             return
+        from ciel.audio.wake import wake_phrases
+
         mode = self._config.wake.mode
+        gestures = ", or ".join(wake_phrases(self._wake)) if self._wake is not None else ""
         if mode == "wakeword":
             # The model may be a pretrained NAME ("hey_jarvis") or a PATH to
             # a custom model ("~/.ciel/models/hey_ciel.onnx") — the phrase is
             # the stem either way, not the directory it lives in.
             phrase = Path(self._config.wake.model).stem.replace("_", " ")
-            print(f'\nReady. Say "{phrase}".')
+            print(f'\nReady. Say "{phrase}"{", or " + gestures if gestures else ""}.')
         elif mode == "always":
             print("\nReady. Just talk.")
+        elif gestures:
+            print(f"\nOr {gestures}.")
         # hotkey prints its own prompt via reset()/start()
         if self._web_link is not None and self._web_link.serving:
             print(f"GUI: {self._web_link.url}")
@@ -3428,16 +3668,15 @@ class Pipeline:
         not, and `say` is always present on macOS.
         """
         assert self._tts is not None
-        try:
-            await self._tts.warm_up()
-            return
-        except Exception as exc:  # noqa: BLE001 - any failure means fall back
-            log.warning("%s failed to start (%s) — falling back to `say`",
-                        type(self._tts).__name__, exc)
-
-        from ciel.tts.macos_say import SayTTS
-
-        self._tts = _apply_effect(SayTTS(self._config.tts), self._config)
+        for _ in range(len(_ENGINE_CHAIN)):
+            try:
+                await self._tts.warm_up()
+                return
+            except Exception as exc:  # noqa: BLE001 - any failure means fall back
+                log.warning("%s failed to start (%s) — falling back",
+                            type(self._tts).__name__, exc)
+                await self._tts.close()
+                self._tts = fallback_tts(self._tts, self._config)
         await self._tts.warm_up()
 
     async def _shutdown(self) -> None:

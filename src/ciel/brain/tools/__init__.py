@@ -27,7 +27,9 @@ from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server
 
+from ciel.brain.permissions import WorkspaceGuard
 from ciel.brain.tools.actions import ACTION_TOOLS, bind_journal
+from ciel.brain.tools.files import FILE_SEARCH_TOOLS, bind_files
 from ciel.brain.tools.grants import GRANT_TOOLS
 from ciel.brain.tools.grants import bind_config as bind_grants
 from ciel.brain.tools.location import LOCATION_TOOLS, bind_locator
@@ -39,6 +41,7 @@ from ciel.brain.tools.messages import bind_client as bind_messages
 from ciel.brain.tools.oura import OURA_TOOLS, bind_oura
 from ciel.brain.tools.projects import PROJECT_TOOLS, bind_projects
 from ciel.brain.tools.screen import SCREEN_TOOLS, bind_screen
+from ciel.brain.tools.spotify import SPOTIFY_TOOLS, bind_spotify, spotify_control
 from ciel.brain.tools.timers import TIMER_TOOLS, bind_timers
 from ciel.brain.tools.watch import WATCH_TOOLS, bind_watcher
 from ciel.brain.tools.world import WORLD_TOOLS, bind_world
@@ -49,6 +52,7 @@ from ciel.memory.store import MemoryStore
 from ciel.messages import MessagesClient
 from ciel.oura import OuraClient, build_auth
 from ciel.projects import ProjectStore
+from ciel.spotify import SpotifyClient
 from ciel.timers import TimerService
 
 log = logging.getLogger(__name__)
@@ -59,7 +63,7 @@ SERVER_NAME = "ciel"
 TOOLS = [
     *MEMORY_TOOLS, *MESSAGE_TOOLS, *ACTION_TOOLS, *PROJECT_TOOLS,
     *SCREEN_TOOLS, *TIMER_TOOLS, *WATCH_TOOLS, *GRANT_TOOLS, *OURA_TOOLS,
-    *LOCATION_TOOLS, *MAIL_TOOLS, *WORLD_TOOLS,
+    *LOCATION_TOOLS, *MAIL_TOOLS, *WORLD_TOOLS, *FILE_SEARCH_TOOLS, *SPOTIFY_TOOLS,
 ]
 
 
@@ -184,6 +188,12 @@ def build_tool_server(
         # and this one is the escalation channel, so absent means absent.
         tools = [t for t in tools if t not in GRANT_TOOLS]
 
+    bind_spotify(SpotifyClient(config.spotify) if config.spotify.enabled else None)
+    if not config.spotify.enabled:
+        tools = [t for t in tools if t not in SPOTIFY_TOOLS]
+    elif not config.journal.enabled:
+        tools = [t for t in tools if t is not spotify_control]
+
     auth = build_auth(config.oura) if config.oura.armed else None
     if auth is not None:
         bind_oura(OuraClient(auth), world)
@@ -242,6 +252,13 @@ def build_tool_server(
             tools = [t for t in tools if t not in SEND_TOOLS]
     else:
         tools = [t for t in tools if t not in MESSAGE_TOOLS]
+
+    if config.files.enabled:
+        # The search half of file access: the same guard the brain's
+        # hook holds, applied to every file a search would open.
+        bind_files(WorkspaceGuard.from_config(config))
+    else:
+        tools = [t for t in tools if t not in FILE_SEARCH_TOOLS]
 
     if remote is not None and (config.shell.enabled or config.files.enabled):
         # The user's Mac from the hub: the shell when the shell is on,

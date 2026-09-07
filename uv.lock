@@ -334,6 +334,7 @@ web = [
 [package.dev-dependencies]
 hub = [
     { name = "aiohttp" },
+    { name = "piper-tts" },
 ]
 spoke = [
     { name = "faster-whisper", marker = "sys_platform != 'linux'" },
@@ -361,7 +362,10 @@ requires-dist = [
 provides-extras = ["piper", "voice", "discord", "web"]
 
 [package.metadata.requires-dev]
-hub = [{ name = "aiohttp", specifier = ">=3.10" }]
+hub = [
+    { name = "aiohttp", specifier = ">=3.10" },
+    { name = "piper-tts", specifier = ">=1.7.0" },
+]
 spoke = [
     { name = "faster-whisper", marker = "sys_platform == 'darwin'", specifier = ">=1.1.0" },
     { name = "mlx-whisper", marker = "sys_platform == 'darwin'", specifier = ">=0.4.2" },

@@ -93,10 +93,13 @@ CATALOG: dict[str, FrameSpec] = {
             "caps": "list", "resume": "dict",
             "seq": "int", "epoch": "str", "acks": "bool", "resumed": "bool",
             "muted": "bool", "state": "str", "agents": "list", "history": "list",
-            "world": "dict",
+            "world": "dict", "speakback": "bool",
         },
     ),
     "ping": FrameSpec("both", optional={"t_wall": "num"}),
+    # The speak-back switch: a Chart asks with ``speakback.set``; the hub
+    # tells every client where it stands with ``speakback`` (on the ring).
+    "speakback.set": FrameSpec("c2h", required={"on": "bool"}),
     "pong": FrameSpec("both", optional={"t_wall": "num"}),
     # ── client → hub ────────────────────────────────────────────────────
     "say": FrameSpec(
@@ -118,8 +121,12 @@ CATALOG: dict[str, FrameSpec] = {
     ),
     # The spoke's state machine, for the hub's ladder: whether a
     # listening window is open and whether speech is in hand right now.
+    # ``source`` says how an open window was opened — spoken, snap, or
+    # clap twice — so the Chart's chip can say so; a follow-up window,
+    # opened by nothing, carries none.
     "voice.state": FrameSpec(
-        "c2h", required={"listening": "bool", "speaking": "bool"}
+        "c2h", required={"listening": "bool", "speaking": "bool"},
+        optional={"source": "str"},
     ),
     "confirm.answer": FrameSpec(
         "c2h", required={"confirm_id": "str", "text": "str"}
@@ -159,6 +166,7 @@ CATALOG: dict[str, FrameSpec] = {
     ),
     "state": FrameSpec("h2c", required={"state": "str"}, optional={"seq": "int"}),
     "muted": FrameSpec("h2c", required={"muted": "bool"}, optional={"seq": "int"}),
+    "speakback": FrameSpec("h2c", required={"on": "bool"}, optional={"seq": "int"}),
     "agents": FrameSpec("h2c", required={"agents": "list"}, optional={"seq": "int"}),
     "confirm": FrameSpec(
         "h2c", required={"text": "str"},
@@ -199,11 +207,15 @@ CATALOG: dict[str, FrameSpec] = {
     # The hub's world table, whole, whenever it changes — the Chart's
     # readings strip. Whole rather than a delta because it is small and a
     # resume must not depend on having seen the previous one.
-    "world": FrameSpec("h2c", required={"facts": "dict"}, optional={"seq": "int"}),
+    "world": FrameSpec(
+        "h2c", required={"facts": "dict"},
+        optional={"seq": "int", "revision": "int", "sources": "dict"},
+    ),
 }
 
 BROADCAST_TYPES = frozenset({
     "row", "state", "muted", "agents", "confirm", "timers.sync", "world",
+    "speakback",
 })
 """The frames that carry a seq and live in the replay ring: everything
 the hub says to *every* client, all of it idempotent to re-see. Private

@@ -167,13 +167,17 @@ class RemoteWorkWatcher(_Remote):
 class RemoteCalendar(_Remote):
     """The brief's agenda, from the Mac's EventKit store."""
 
-    async def agenda_today(self) -> list[str]:
+    async def agenda_today(self) -> list[str] | None:
+        """None when the Mac is away or its own read failed — the same
+        contract as the readers it stands in for."""
         try:
             rows = await self.call("calendar.agenda_today")
         except RpcUnavailable as exc:
             log.warning("agenda unavailable: %s", exc)
-            return []
-        return [str(r) for r in rows or []]
+            return None
+        if rows is None:
+            return None
+        return [str(r) for r in rows]
 
 
 class RemoteMac(_Remote):
@@ -189,6 +193,18 @@ class RemoteMac(_Remote):
 
     async def read_file(self, path: str) -> str:
         return str(await self.call("files.read", path=path))
+
+    async def snapshot_file(self, path: str, max_bytes: int) -> tuple[bytes | None, str | None]:
+        """Read the actual Mac file in full for the hub's journal, within its bound."""
+        import base64
+
+        result = await self.call("files.snapshot", path=path, max_bytes=max_bytes)
+        encoded = result.get("data")
+        if encoded is None:
+            return None, str(result.get("note") or "Mac snapshot unavailable")
+        if len(encoded) > 4 * ((max_bytes + 2) // 3):
+            raise ValueError("Mac snapshot exceeded the journal's limit")
+        return base64.b64decode(encoded, validate=True), None
 
     async def write_file(self, path: str, content: str) -> str:
         return str(await self.call("files.write", path=path, content=content))

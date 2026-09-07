@@ -46,10 +46,19 @@ from claude_agent_sdk import HookContext, HookMatcher
 
 log = logging.getLogger(__name__)
 
-# Tools enabled when file access is on. Read/Glob/Grep are included because a
+# Built-in tools enabled when file access is on. Read is included because a
 # write-only assistant is nearly useless — it cannot check whether it already
 # wrote something, or amend a file it produced a minute ago.
-FILE_TOOLS: tuple[str, ...] = ("Read", "Write", "Edit", "Glob", "Grep")
+#
+# Not Glob or Grep. Both take a root and walk it themselves, and this guard
+# only ever sees the root: a search rooted at the workspace was approved and
+# then read every forbidden file beneath it into its own output. Searching
+# is done by Ciel's ``search_files`` / ``find_files`` (``tools/files.py``),
+# which run every candidate through this guard before opening it. The two
+# built-ins are refused below whenever they appear, path or no path.
+FILE_TOOLS: tuple[str, ...] = ("Read", "Write", "Edit")
+
+_WALKERS = frozenset({"Glob", "Grep"})
 
 # Which input field carries the path, per tool. Anything absent from this map
 # passes through untouched — every tool that can name a filesystem path is
@@ -98,6 +107,10 @@ FORBIDDEN_NAMES = frozenset({
     # The Oura authorization — client secret and a refresh token, same
     # arrangement: its own file so this list can name it.
     "oura.json",
+    # Spotify holds a standing right to control the user's player.
+    "spotify.json", "spotify.json.lock",
+    # The signup watcher holds an authenticated website session here.
+    "sections-cookie",
     # The hub token — the wire's shared secret; its own file for the same
     # reason. And the hub's environment file, which holds the brain's
     # login on a server with no keychain.
@@ -122,6 +135,18 @@ FORBIDDEN_NAMES = frozenset({
 _FORBIDDEN_SUBTREES: tuple[str, ...] = ("Library",)
 
 
+def forbidden_names(config: Any) -> frozenset[str]:
+    """Configured credential names join the shared blocklist, even when moved.
+
+    Both gates compare names: choosing a different cookie file must not
+    quietly turn an authentication credential into an ordinary document.
+    """
+    return FORBIDDEN_NAMES | {
+        config.sections.cookie_file.name, config.spotify.token_file.name,
+        config.spotify.token_file.name + ".lock",
+    }
+
+
 class WorkspaceGuard:
     """Confines file tools to a single directory tree.
 
@@ -137,16 +162,40 @@ class WorkspaceGuard:
         workspace: Path,
         read_only_outside: bool = False,
         snapshot_dir: Path | None = None,
+        forbidden: frozenset[str] = FORBIDDEN_NAMES,
     ) -> None:
         self._workspace = workspace.expanduser().resolve()
         self._read_only_outside = read_only_outside
+        self._forbidden = forbidden | FORBIDDEN_NAMES
         self._snapshots = (
             snapshot_dir.expanduser().resolve() if snapshot_dir is not None else None
+        )
+
+    @classmethod
+    def from_config(cls, config: Any) -> "WorkspaceGuard":
+        """The guard the brain builds from ``[files]`` — one constructor
+        so the search tools' sieve and the hook agree to the letter."""
+        return cls(
+            config.files.workspace,
+            config.files.read_only_outside,
+            forbidden=forbidden_names(config),
+            # The undo carve-out: snapshots live outside any workspace,
+            # and restoring one is an ordinary Read the guard must allow.
+            snapshot_dir=(
+                config.journal.dir.expanduser() / "snapshots"
+                if config.journal.enabled
+                else None
+            ),
         )
 
     @property
     def workspace(self) -> Path:
         return self._workspace
+
+    def permits(self, raw_path: str, *, write: bool = False) -> str | None:
+        """The verdict a tool call on this path would get: None to allow,
+        else the refusal. For callers that walk a tree themselves."""
+        return self._check(raw_path, is_write=write)
 
     def ensure_workspace(self) -> None:
         self._workspace.mkdir(parents=True, exist_ok=True)
@@ -160,6 +209,21 @@ class WorkspaceGuard:
         """PreToolUse hook. Returning ``{}`` means "no opinion", which allows."""
         tool_name = payload.get("tool_name", "")
         tool_input = payload.get("tool_input") or {}
+
+        if tool_name in _WALKERS:
+            # Refused whole: the walk happens out of this guard's sight.
+            verdict = (
+                f"{tool_name} is not available; use search_files or "
+                "find_files, which stay inside the workspace boundary."
+            )
+            log.warning("denied %s: %s", tool_name, verdict)
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": verdict,
+                }
+            }
 
         # Tools that never touch the filesystem pass through untouched.
         if tool_name not in _PATH_FIELDS:
@@ -205,7 +269,7 @@ class WorkspaceGuard:
         except (OSError, RuntimeError, ValueError) as exc:
             return f"That path could not be resolved ({exc})."
 
-        if any(part in FORBIDDEN_NAMES for part in resolved.parts):
+        if any(part in self._forbidden for part in resolved.parts):
             return (
                 "That path touches credentials, shell configuration, or agent "
                 "state, which is off limits."
@@ -229,7 +293,7 @@ class WorkspaceGuard:
             # stray snapshot of a forbidden file should never exist (denied
             # calls are not snapshotted), but if one ever does, reading it
             # here would resurrect exactly what the names list buries.
-            and not any(resolved.name.endswith(f"-{bad}") for bad in FORBIDDEN_NAMES)
+            and not any(resolved.name.endswith(f"-{bad}") for bad in self._forbidden)
         ):
             return None
 
@@ -246,4 +310,4 @@ class WorkspaceGuard:
         )
 
 
-__all__ = ["WorkspaceGuard", "FILE_TOOLS", "FORBIDDEN_NAMES"]
+__all__ = ["WorkspaceGuard", "FILE_TOOLS", "FORBIDDEN_NAMES", "forbidden_names"]

@@ -369,7 +369,7 @@
     body.dataset.state = "idle";
     body.dataset.rec = "off";
     Object.assign(live, { ended: false, closing: false, turn: 0, questions: 0, queue: [], playing: false, debriefReady: false,
-                          problem: null, exhibitCount: 0, muted: false, turnEnded: false, holdWasListening: false });
+                          problem: null, exhibitCount: 0, muted: false, turnEnded: false, holdWasListening: false, roomError: null });
     const s = current.session, b = current.brief || {};
     live.length = Number((current.setup && current.setup.length_min) || (s.setup && s.setup.length_min) || 30);
     text("#q-text", ""); $("#q-text").dataset.dim = "0";
@@ -422,7 +422,8 @@
       live.ws = null;
       if (live.ended || live.closing) return;
       body.dataset.conn = "lost";
-      if (e.code === 1008 || e.code === 4401 || e.code === 4400) return;
+      // 4401: the sign-in behind this socket was revoked; 4409: a newer tab took the seat.
+      if (e.code === 1008 || e.code === 4401 || e.code === 4400 || e.code === 4409) return;
       live.retry = setTimeout(connectLive, 2000);
     };
     ws.onerror = () => {};
@@ -488,6 +489,12 @@
         else if (f.code === "debrief") {
           if (live.closeProgress) { live.closeProgress(false); live.closeProgress = null; }
           closingFailed("I couldn't finish the debrief — but I kept everything we said. Your transcript and recording are saved.");
+        }
+        else if (f.code === "interviewer" || f.code === "crash") {
+          // The hub ends the session right after this frame; the closing
+          // view says why rather than looking like a normal ending.
+          live.roomError = f.reason || f.code;
+          console.warn("room error", f);
         }
         else console.warn("room error", f);
         break;
@@ -851,7 +858,9 @@
     $("#closing").dataset.failed = "0";
     text("#closing-last", $("#q-text").textContent);
     text("#closing-who", who.name || "");
-    text("#closing-status", "the interview is over · writing your debrief");
+    text("#closing-status", live.roomError
+      ? "the interviewer hit an error and the interview ended early · writing your debrief on what was said"
+      : "the interview is over · writing your debrief");
     text("#closing-title", s.title || "");
     text("#closing-mode", s.mode === "company" ? "company" : modeLabel(s));
     text("#closing-elapsed", fmtDuration(nowS()));
@@ -969,7 +978,9 @@
     show("review");
     const s = current.session, d = current.debrief, b = current.brief || {};
     text("section[data-view=review] [data-field=title]", s.title || "");
-    text("section[data-view=review] [data-field=meta]", `${shortDate(s.created)} · ${fmtDuration(s.duration_s) || "—"} · ${s.question_count || 0} q`);
+    const early = s.end_reason === "error" ? " · ended early: the interviewer hit an error"
+      : s.end_reason === "idle" ? " · ended after a long silence" : "";
+    text("section[data-view=review] [data-field=meta]", `${shortDate(s.created)} · ${fmtDuration(s.duration_s) || "—"} · ${s.question_count || 0} q${early}`);
     text("#debrief-kicker", d ? `debrief · written ${shortDate(s.ended || s.created)}` : "debrief");
 
     // the transcript, with click-to-seek

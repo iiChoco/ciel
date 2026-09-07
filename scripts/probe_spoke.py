@@ -465,6 +465,21 @@ async def probe_mute_and_state() -> None:
         [(f["listening"], f["speaking"]) for f in s._link.of("voice.state")]
         == [(False, False), (True, False), (True, True)],
     )
+    s = make_spoke()
+    s._state = State.WAITING
+    s._report_voice_state()
+    s._wake_source = "snap"  # what the frame loop records when the ear fires
+    s._enter_listening()
+    s._report_voice_state()
+    s._enter_followup()
+    s._report_voice_state()
+    s._enter_waiting()
+    s._report_voice_state()
+    check(
+        "a window opened by a snap says so; a follow-up window says nothing; idle says nothing",
+        [(f["listening"], f.get("source")) for f in s._link.of("voice.state")]
+        == [(False, None), (True, "snap"), (True, None), (False, None)],
+    )
 
 
 async def probe_offline() -> None:
@@ -516,6 +531,25 @@ async def probe_offline() -> None:
         and s._link.of("deliver.result") == [{"type": "deliver.result", "event_id": "timer:t1", "ok": True}],
     )
 
+    s = make_spoke(connected=False)
+    s._state = State.WAITING
+    s._set_muted(True)
+    s._timers.set_local(1, 0.0)
+    due = s._timers.due(100.0, hub_connected=False)
+    await s._ring_locally(due)
+    check(
+        "a due timer in a muted room stays silent and stays due",
+        s._player.played == [] and not s._ringing
+        and [t.id for t in s._timers.due(100.0, hub_connected=False)] == ["local-1"],
+    )
+    s._set_muted(False)
+    await s._ring_locally(s._timers.due(100.0, hub_connected=False))
+    check(
+        "...and rings on the unmute, late, once",
+        s._player.played == ["<pcm>", "Your 1 second timer is done."]
+        and s._timers.due(100.0, hub_connected=False) == [],
+    )
+
 
 async def probe_ack_filler() -> None:
     print("\nthe ack filler")
@@ -533,6 +567,28 @@ async def probe_ack_filler() -> None:
     check("a quick first sentence cancels it unspoken", s._player.played == ["Quick."])
 
 
+async def probe_speak_back_turn() -> None:
+    print("\na web-lane turn (speak back)")
+    s = make_spoke()
+    before = s._state
+    s._on_frame({"type": "turn.begin", "turn_id": "w1", "lane": "web"})
+    check("a web turn is claimed without changing state or arming the filler",
+          s._hub_turn == "w1" and s._hub_lane == "web" and s._state is before
+          and s._ack_task is None)
+    s._on_frame({"type": "turn.sentence", "turn_id": "w1", "n": 1, "kind": "reply", "text": "Typed."})
+    await settle()
+    check("the sentence plays and is receipted",
+          s._player.played == ["Typed."]
+          and [(f["n"], f["completed"]) for f in s._link.of("turn.played")] == [(1, True)])
+    check("...with the room held for it and released after",
+          not s._delivering and s._indicator.states[-1] == "idle")
+    check("no follow-up window is earned", s._spoke is False)
+    s._on_frame({"type": "turn.end", "turn_id": "w1", "status": "done"})
+    check("turn.end releases the turn and its lane", s._hub_turn is None and s._hub_lane is None)
+    s._on_frame({"type": "turn.begin", "turn_id": "x", "lane": "discord"})
+    check("other lanes are still ignored", s._hub_turn is None)
+
+
 async def main() -> None:
     await probe_voice_turn()
     await probe_prelude()
@@ -543,6 +599,7 @@ async def main() -> None:
     await probe_mute_and_state()
     await probe_offline()
     await probe_ack_filler()
+    await probe_speak_back_turn()
     print(f"\nall {len(CHECKS)} checks passed")
 
 

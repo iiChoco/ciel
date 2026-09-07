@@ -7,16 +7,29 @@ scrypt hash and a salt per user, in one JSON file under the room's
 directory, written atomically and named on the personal brain's forbidden
 list.
 
-A login is a cookie: ``username|expiry|hmac``, signed with a secret the
-room mints once (owner-only file, like the hub token). Stateless on
-purpose — no session table to expire, and a restart logs nobody out.
-Disabling an account still takes effect at once, because every request
-looks the username up after verifying the signature.
+A login is a cookie: ``username|id|auth|expiry|hmac``, signed with a
+secret the room mints once (owner-only file, like the hub token).
+Stateless on purpose — no session table to expire, and a restart logs
+nobody out. Disabling an account still takes effect at once, because
+every request looks the username up after verifying the signature; and
+the cookie names *which* account and *which* password it was issued
+under — an immutable id minted at creation, and an ``auth`` version that
+every password reset bumps — so a reset logs the old cookies out, and a
+username deleted and recreated is a different account to every cookie
+the first one issued.
+
+Writes hold a lock across the whole read-modify-write (threads and
+processes both: the CLI edits the same file), because atomic replacement
+alone still lets the slower of two writers put back its stale copy — a
+reset that paused in scrypt while an admin disabled the account would
+have re-enabled it. The hash is computed outside the lock; the account
+is reloaded inside it.
 """
 
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -24,12 +37,13 @@ import logging
 import os
 import re
 import secrets
+import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
-from ciel.memory.store import atomic_write
+from ciel.memory.store import atomic_write, exclusive_lock
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +75,11 @@ class Account:
     created: str
     disabled: bool = False
     last_seen: str | None = None
+    id: str = ""
+    """Minted once at creation, never reused: the cookie's real subject."""
+    auth: int = 1
+    """Bumped by every password reset; a cookie carries the value it was
+    issued under and is refused once they differ."""
 
     @property
     def is_admin(self) -> bool:
@@ -91,15 +110,48 @@ def _hash(password: str, salt: bytes) -> bytes:
     return hashlib.scrypt(password.encode("utf-8"), salt=salt, **_SCRYPT)
 
 
+def _new_id() -> str:
+    return secrets.token_hex(8)
+
+
 class Accounts:
-    """The account file, read on demand and written atomically."""
+    """The account file, read on demand and written atomically under a
+    lock that covers the whole read-modify-write."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
+        self._mutex = threading.Lock()
+        self._upgraded = False
 
     @property
     def path(self) -> Path:
         return self._path
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """One writer at a time: this process's threads (the mutex), and
+        every other process on the file (the flock beside it)."""
+        with self._mutex, exclusive_lock(self._path):
+            yield
+
+    def _upgrade(self) -> None:
+        """Accounts from before ids existed get one, once. Under the lock
+        — an id assigned on every read would be a cookie that never
+        matched."""
+        if self._upgraded:
+            return
+        with self._locked():
+            data = self._load()
+            changed = False
+            for raw in data["users"].values():
+                if isinstance(raw, dict) and not raw.get("id"):
+                    raw["id"] = _new_id()
+                    raw["auth"] = int(raw.get("auth") or 1)
+                    changed = True
+            if changed:
+                self._save(data)
+                log.info("interview accounts upgraded with ids")
+            self._upgraded = True
 
     def _load(self) -> dict[str, Any]:
         try:
@@ -131,15 +183,19 @@ class Accounts:
             created=str(raw.get("created", "")),
             disabled=bool(raw.get("disabled", False)),
             last_seen=raw.get("last_seen"),
+            id=str(raw.get("id") or ""),
+            auth=int(raw.get("auth") or 1),
         )
 
     # ── reads ────────────────────────────────────────────────────────────────
 
     def get(self, username: str) -> Account | None:
+        self._upgrade()
         raw = self._load()["users"].get(username)
         return self._account(username, raw) if isinstance(raw, dict) else None
 
     def list(self) -> list[Account]:
+        self._upgrade()
         users = self._load()["users"]
         return sorted(
             (self._account(n, r) for n, r in users.items() if isinstance(r, dict)),
@@ -153,6 +209,7 @@ class Accounts:
     def verify(self, username: str, password: str) -> Account | None:
         """The account when the password matches and the account is live;
         None otherwise, with the same work done either way."""
+        self._upgrade()
         raw = self._load()["users"].get(username)
         if not isinstance(raw, dict):
             # Burn the same time as a real check so a probe can't tell a
@@ -184,30 +241,39 @@ class Accounts:
             )
         if role not in ("user", "admin"):
             raise ValueError("role must be user or admin")
-        data = self._load()
-        if username in data["users"]:
+        self._upgrade()
+        if username in self._load()["users"]:
             raise ValueError(f"account {username!r} already exists")
         if password is not None and username != "dev":
             check_password(password)
         password = password or generate_password()
+        # The slow part outside the lock; the existence check again inside
+        # it, where it counts.
         salt = secrets.token_bytes(16)
-        data["users"][username] = {
-            "scrypt": base64.b64encode(_hash(password, salt)).decode(),
-            "salt": base64.b64encode(salt).decode(),
-            "role": role,
-            "created": _now(),
-            "disabled": False,
-            "last_seen": None,
-        }
-        self._save(data)
+        digest = _hash(password, salt)
+        with self._locked():
+            data = self._load()
+            if username in data["users"]:
+                raise ValueError(f"account {username!r} already exists")
+            data["users"][username] = {
+                "scrypt": base64.b64encode(digest).decode(),
+                "salt": base64.b64encode(salt).decode(),
+                "role": role,
+                "created": _now(),
+                "disabled": False,
+                "last_seen": None,
+                "id": _new_id(),
+                "auth": 1,
+            }
+            self._save(data)
         return password
 
     def reset(self, username: str, password: str | None = None) -> str:
         """A new password for an existing account — chosen when given
-        (and long enough), generated otherwise."""
-        data = self._load()
-        raw = data["users"].get(username)
-        if not isinstance(raw, dict):
+        (and long enough), generated otherwise. Every cookie issued
+        under the old password stops working."""
+        self._upgrade()
+        if not isinstance(self._load()["users"].get(username), dict):
             raise KeyError(username)
         if password:
             if username != "dev":  # the loopback dev account keeps its short one
@@ -215,35 +281,48 @@ class Accounts:
         else:
             password = generate_password()
         salt = secrets.token_bytes(16)
-        raw["scrypt"] = base64.b64encode(_hash(password, salt)).decode()
-        raw["salt"] = base64.b64encode(salt).decode()
-        self._save(data)
+        digest = _hash(password, salt)
+        with self._locked():
+            data = self._load()
+            raw = data["users"].get(username)
+            if not isinstance(raw, dict):
+                raise KeyError(username)
+            raw["scrypt"] = base64.b64encode(digest).decode()
+            raw["salt"] = base64.b64encode(salt).decode()
+            raw["auth"] = int(raw.get("auth") or 1) + 1
+            self._save(data)
         return password
 
     def set_disabled(self, username: str, disabled: bool) -> Account:
-        data = self._load()
-        raw = data["users"].get(username)
-        if not isinstance(raw, dict):
-            raise KeyError(username)
-        raw["disabled"] = bool(disabled)
-        self._save(data)
-        return self._account(username, raw)
+        self._upgrade()
+        with self._locked():
+            data = self._load()
+            raw = data["users"].get(username)
+            if not isinstance(raw, dict):
+                raise KeyError(username)
+            raw["disabled"] = bool(disabled)
+            self._save(data)
+            return self._account(username, raw)
 
     def delete(self, username: str) -> None:
-        data = self._load()
-        if username not in data["users"]:
-            raise KeyError(username)
-        del data["users"][username]
-        self._save(data)
+        self._upgrade()
+        with self._locked():
+            data = self._load()
+            if username not in data["users"]:
+                raise KeyError(username)
+            del data["users"][username]
+            self._save(data)
 
     def touch(self, username: str) -> None:
         """Note a login. Best effort: a failed write is not a failed login."""
         try:
-            data = self._load()
-            raw = data["users"].get(username)
-            if isinstance(raw, dict):
-                raw["last_seen"] = _now()
-                self._save(data)
+            self._upgrade()
+            with self._locked():
+                data = self._load()
+                raw = data["users"].get(username)
+                if isinstance(raw, dict):
+                    raw["last_seen"] = _now()
+                    self._save(data)
         except OSError:
             log.debug("could not record last_seen for %s", username, exc_info=True)
 
@@ -268,33 +347,54 @@ def mint_secret(path: Path) -> str:
     return secret
 
 
-def sign_cookie(secret: str, username: str, expires: float) -> str:
-    body = f"{username}|{int(expires)}"
+@dataclass(frozen=True)
+class Ticket:
+    """What a valid cookie claims: this username, under this account id,
+    at this password generation. The app checks the claim against the
+    live account."""
+
+    username: str
+    account_id: str
+    auth: int
+
+    def matches(self, account: Account) -> bool:
+        return (
+            account.username == self.username
+            and bool(account.id)
+            and hmac.compare_digest(account.id, self.account_id)
+            and account.auth == self.auth
+        )
+
+
+def sign_cookie(secret: str, account: Account, expires: float) -> str:
+    body = f"{account.username}|{account.id}|{account.auth}|{int(expires)}"
     mac = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
     return f"{body}|{mac}"
 
 
-def read_cookie(secret: str, value: str, now: float | None = None) -> str | None:
-    """The username a cookie names, when its signature holds and it has
-    not expired; None for anything else."""
+def read_cookie(secret: str, value: str, now: float | None = None) -> Ticket | None:
+    """The claim a cookie makes, when its signature holds and it has not
+    expired; None for anything else (an old three-part cookie included:
+    those sign in again once)."""
     parts = (value or "").split("|")
-    if len(parts) != 3:
+    if len(parts) != 5:
         return None
-    username, expires_s, mac = parts
-    if not USERNAME.match(username):
+    username, account_id, auth_s, expires_s, mac = parts
+    if not USERNAME.match(username) or not re.fullmatch(r"[0-9a-f]{16}", account_id):
         return None
     try:
+        auth = int(auth_s)
         expires = int(expires_s)
     except ValueError:
         return None
     expected = hmac.new(
-        secret.encode(), f"{username}|{expires}".encode(), hashlib.sha256
+        secret.encode(), f"{username}|{account_id}|{auth}|{expires}".encode(), hashlib.sha256
     ).hexdigest()
     if not hmac.compare_digest(mac, expected):
         return None
     if (now if now is not None else time.time()) >= expires:
         return None
-    return username
+    return Ticket(username, account_id, auth)
 
 
 __all__ = [
@@ -304,6 +404,7 @@ __all__ = [
     "Account",
     "Accounts",
     "SECRET_FILE",
+    "Ticket",
     "USERNAME",
     "generate_password",
     "mint_secret",

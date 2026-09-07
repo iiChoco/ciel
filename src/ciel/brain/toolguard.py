@@ -104,10 +104,26 @@ def _describe_send_message(args: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+def _describe_spotify(args: dict[str, Any]) -> str:
+    action = args.get("action")
+    verbs = {"play": "Play", "pause": "Pause", "next": "Skip to the next track", "previous": "Go to the previous track", "queue": "Queue", "transfer": "Transfer playback"}
+    if action in ("volume", "seek"):
+        units = "percent" if action == "volume" else "milliseconds"
+        phrase = f"Set Spotify {action} to {_shorten(args.get('value'))} {units}"
+    else:
+        phrase = f"{verbs.get(action, 'Change playback')} on Spotify"
+    if args.get("uri"):
+        phrase += f" for {_shorten(args['uri'])!r}"
+    if args.get("device_id"):
+        phrase += f" on device {_shorten(args['device_id'])!r}"
+    return phrase
+
+
 # Keyed by the *unprefixed* tool name, matching what goes in a `confirm` list.
 # The dict is small on purpose: only tools someone chose to gate need a voice,
 # and the fallback below keeps unlisted ones askable, just less gracefully.
 _FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
+    "spotify_control": _describe_spotify,
     "send_email": _describe_send_email,
     "send_message": _describe_send_message,
     "send_as_ciel": _describe_send_as_ciel,

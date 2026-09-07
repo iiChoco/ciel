@@ -30,6 +30,18 @@ A session survives its socket: a page reload reconnects with a hello and
 gets the history back. It does not survive silence — with no frame for
 ``idle_close_s`` it ends itself and writes the debrief, so a closed laptop
 cannot hold a model subprocess open all night.
+
+A socket does not survive the session, nor the credentials that opened
+it. Every attached connection is tracked as a ``Seat``; a newer one
+supersedes the older (closed, 4409); the end of the interview closes
+what is left once the debrief is announced; and an eviction — the
+account's password reset, the account disabled or deleted — closes them
+at once (4401), before the debrief is written. Frames that arrive after
+the end are dropped, audio included: an ended interview records nothing
+more. The close itself is done by the socket's own handler task, asked
+through the seat: aiohttp closes a socket from any other task by
+dropping the transport the moment the close frame is written, and the
+browser then sees a dropped line (1006) as often as it sees the code.
 """
 
 from __future__ import annotations
@@ -58,6 +70,31 @@ _PLAYED_GRACE_S = 8.0
 browser's ``played`` before it arms the silence clock anyway — a tab that
 never reports must not freeze the interview at 'speaking'."""
 _HISTORY = 600
+_CLOSE_S = 5.0
+"""How long a close waits for the browser's reply before the seat is
+given up on anyway."""
+
+
+class Seat:
+    """One attached browser connection, and the one thing the session
+    asks of the handler running it: to close it, with this code, now.
+    A seat nobody drives (a fake socket in a probe) is closed directly."""
+
+    def __init__(self, ws: Any) -> None:
+        self.ws = ws
+        loop = asyncio.get_running_loop()
+        self.close_request: asyncio.Future[tuple[int, str]] = loop.create_future()
+        self.closed: asyncio.Future[None] = loop.create_future()
+        self.driven = False
+        """A handler is in the receive loop and will answer the request."""
+
+    def drive(self) -> None:
+        self.driven = True
+
+    def done(self) -> None:
+        """The handler is leaving: whatever the close was, it is over."""
+        if not self.closed.done():
+            self.closed.set_result(None)
 
 
 class InterviewSession:
@@ -68,6 +105,7 @@ class InterviewSession:
         store: SessionStore,
         username: str,
         session_id: str,
+        owner_id: str = "",
         meta: dict[str, Any],
         brief: dict[str, Any],
         backend: Backend,
@@ -80,6 +118,8 @@ class InterviewSession:
         self._store = store
         self.username = username
         self.session_id = session_id
+        self.owner_id = owner_id
+        """The account the session belongs to — the live map's key."""
         self._meta = meta
         self._brief = brief
         self._mode = str(meta.get("mode") or "company")
@@ -91,6 +131,10 @@ class InterviewSession:
 
         self.state = "idle"
         self._ws: Any = None
+        """The connection the room talks to: the newest attached."""
+        self._seats: list[Seat] = []
+        """Every connection still attached — closed together at the end,
+        or at once on an eviction."""
         self._send_lock = asyncio.Lock()
         self._inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
@@ -142,10 +186,20 @@ class InterviewSession:
         if self._task is None:
             self._task = asyncio.create_task(self._run(), name=f"interview:{self.session_id}")
 
-    async def attach(self, ws: Any, caps: dict[str, Any]) -> None:
+    async def attach(self, ws: Any, caps: dict[str, Any]) -> Seat:
         """A browser arrived (or came back): make it the one we talk to and
-        give it the picture so far."""
+        give it the picture so far. An older connection still attached is
+        superseded — closed, so it cannot keep sending on a seat it no
+        longer holds. Returns the seat for the handler to drive."""
+        seat = Seat(ws)
+        if self._ended:
+            await self._close_seat(seat, 1000, "this interview is over")
+            return seat
+        older = [s for s in self._seats if s.ws is not ws]
+        self._seats = [seat]
         self._ws = ws
+        for old in older:
+            await self._close_seat(old, 4409, "replaced by a newer connection")
         self._client_tts = str(caps.get("tts") or "browser")
         self._last_activity = self._clock()
         await self._send({
@@ -158,26 +212,61 @@ class InterviewSession:
             "history": list(self._history),
         })
         self.start()
+        return seat
 
     def detach(self, ws: Any) -> None:
+        for seat in self._seats:
+            if seat.ws is ws:
+                seat.done()
+        self._seats = [s for s in self._seats if s.ws is not ws]
         if ws is self._ws:
             self._ws = None
 
     def on_frame(self, frame: dict[str, Any]) -> None:
+        if self._ended:
+            return
         self._last_activity = self._clock()
         self._inbox.put_nowait(frame)
 
     def on_audio(self, seq: int, chunk: bytes) -> None:
+        if self._ended:
+            return
         self._last_activity = self._clock()
         try:
             self._store.append_recording(self.username, self.session_id, chunk)
         except OSError:
             log.warning("could not append recording chunk %d for %s", seq, self.session_id, exc_info=True)
 
-    async def pause(self, reason: str) -> None:
-        """Tell the page the room is stepping away (a reload), then end."""
-        await self._send({"type": "state", "state": "paused"})
+    async def pause(self, reason: str, *, revoke: bool = False) -> None:
+        """Tell the page the room is stepping away (a reload), then end.
+        ``revoke`` is the eviction: the cookie that opened the socket no
+        longer admits, so the socket is closed now, before the debrief,
+        rather than after it."""
+        await self._send({"type": "state", "state": "paused", "reason": reason})
+        if revoke:
+            await self._close_sockets(4401, reason)
         await self._finish(reason)
+
+    async def _close_seat(self, seat: Seat, code: int, message: str) -> None:
+        """Close one connection with a code the browser will see: through
+        its handler when one drives it (the handshake completes before
+        the handler returns), directly otherwise."""
+        if seat.driven and not seat.closed.done():
+            if not seat.close_request.done():
+                seat.close_request.set_result((code, message))
+            with contextlib.suppress(Exception):
+                async with asyncio.timeout(_CLOSE_S):
+                    await asyncio.shield(seat.closed)
+            return
+        with contextlib.suppress(Exception):
+            async with asyncio.timeout(_CLOSE_S):
+                await seat.ws.close(code=code, message=message.encode("utf-8")[:120])
+        seat.done()
+
+    async def _close_sockets(self, code: int, message: str) -> None:
+        seats, self._seats, self._ws = list(self._seats), [], None
+        for seat in seats:
+            await self._close_seat(seat, code, message)
 
     async def close(self) -> None:
         if not self._ended:
@@ -345,22 +434,32 @@ class InterviewSession:
         self._say_n = 0
         self._turn_audio_s = 0.0
         turn = self._turn
-        task = asyncio.create_task(self._speak_turn(turn, user_text))
-        self._turn_task = task
+        retried = False
         try:
-            while not task.done():
-                getter = asyncio.create_task(self._inbox.get())
-                done, _ = await asyncio.wait({task, getter}, return_when=asyncio.FIRST_COMPLETED)
-                if getter in done:
-                    frame = getter.result()
-                    if await self._during_turn(frame, task, greeting=greeting, closing=closing):
-                        return
-                else:
-                    getter.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await getter
-            exc = task.exception() if not task.cancelled() else None
-            if exc is not None:
+            while True:
+                task = asyncio.create_task(self._speak_turn(turn, user_text))
+                self._turn_task = task
+                while not task.done():
+                    getter = asyncio.create_task(self._inbox.get())
+                    done, _ = await asyncio.wait({task, getter}, return_when=asyncio.FIRST_COMPLETED)
+                    if getter in done:
+                        frame = getter.result()
+                        if await self._during_turn(frame, task, greeting=greeting, closing=closing):
+                            return
+                    else:
+                        getter.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await getter
+                exc = task.exception() if not task.cancelled() else None
+                if exc is None:
+                    break
+                if isinstance(exc, BackendError) and not retried and not self._say_n and not self._ended:
+                    # One failed call (an overloaded API, a turn the CLI gave
+                    # up on) is not the end of the interview: nothing was
+                    # said yet, so the same question can be asked once more.
+                    retried = True
+                    log.warning("interview %s: turn %d failed (%s) — asking once more", self.session_id, turn, exc)
+                    continue
                 raise exc
         finally:
             self._turn_task = None
@@ -439,17 +538,21 @@ class InterviewSession:
 
     async def _speak_turn(self, turn: int, user_text: str) -> None:
         buffer = ""
-        async for delta in self._backend.ask(user_text):
-            buffer += delta
-            buffer = await self._lift_directives(buffer)
-            hold = ""
-            idx = buffer.rfind("[[")
-            if idx != -1 and "]]" not in buffer[idx:]:
-                hold, buffer = buffer[idx:], buffer[:idx]
-            sentences, buffer = split_sentences(buffer, _FLUSH_CHARS)
-            buffer += hold
-            for sentence in sentences:
-                await self._say(turn, sentence)
+        # aclosing: a cancellation that lands in _say() leaves the ask()
+        # generator suspended at a yield, holding the backend's lock until
+        # the garbage collector gets to it. Close it on the way out instead.
+        async with contextlib.aclosing(self._backend.ask(user_text)) as stream:
+            async for delta in stream:
+                buffer += delta
+                buffer = await self._lift_directives(buffer)
+                hold = ""
+                idx = buffer.rfind("[[")
+                if idx != -1 and "]]" not in buffer[idx:]:
+                    hold, buffer = buffer[idx:], buffer[:idx]
+                sentences, buffer = split_sentences(buffer, _FLUSH_CHARS)
+                buffer += hold
+                for sentence in sentences:
+                    await self._say(turn, sentence)
         buffer = await self._lift_directives(buffer)
         tail = buffer.strip()
         if tail:
@@ -567,6 +670,9 @@ class InterviewSession:
         log.info("interview %s ended (%s) after %ds, %d turns", self.session_id, reason, duration, self._turn)
         if reason != "closed":
             await self._write_debrief()
+        # The page has heard the end and the debrief; nothing more is owed
+        # on this socket and nothing more is accepted from it.
+        await self._close_sockets(1000, "ended")
         self.finished.set()
         if self._on_finished is not None:
             result = self._on_finished(self)

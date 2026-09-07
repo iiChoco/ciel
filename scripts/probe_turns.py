@@ -98,9 +98,17 @@ class FakeWebLink:
 
     def __init__(self):
         self.rows: list[tuple[str, str]] = []
+        self.speak_back: list[bool] = []
+        self.sent: list[str] = []
 
     def note_row(self, speaker, text):
         self.rows.append((speaker, text))
+
+    def note_speak_back(self, on):
+        self.speak_back.append(on)
+
+    async def send(self, text):
+        self.sent.append(text)
 
 
 class FakeTTS:
@@ -536,6 +544,82 @@ async def probe_failures() -> None:
         raised = True
     check("voice failure re-raises to the spoken apology's guard", raised)
 
+    # The hub's lane: the apology after a failed turn is best-effort, and
+    # a crash *inside* the failure handling is one turn's crash, not the
+    # loop's (2026-09-05: a NameError in the apology took the hub down).
+    from types import SimpleNamespace
+
+    from ciel.pipeline import _WireSink
+
+    p = make_pipeline(STREAM)
+
+    async def speak_fails(*args, **kwargs):
+        raise RuntimeError("the spoke is gone")
+
+    sink = _WireSink(p, SimpleNamespace(speak=speak_fails), "t1")
+    await sink.apologize()
+    check("wire apology on a dead spoke is swallowed, not raised", True)
+
+    async def crashing_turn() -> None:
+        raise NameError("name 'contextlib' is not defined")
+
+    p._turn = asyncio.create_task(crashing_turn())
+    await asyncio.sleep(0)
+    check("a crashed turn task is a logged event, not the loop's end",
+          p._turn_crashed() and ("event", "turn crashed") in rows(p))
+    p._turn = asyncio.create_task(asyncio.sleep(0))
+    await asyncio.sleep(0.01)
+    check("...and a clean one is nothing", not p._turn_crashed())
+
+
+async def probe_stream_death() -> None:
+    """The SDK's reader dying mid-turn (2026-09-05: a two-display
+    screenshot past its one-megabyte line buffer) must evict the client,
+    or every later turn ends at once with nothing said."""
+    import contextlib
+
+    from ciel.brain.agent import Brain, StreamDied
+    from ciel.config import load_config
+
+    print("\nthe stream dying under a turn")
+
+    class DeadReader:
+        def __init__(self) -> None:
+            self.disconnected = 0
+
+        async def query(self, text: str) -> None:
+            return None
+
+        async def receive_response(self):
+            from claude_agent_sdk import StreamEvent
+
+            yield StreamEvent(uuid="u", session_id="s", event={
+                "type": "content_block_delta", "delta": {"type": "text_delta", "text": "Looking now. "},
+            })
+            raise Exception("Failed to decode JSON: JSON message exceeded maximum buffer size of 1048576 bytes...")
+
+        async def disconnect(self) -> None:
+            self.disconnected += 1
+
+    brain = Brain(load_config())
+    fake = DeadReader()
+    brain._client = fake
+    heard: list[str] = []
+    died = None
+    try:
+        async with contextlib.aclosing(brain.ask("look at my screen")) as stream:
+            async for _kind, sentence in stream:
+                heard.append(sentence)
+    except StreamDied as exc:
+        died = exc
+    check("what was said before the reader died was heard", heard == ["Looking now."])
+    check("the turn fails as a transport death", died is not None and "buffer size" in str(died))
+    check("the dead client is evicted, so the next turn reconnects", brain._client is None and fake.disconnected == 1)
+    check("the turn lock is released", not brain._turn_lock.locked())
+    from ciel.brain import agent as agent_module
+    check("the SDK's line buffer is raised past a screenshot",
+          agent_module._MAX_MESSAGE_BYTES >= 16 * 1024 * 1024)
+
 
 # ── the registry itself ──────────────────────────────────────────────────────
 
@@ -562,6 +646,77 @@ def probe_registry() -> None:
     )
 
 
+async def probe_speak_back() -> None:
+    print("\nspeak back: typed replies spoken in the room")
+    from ciel.pipeline import _SpokenTextSink, _TextSink
+
+    p = make_pipeline(STREAM)
+    p._player = FakePlayer()
+    check("off by default: the Chart's sink is text alone", isinstance(p._web_sink(), _TextSink))
+    await p._run_turn(TurnRequest(lane="web", text="speak back on"), p._web_sink())
+    check("the typed command flips the switch and answers in text",
+          p._speak_back and p._web_link.speak_back == [True]
+          and rows(p)[-1] == ("ciel", "Speaking back on.") and p._player.played == [])
+    sink = p._web_sink()
+    check("on, with a player: the spoken text sink", isinstance(sink, _SpokenTextSink))
+    await p._run_turn(TurnRequest(lane="web", text="hi"), sink)
+    check("reply sentences play, thinking stays text",
+          p._player.played == ["First.", "Second."]
+          and [r for r in rows(p) if r[0] == "ciel"][-2:] == [("ciel", "First."), ("ciel", "Second.")])
+    check("no follow-up window is earned by a typed turn", p._spoke is False)
+
+    p._muted = True
+    check("muted wins: text alone", isinstance(p._web_sink(), _TextSink))
+    p._muted = False
+    p._player = None
+    check("no player (the frame loop not up): text alone", isinstance(p._web_sink(), _TextSink))
+
+    p._player = FakePlayer(complete_after=1)
+    sink = p._web_sink()
+    await p._run_turn(TurnRequest(lane="web", text="hi"), sink)
+    check("a sentence that will not play makes the rest text only, never cuts the reply",
+          p._player.played == ["First.", "Second."]
+          and [r for r in rows(p) if r[0] == "ciel"][-2:] == [("ciel", "First."), ("ciel", "Second.")]
+          and sink._silent)
+
+    await p._run_turn(TurnRequest(lane="web", text="voice off"), p._web_sink())
+    check("...and off again, by another phrasing",
+          not p._speak_back and p._web_link.speak_back == [True, False]
+          and rows(p)[-1] == ("ciel", "Speaking back off."))
+    p._set_speak_back(False)
+    check("setting what is already set is not news", p._web_link.speak_back == [True, False])
+
+    # The hub: the spoke's speakers, one hop away — or nobody's.
+    class FakeServer(FakeWebLink):
+        spoke_connected = True
+
+        def __init__(self):
+            super().__init__()
+            self.frames: list[dict] = []
+            self.spoken: list[tuple[str, int, str]] = []
+
+        def send_spoke(self, frame):
+            self.frames.append(frame)
+            return True
+
+        async def speak(self, turn_id, n, kind, text, timeout):
+            self.spoken.append((turn_id, n, text))
+            return True
+
+    p = make_pipeline(STREAM)
+    p._role = "hub"
+    server = FakeServer()
+    p._web_link = server
+    p._speak_back = True
+    sink = _SpokenTextSink(p, confirm_send=server.send, server=server)
+    await p._run_turn(TurnRequest(lane="web", text="hi"), sink)
+    check("on the hub the sentences go down the wire as a web-lane turn",
+          [f["type"] for f in server.frames] == ["turn.begin", "turn.end"]
+          and server.frames[0]["lane"] == "web"
+          and [(n, t) for _, n, t in server.spoken] == [(1, "First."), (2, "Second.")])
+    check("...bracketed once", sum(f["type"] == "turn.end" for f in server.frames) == 1)
+
+
 async def main() -> int:
     probe_registry()
     await probe_labels_and_rows()
@@ -571,6 +726,8 @@ async def main() -> int:
     await probe_voice()
     await probe_local_commands()
     await probe_failures()
+    await probe_stream_death()
+    await probe_speak_back()
     print(f"\nall {len(CHECKS)} checks passed")
     return 0
 

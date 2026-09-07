@@ -158,29 +158,31 @@ class CalendarWatcher:
             ))
         return nudges
 
-    async def agenda_today(self) -> list[str]:
+    async def agenda_today(self) -> list[str] | None:
         """Today's remaining events as spoken-ready lines, for the brief.
 
-        Blocking EventKit work on a thread, same as scans. Empty on any
-        failure — the brief degrades to "nothing on the calendar" rather
-        than dying, which is the watcher contract everywhere.
+        Blocking EventKit work on a thread, same as scans. None on any
+        failure — never an empty list, which is a *reading* ("nothing
+        more today") and must not be what a dead permission looks like.
+        The brief treats None as nothing to say; the world keeps its
+        last reading and marks the source failed.
         """
         try:
             return await asyncio.to_thread(self._agenda_sync)
         except Exception:  # noqa: BLE001 - a failed agenda must not kill the brief
             log.exception("agenda fetch failed")
-            return []
+            return None
 
     def _agenda_sync(self) -> list[str]:
         try:
             import EventKit
-        except ImportError:
-            return []
+        except ImportError as exc:
+            raise RuntimeError("EventKit is not importable") from exc
         with self._store_lock:
             if self._store is None:
                 self._store = EventKit.EKEventStore.alloc().init()
             if not self._authorized(EventKit):
-                return []
+                raise RuntimeError("calendar access is not authorized")
 
         from Foundation import NSDate
 

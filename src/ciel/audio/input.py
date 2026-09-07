@@ -31,6 +31,48 @@ log = logging.getLogger(__name__)
 _STALL_TIMEOUT_S = 3.0
 _STALL_LIMIT = 2  # stalls before capture ends; the first gets a warning
 
+# The other way a microphone goes deaf: frames keep arriving and every
+# sample is exactly zero. A real room never does that — even a quiet one
+# carries dither and hiss — so pure zeros mean the OS is feeding silence:
+# an input device with nothing behind it, or a process macOS has not been
+# allowed the microphone. Neither is a stall, so the watchdog above never
+# notices, and the pipeline sits "ready" hearing nothing.
+_SILENCE_WINDOW_S = 5.0
+
+
+class SilenceWatch:
+    """Says, once, when the microphone has delivered only zeros for a while.
+
+    Pure and frame-counted so it is table-testable: :meth:`push` takes each
+    frame and returns a sentence on the two transitions — into silence after
+    ``window_s`` of it, and back out when the first real sample arrives —
+    and ``None`` otherwise.
+    """
+
+    def __init__(self, window_s: float = _SILENCE_WINDOW_S, frame_s: float = FRAME_SAMPLES / SAMPLE_RATE) -> None:
+        self._frame_s = frame_s
+        self._limit = int(round(window_s / frame_s))
+        self._zeros = 0
+        self.silent = False
+
+    def push(self, frame: bytes) -> str | None:
+        if np.frombuffer(frame, dtype=np.int16).any():
+            self._zeros = 0
+            if self.silent:
+                self.silent = False
+                return "microphone hears the room again"
+            return None
+        self._zeros += 1
+        if not self.silent and self._zeros >= self._limit:
+            self.silent = True
+            return (
+                f"microphone open but delivering pure silence for {self._zeros * self._frame_s:.0f}s — "
+                "the input device has nothing behind it, or this process is not allowed the "
+                "microphone (System Settings › Privacy & Security › Microphone)"
+            )
+        return None
+
+
 
 def pcm_to_float(frame: bytes) -> np.ndarray:
     """int16 PCM bytes to float32 in [-1, 1], the form every model wants."""
@@ -83,9 +125,12 @@ class MicStream:
             callback=self._on_audio,
         )
         self._stream.start()
-        log.debug(
-            "microphone open (device=%s, %d Hz, %d-sample frames)",
-            device if device is not None else "default",
+        # Named, at INFO, because "which microphone" is the first question
+        # when the room seems deaf: the default shuffles when a phone or a
+        # headset appears, and the log is where the answer has to be.
+        log.info(
+            "microphone open: %s (%d Hz, %d-sample frames)",
+            _device_name(device),
             SAMPLE_RATE,
             FRAME_SAMPLES,
         )
@@ -140,9 +185,14 @@ class MicStream:
         """
         assert self._wakeup is not None, "MicStream used outside its context manager"
         stalls = 0
+        silence = SilenceWatch()
         while not self._closed:
             while self._queue:
-                yield self._queue.popleft()
+                frame = self._queue.popleft()
+                said = silence.push(frame)
+                if said:
+                    (log.warning if silence.silent else log.info)("%s", said)
+                yield frame
             self._wakeup.clear()
             if self._queue:  # raced with the callback between pop and clear
                 continue
@@ -177,6 +227,16 @@ class MicStream:
         self._queue.clear()
 
 
+def _device_name(index: int | None) -> str:
+    """The human name of a PortAudio input index, ``None`` meaning the default."""
+    try:
+        chosen = index if index is not None else sd.default.device[0]
+        name = sd.query_devices(chosen)["name"]
+    except Exception:  # noqa: BLE001 - a name is a courtesy, never a failure
+        return "default" if index is None else str(index)
+    return f"{name} (default)" if index is None else name
+
+
 def _resolve_device(spec: int | str | None, *, want_input: bool) -> int | None:
     """Turn a device index or name fragment into a PortAudio index.
 
@@ -198,4 +258,4 @@ def _resolve_device(spec: int | str | None, *, want_input: bool) -> int | None:
     )
 
 
-__all__ = ["MicStream", "float_to_pcm", "pcm_to_float", "FRAME_BYTES"]
+__all__ = ["MicStream", "SilenceWatch", "float_to_pcm", "pcm_to_float", "FRAME_BYTES"]

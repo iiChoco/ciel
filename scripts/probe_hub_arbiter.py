@@ -261,9 +261,17 @@ async def probe_seat() -> None:
         and not server.pending
         and any(f["type"] == "ack" and f["seq"] == 1 for f in frames(q1)),
     )
+    seen: list[tuple[bool, str | None]] = []
+    server.on_voice_state = lambda listening, source: seen.append((listening, source))
     server._on_frame(json.dumps({"type": "voice.state", "listening": True, "speaking": True}), "spoke")
     check("voice.state lands in the snapshot's inputs",
           server.spoke_listening and server.spoke_speaking)
+    server._on_frame(json.dumps({"type": "voice.state", "listening": True, "speaking": False, "source": "snap"}), "spoke")
+    server._on_frame(json.dumps({"type": "voice.state", "listening": False, "speaking": False, "source": "snap"}), "spoke")
+    check("the window's source is kept while it is open, dropped when it closes, and reported each time",
+          seen == [(True, None), (True, "snap"), (False, None)] and server.spoke_wake_source is None)
+    server.on_voice_state = None
+    server._on_frame(json.dumps({"type": "voice.state", "listening": True, "speaking": True}), "spoke")
     q2 = seat_spoke(server, "spoke2")
     await asyncio.sleep(0)
     check(
@@ -275,6 +283,26 @@ async def probe_seat() -> None:
     server._clients.pop("spoke2", None)
     server._client_left("spoke2")
     check("the spoke leaving empties the seat", not server.spoke_connected)
+
+    # The seat was empty when the timer set changed: the broadcast went
+    # to nobody and the dedupe remembered it as sent.
+    armed = [{"id": "t9", "kind": "timer", "due_at": 1e12, "label": "",
+              "duration_s": 60.0, "pending": False}]
+    server.note_timers(armed)
+    q3 = seat_spoke(server, "spoke3")
+    server.note_timers(armed)  # the unchanged poll that follows the seat
+    got = frames(q3)
+    check(
+        "a spoke seated after the change still gets the timer set, privately, unstamped",
+        [f["type"] for f in got[:2]] == ["hello", "timers.sync"]
+        and got[1]["timers"] == armed and "seq" not in got[1],
+    )
+    server.note_timers([])
+    server._clients.pop("spoke3", None)
+    server._client_left("spoke3")
+    q4 = seat_spoke(server, "spoke4")
+    check("a cancellation made while it was away reaches the next seat too",
+          [f.get("timers") for f in frames(q4) if f["type"] == "timers.sync"] == [[]])
 
 
 async def probe_snapshot_and_ladder() -> None:

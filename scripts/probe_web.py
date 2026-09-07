@@ -216,6 +216,23 @@ def probe_view() -> None:
     indicator = WebIndicator(link)
     indicator.set_state("thinking")
     check("the indicator adapter feeds the link", link._state == "thinking")
+    queue: asyncio.Queue = asyncio.Queue()
+    link._clients["fake"] = queue
+    link.note_state("listening", "snap")
+    link.note_state("listening", "snap")
+    link.note_state("listening")
+    link.note_state("idle")
+    frames = []
+    while not queue.empty():
+        frames.append(json.loads(queue.get_nowait()))
+    check(
+        "a listening state carries how the window was opened, once per change, and idle carries nothing",
+        [(f["state"], f.get("source")) for f in frames if f["type"] == "state"]
+        == [("listening", "snap"), ("listening", None), ("idle", None)],
+    )
+    link.note_state("listening", "clap twice")
+    check("the hello would carry the source for a page opened mid-window", link._source == "clap twice")
+    del link._clients["fake"]
 
 
 def probe_agents() -> None:
@@ -280,6 +297,7 @@ async def live(port: int | None = None, require_token: str | None = None) -> Non
         link.note_row("event", "muted" if value else "unmuted")
 
     link.on_mute = on_mute
+    link.on_speak_back = link.note_speak_back  # the VOICE chip round-trips, like mute
 
     def on_restart() -> None:
         print("  [restart requested]")
@@ -342,7 +360,13 @@ async def live(port: int | None = None, require_token: str | None = None) -> Non
                          "observed_at": now, "source": "sections@mac", "ttl_s": 120.0},
         }
 
-    link.note_world(world_facts())
+    def world_sources() -> dict:
+        # The Mac away is also the calendar unreadable: the NEXT chip dims
+        # and its title says why, while the reading stands.
+        return {"calendar": {"ok": world_on, "at": time.time(),
+                             "error": None if world_on else "agenda unavailable: spoke away"}}
+
+    link.note_world(world_facts(), revision=1, sources=world_sources())
 
     try:
         while True:
@@ -371,7 +395,7 @@ async def live(port: int | None = None, require_token: str | None = None) -> Non
                 link.note_state("idle")
             elif text.lower().startswith("world"):
                 world_on = not world_on
-                link.note_world(world_facts())
+                link.note_world(world_facts(), revision=2, sources=world_sources())
                 link.note_row("event", "spoke connected" if world_on else "spoke disconnected")
                 link.note_state("idle")
             elif text.lower().startswith("confirm"):

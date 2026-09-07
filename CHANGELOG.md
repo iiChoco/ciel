@@ -2,6 +2,752 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-06 — a playback request is enough
+
+**Why.** Asking to play or pause Spotify already says what the user wants.
+The user chose to remove the second yes from these playback requests.
+
+**What.**
+
+- *Music follows the request.* Spotify controls run without confirmation by
+  default; `[spotify] confirm_controls = true` can restore the voice gate.
+  Inverse records and verifies controls independently of that choice.
+  Public and unattended turns still cannot control the player, and other
+  actions keep their own confirmation requirements.
+
+**Probes.** `probe_spotify.py 93 → 102`: direct controls pass the brain's
+hooks without asking, still reach the journal and read-back, and stay
+allowed without a confirmer; another connector still asks and respects
+refusal, while Spotify's optional confirmation still works.
+
+## 2026-09-06 — Spotify can follow the room
+
+**Why.** A double clap could start a known URI on the Mac, but Ciel could
+not find a recording, read the player, or choose a Spotify Connect device.
+
+**What.**
+
+- *The account behind the speakers.* An opt-in Spotify Web API client and
+  four tools bring search, playback status, device discovery and controls
+  to either brain host, using the dependencies already here. Browser PKCE
+  needs no client secret; owner-only atomic tokens and a shared refresh
+  lock keep authorization intact across overlapping processes.
+- *Looking is different from changing the room.* Controls go through
+  Proof Obligation and Inverse; public turns cannot use the account tools,
+  and unattended turns can only inspect playback and devices. Playback
+  requests are sent once, with explicit uncertainty after network failure;
+  rate limits hold later calls. Library and playlist editing are outside
+  this first connection's scopes.
+
+**Probes.** `probe_spotify.py 0 → 93`: PKCE state and refusal, refresh
+rotation and concurrent clients, token permissions, API shapes and bounds,
+empty playback, rate limiting, quoted names, public refusal, opt-in tools,
+confirmation, journaling, the Witness rule and credential guards.
+`probe_world.py 121 → 123`: public and private turns set the account scope.
+
+## 2026-09-06 — the Mac's files can be put back
+
+**Why.** A Mac overwrite reached the action journal without its previous
+contents. The fourth finding in `reports/2026-09-06-codebase-review.md`
+reproduced a record that could explain the write but could not undo it.
+
+**What.**
+
+- *Read where the file lives.* Before the write, the recorder asks the
+  spoke for bounded previous contents and saves an owner-only snapshot
+  beside the hub's journal. Ordinary Read and mac_write_file perform the
+  inverse; missing, oversized, or unreachable originals leave a note.
+
+**Probes.** `probe_tool_rpc.py 32 → 59` (the combined review regressions):
+complete snapshots beyond the tool-output limit, their permissions and
+read-only carve-out, restoration and its own undo record, empty/missing/
+oversized originals, forbidden paths, and an unreachable Mac.
+
+## 2026-09-06 — a canceled command stops working
+
+**Why.** Canceling a Mac tool call erased its coroutine while the process
+kept changing files. The third finding in
+`reports/2026-09-06-codebase-review.md` reproduced a write after cancel.
+
+**What.**
+
+- *Keep ownership until the shell exits.* Commands run in their own
+  process group. Cancellation, either deadline, and executor shutdown
+  stop that group and reap the shell, including during process startup.
+  The hub forwards cancellation, and shutdown awaits cleanup.
+
+**Probes.** `probe_tool_rpc.py 32 → 59` (the combined review regressions):
+real delayed child writes stay absent after explicit cancel, both
+deadlines, shutdown, hub cancellation, and cancellation during startup;
+a call canceled before starting leaves no ledger entry.
+
+## 2026-09-06 — the signup cookie stays behind the door
+
+**Why.** The signup watcher kept a login credential in an owner-only file,
+but the brain ran as that same owner and could read it. The second finding
+in `reports/2026-09-06-codebase-review.md` reproduced the missing boundary.
+
+**What.**
+
+- *One credential list for both gates.* `sections-cookie` joins
+  `FORBIDDEN_NAMES`; a configured cookie filename joins it when the file
+  and shell guards are built, on the hub and the spoke.
+
+**Probes.** `probe_files.py 21 → 26`: direct reads, search, listing, and
+the shell refuse both default and configured cookie names.
+`probe_shellguard.py 148 → 162` and `probe_tool_rpc.py 32 → 59` include
+refusals for the standard cookie through the shell and spoke.
+
+## 2026-09-06 — a quiet prefix is not permission to write
+
+**Why.** `git diff --output` could write outside the workspace without
+asking, because the shell gate recognized only its prefix. The first
+finding in `reports/2026-09-06-codebase-review.md` reproduced that escape.
+
+**What.**
+
+- *The arguments owe a proof too.* Git status and a small display-only
+  vocabulary for log stay quiet. Git's diff/show/branch/blame commands,
+  file inspection, and unfamiliar date or hostname arguments ask first.
+  A configured prefix cannot bypass the argument check.
+
+**Probes.** `probe_shellguard.py 148 → 162`: mutating Git options and
+machine setters ask, the display-only forms stay quiet, and a declined
+output write is refused. `probe_tool_rpc.py 32 → 59` includes a real
+unconfirmed Git output write whose destination remains absent.
+
+## 2026-09-06 — the keyboard's own word
+
+**Why.** Every acoustic gate had been tried against keystrokes — four
+rules, a model that names typing, a solitude window — and a lone key in
+a quiet second still woke Ciel as a snap. It is a snap, acoustically.
+What it is not is a hand: the sound of a key is made by a key, and the
+Mac knows when its keys are pressed.
+
+**What.**
+
+- *Ask the keyboard.* `audio/keys.py` asks macOS, at the moment the ear
+  judges an impulse, how long since a key went down or up — a session-wide
+  number any process may read, timestamps only, no event tap, no
+  permission dialog, a tenth of a millisecond. A snap or a clap inside
+  `gestures.keyboard_veto_ms` (300) of a key event is rejected as that
+  keystroke, by name.
+- *Opinions in order.* The ear's vetoes compose: the keyboard first,
+  since it is certain and free, then the AudioSet model. `first_of` in
+  `audio/gestures.py`.
+
+**Probes.** `probe_gestures.py 117 → 128`: a snap 50 or 299 ms after a
+key is that key, 300 ms or a minute after it is not; without Quartz the
+veto is inert; with a key just pressed a snap and both claps are
+keystrokes and say so; with the keyboard quiet they are gestures again;
+the keyboard is asked first and a certain answer spares the model; no
+opinions is no veto; zero builds an ear without the keyboard.
+
+## 2026-09-06 — a snap is solitary
+
+**Why.** With the AudioSet veto in place, keystrokes still woke Ciel as
+snaps: a single key in a quiet second does not sound like *typing* to a
+model trained on runs of it, and by shape a mechanical key is a snap.
+What a keystroke has that a snap does not is company.
+
+**What.**
+
+- *One number.* `gestures.snap_quiet_ms` (400): a would-be snap that
+  follows any other gated impulse inside the window is rejected as
+  typing cadence, whatever its shape or the model's opinion. Claps are
+  not held to it, so a double clap is untouched. Zero switches it off.
+
+**Probes.** `probe_gestures.py 110 → 116`: a lone snap stands; a snap
+200 ms after a keystroke-shaped tick is typing cadence and says so; at
+500 ms it is solitary again; a run of keystrokes never becomes a snap;
+claps are not held to it; zero switches it off.
+
+## 2026-09-06 — two claps reach whichever device is playing
+
+**Why.** The double clap could only start the desktop app on this Mac.
+The Spotify connector that arrived the same day talks to the account
+itself, so the gesture should too: two claps in the kitchen should reach
+the phone that is playing there.
+
+**What.**
+
+- *Two doors, one order.* `music.play` takes the connector's Web API as
+  the first door — `play` on the active device, then a status read for
+  the device's name — and keeps the AppleScript surface as the second,
+  taken when the API has no player to talk to or no login to talk with.
+  The login is checked at play time, so authorizing after the spoke
+  started needs no restart. The same URI check guards both doors.
+- *The connector must be authorized on the spoke's host.* The gesture
+  runs where the microphone is, so the Mac keeps its own token file; the
+  README says so beside the gesture.
+
+**Probes.** `probe_gestures.py 104 → 110`: with the connector, two claps
+play through the API and the desktop app is not scripted; without a
+player, or before authorization, the desktop app answers; a connector
+that is off or has no app leaves the desktop app as the only door; the
+spoke builds the pair action with the connector beside it.
+
+## 2026-09-06 — a second opinion that only says no
+
+**Why.** Snaps were, in the user's words, too accurate: keyboard clicks
+woke Ciel. Four hand-set numbers cannot tell a keystroke from a snap on
+a lid microphone, and neither can more of them. What can is a model
+trained on two million labelled clips — but tried as the judge, Google's
+AudioSet classifier missed half of a set of real snaps and called a loud
+clap a snap, while naming typing and speech every time.
+
+**What.**
+
+- *The rules judge; the model may veto.* `audio/audioset.py` wraps YAMNet
+  (a tf2onnx export, 16 MB, Apache 2.0) under the onnxruntime the wake
+  word already uses, fetched once into the models directory and refused
+  unless its SHA-256 matches. The ear keeps a second of raw audio and,
+  for each snap or clap the rules accept, asks whether that second was
+  really typing, a keyboard, speech, conversation, or music; above
+  `veto_threshold` the gesture becomes a rejection that names what was
+  heard. A vetoed second clap breaks the pair. Nothing the rules did not
+  find is ever found by the model.
+- *Two fields.* `gestures.veto_model` — empty, `yamnet`, or a path to a
+  model with the same interface — and `gestures.veto_threshold`.
+
+**Probes.** `probe_gestures.py 90 → 103`: vetoed gestures are rejections
+that say why; the veto is asked only about what the rules accepted;
+it is shown one AudioSet frame ending just after the impulse; a silent
+veto changes nothing; a vetoed second clap breaks the pair; the wrapper
+vetoes on room classes only, by name and score, never on snapping or
+clicking; a bogus or missing custom model is refused; the pretrained
+model is pinned by hash.
+
+## 2026-09-06 — the Chart says whether you snapped or spoke
+
+**Why.** With two ways to wake Ciel, the Chart's chip said only
+"listening", and in hub-and-spoke mode it did not even say that: the
+room's window belongs to the spoke, and the hub only ever set the chip
+from its own turns.
+
+**What.**
+
+- *The detector says how it was addressed.* Every wake detector carries a
+  `source` — spoken, hotkey, snap, clap twice — and the composite takes
+  the firing member's.
+- *The window's source rides `voice.state`.* The spoke sends it while the
+  window it opened is open, and nothing for a follow-up window; the hub
+  keeps it, lights the Chart with it, and returns the chip to idle when
+  the window closes and no turn is running.
+- *The chip reads it.* `listening · snap` beside `listening · spoken`;
+  the hello carries it for a page opened mid-window.
+
+**Probes.** `probe_gestures.py 88 → 90`: the composite names what
+addressed it. `probe_spoke.py 52 → 53`: a snap-opened window says so, a
+follow-up says nothing, idle says nothing. `probe_hub_arbiter.py +1`:
+the source is kept while open, dropped when closed, reported each time.
+`probe_web.py +2`: one state frame per change with the source, idle
+without, and the hello holds it.
+
+## 2026-09-06 — the ear can narrate what it hears
+
+**Why.** The spoke logged only the gestures it acted on. A clap that was
+heard but fell short of a boundary left no trace, so tuning meant
+running the tester in a second window and matching its clock to the
+spoke's by eye.
+
+**What.**
+
+- *One switch, every impulse.* `gestures.log_candidates`, off by
+  default, makes the ear log each gated impulse with its four numbers
+  and, for a miss, the cue it failed — the tester's candidate rows, in
+  the spoke's own log, in the spoke's own time.
+
+**Probes.** `probe_gestures.py 83 → 88`: silent by default; with the
+switch on every gated impulse is a line with its numbers, a miss names
+its cue, a lone clap says it is waiting, and the switch reaches the ear
+the spoke builds from config.
+
+## 2026-09-06 — the log says which microphone, and when it hears only zeros
+
+**Why.** The spoke sat "ready" all evening and heard nothing — not a
+snap, not its name — while a tester opened in a terminal heard every
+sound. Nothing in the log could say why: the microphone's name was a
+debug line, and the stall watchdog only notices frames that stop
+arriving. Frames of pure zeros, which is what macOS delivers to a
+process it has not allowed the microphone or from a device with nothing
+behind it, looked exactly like a quiet room.
+
+**What.**
+
+- *The microphone is named at INFO.* `microphone open: <name>` on every
+  start, with `(default)` when it was the system's choice, because the
+  default shuffles when a phone or a headset appears.
+- *Pure silence is reported once.* `SilenceWatch` in `audio/input.py`
+  counts frames whose every sample is zero and says so after five
+  seconds, naming both causes, then says when the room is back. A real
+  room never produces exact zeros, so a quiet night does not trip it.
+
+**Probes.** `probe_input.py` new, 9 checks: hiss is not silence, zeros
+speak once and only after the window, the message names the permission,
+the room's return is reported, a second stretch is reported again, the
+window is counted in frames.
+
+## 2026-09-06 — two claps can start the music
+
+**Why.** With the gesture ear in place, the first thing the user wanted
+two claps to do was not to wake Ciel but to start Bruno Mars. There was
+no way for Ciel to start music at all: the shell guard denies
+`osascript` outright, and rightly, since scripting other applications
+erases every boundary the tool configs draw.
+
+**What.**
+
+- *A gesture can act instead of waking.* `GestureWake` now carries
+  actions beside its wake set: a gesture with an action runs it (scheduled
+  on the loop, never awaited by the frame loop) and answers no, so the
+  listening window stays shut. `wake.double_clap` is a three-way switch —
+  `off`, `wake`, `play` — and `wake.double_clap_plays` names what plays.
+- *One narrow door.* `music.py` starts Spotify playing a URI through its
+  AppleScript surface and nothing else: the URI must match the exact shape
+  "Copy Spotify URI" produces, is refused at build time otherwise, and
+  reaches the script as an argument, never spliced in. What played is
+  logged. It does not go through the confirmation broker, on purpose: two
+  claps are the deliberate act, mute gates them, and a wrong song is undone
+  with one tap. The journal lives with the brain, so the log line is the
+  record here.
+
+**Probes.** `probe_gestures.py 71 → 83`: in play mode two claps run the
+action once and never wake, the snap still wakes beside them, the ready
+line says what two claps do, the build refuses anything but a Spotify URI,
+the URI reaches AppleScript as an argument, a bad URI never starts a
+process, and Spotify's refusal is reported rather than raised.
+
+## 2026-09-06 — a snap or two claps can stand in for the name
+
+**Why.** The wake phrase was the only way to get Ciel's attention without
+a keyboard, and there are moments when a phrase is the wrong instrument:
+a room where speaking feels odd, a mouth full, a doorway too far for a
+whisper. An afternoon at the microphone showed that a finger snap is
+reliably detectable on a laptop's lid microphone at the pipeline's
+16 kHz, that a clap is too, and that a single clap is indistinguishable
+from a knuckle on the desk — so the second gesture is a pair.
+
+**What.**
+
+- *An ear beside the wake word.* `audio/gestures.py` measures every
+  impulse that clears an onset gate four ways — peak, width, tilt, fall —
+  and sorts it into snap, clap, or neither, in audio time, with filter
+  state carried across frames. `GestureWake` wraps it in the detector
+  shape and `AnyWake` seats it beside the phrase (or the hotkey), so the
+  frame loop, the acknowledgement, and the listening window cannot tell
+  a snap from "hey jarvis". The wake-word model still sees every frame,
+  and a turn's reset forgets a half-made pair without restarting the
+  warm-up.
+- *Two switches and a table.* `wake.snap` and `wake.double_clap`, both
+  off by default; every boundary the ear uses is a documented field in
+  `[gestures]`, read off one MacBook on 2026-09-06 and expected to move
+  in another room. The ready line names what is switched on.
+- *The tester hears with Ciel's ear.* `scripts/listen_gestures.py` now
+  imports the detector and thresholds from the package rather than
+  carrying its own copy, replays recordings, and turns every `[gestures]`
+  field into a flag so a boundary can be tried before it is written down.
+
+**Probes.** `probe_gestures.py 52 → 71`: a snap and a double clap wake
+through the ear and a lone clap never does; each switch admits only its
+own gesture; a pair fires once; reset forgets a pair without going deaf;
+the composite feeds every member every frame and keeps the hotkey's
+`arm`; `always` mode builds no ear; the ready line names the gestures in
+order; the `[gestures]` table loads from TOML and the environment.
+`probe_spoke.py` and `probe_audio.py vad` unchanged and passing.
+
+## 2026-09-06 — two hands, one set of conventions
+
+**Why.** Two agents wrote to the same checkout and could undo one another's
+work even while following the same code style.
+
+**What.**
+
+- *One writer, a separate reviewer.* Each repository's guide now contains the
+  five coordination rules, so a fresh clone needs no sibling policy file.
+  Local conventions govern style; Google is an optional reference.
+- *The Instrument keeps its shape.* Ciel's guide names the token owner,
+  offline constraint, and checks for interface changes. Documentation-only
+  work has its own verification path.
+
+**Probes.** No runtime behavior changed. Guide links, Claude entry points,
+original Claude notes, and deployment flag descriptions were checked;
+whitespace checks passed in all three repositories.
+
+## 2026-09-06 — one name everywhere, and a guide any hand can follow
+
+**Why.** The code has been Ciel for weeks; everything around it still
+said jarvis — the Mac checkout, the GitHub remote, the server's home
+directory. Codex moved the Mac checkout to `~/Projects/ciel` and split
+the service definitions into a sibling `infrastructure` repository, but
+two things came loose in the move: its forwarding script previewed
+instead of deploying, so the old `push_hub.sh --sync` did nothing; and
+its launchers no longer created the log directory launchd must open
+before the program runs. And with two agents now editing one tree, the
+conventions that lived only in the code's own example needed a page.
+
+**What.**
+
+- *The remote is `iiChoco/ciel`; the server runs `/home/ciel/ciel`.*
+  GitHub redirects the old name. On the box the unit is patched, the
+  venv reinstalled at its new path (a plain sync saw the old path still
+  resolving through the symlink and left the editable install pointing
+  at it), and `~/jarvis` stays as a symlink for a stale push. The three
+  "jarvis" values — the pretrained wake model, the persona, the speaker
+  effect — are features and keep their names.
+- *`push_hub.sh` deploys again.* It forwards to the infrastructure
+  repository's deploy script and deploys by default; `--sync` re-syncs
+  the server's locked dependencies, `--dry-run` compares, `--preview`
+  prints. The launchers (in `infrastructure/services/launchd`) run
+  `sh -c 'mkdir -p ~/.ciel/log && exec .venv/bin/python -m ciel …'`.
+- *`AGENTS.md`, read by Codex and imported by `CLAUDE.md`.* How the
+  project is actually built: probes as tests and the check-sentence,
+  the module-docstring essay, commit and changelog shape, the codenames,
+  what is never touched, and what "done" means.
+
+**Probes.** None changed. `probe_spoke` 52, `probe_world` 121,
+`probe_turns` 71 re-run after the move and pass.
+
+## 2026-09-05 — the screenshot that took the hub down
+
+**Why.** "Take a look at my screen and put these things on the calendar"
+ended the hub twice in a row. Three faults in one line of the journal:
+the screen tool's two displays came back as one tool result the CLI
+echoed as a single JSON line past the Agent SDK's one-megabyte buffer
+(`JSON message exceeded maximum buffer size`); the SDK's reader gave up
+with a bare `Exception` the brain did not recognise as a transport death,
+so the dead client stayed installed; and the apology after the failed
+turn hit `contextlib.suppress` in a module that only imported
+`aclosing` — a NameError inside the failure handling, which the hub loop
+re-raised from the turn task and died of. systemd brought the hub back
+with no memory of the conversation ("this is the start of our
+conversation, sir").
+
+**What.**
+
+- *The line buffer fits a screen.* `ClaudeAgentOptions(max_buffer_size=
+  64 MiB)` for the brain: a bound on memory per line, not a target.
+  Screenshots are re-encoded at a fixed JPEG quality (75) so the payload
+  has a known size rather than sips' unstated default.
+- *A dead reader is a dead client.* `Brain.ask` reads the SDK stream by
+  hand; an exception raised by the stream itself (never by the turn's
+  own body) becomes `StreamDied`, a `ConnectionError`, and the eviction
+  that follows a transport death follows it — the next turn reconnects
+  instead of ending at once with nothing said.
+- *One turn's crash is one turn's crash.* `import contextlib` in
+  `pipeline.py`; and both loops surface a finished turn task's exception
+  through `_turn_crashed()` — logged, marked on the indicator, recorded
+  as an event — rather than re-raising it out of the loop.
+
+**Probes.** `probe_turns.py` 63 → 71: the wire apology on a dead spoke,
+a crashed turn task as an event, and the stream dying under a turn (what
+was heard is kept, the client is evicted, the lock is released, the
+buffer is raised).
+
+## 2026-09-05 — the follow-up review's five (ownership, seats, the deadline)
+
+**Why.** The follow-up review (`reports/2026-09-05-followup-review.md`)
+found five defects left standing after the review's six: the room still
+tied a session to a *username*, so a deleted-and-recreated name inherited
+the old person's interviews; a password change or a disable retired the
+cookie but not the socket already open under it, which went on
+interviewing and recording; the new search ran the model's regex on the
+assistant's own event loop, where one backtracking pattern held every
+socket and timer; a drain that timed out simply forgot its debt, so the
+late result answered the next question anyway; and a slot reserved
+before midnight was released against the new day's ledger. Each was
+reproduced with temporary data (`reports/2026-09-05-review/`); all five
+are fixed here, and the repro scripts now print the fixed values.
+
+**What.**
+
+- *A session belongs to the account.* `meta.json` carries an
+  `owner_id`, the account's immutable id; every read that answers a
+  request — the lobby, a session, its recording, the socket — checks
+  it, and a session under another id in the same directory is a 404.
+  Sessions from before ids existed are claimed once at startup by the
+  account holding the username then. Deleting an account (panel or
+  `ciel interview delete`) moves its directory to
+  `users/.retired/<username>.<id>`, ledger included, so the next holder
+  of the name starts empty.
+- *The socket goes with the sign-in.* Every attached connection is a
+  `Seat`; a newer tab supersedes the older (closed, 4409); the end of
+  the interview closes what is left after the debrief is announced; an
+  eviction — a self-service password change now included, beside admin
+  reset, disable, and delete — closes them at once with 4401, before the
+  debrief is written, and the page does not retry on either code. An
+  ended interview drops every later frame, audio included. A reset made
+  at the terminal, which no eviction sees, is caught by the socket
+  handler re-checking the cookie against the file every fifteen
+  seconds. The close is done by the socket's own handler task, asked
+  through the seat: aiohttp closes a socket from any other task by
+  dropping the transport the moment the close frame is written, and the
+  browser then saw 1006 as often as the code.
+- *The search has a deadline.* `search_files` and `find_files` run
+  their walk and matching in a spawned child with the guard handed
+  over; the parent waits off the loop and kills a child still running
+  at twenty seconds. A coroutine timeout cannot interrupt a match and a
+  thread holds the GIL; a process can be killed. `^(a+)+$` over thirty
+  characters now costs one second and a message, not the room.
+- *A failed drain is the end of the connection.* The in-flight debt is
+  cleared only by reading the result. A drain that times out or finds
+  the stream broken retires the client (bounded disconnect) and every
+  later `ask()` fails with the reason; the room's one retry fails the
+  same way and the interview ends with an `interviewer` error, debriefed
+  from what was said — never answered by the stale result.
+- *A reservation names its day.* `SessionStore.reserve` returns a
+  `Reservation(username, day, kind)` and `release` takes it back
+  against that day; one taken before midnight and released after
+  touches nothing in the new day.
+
+**Probes.** `probe_interview.py auth` 70 → 85 (ownership through the
+API, the claim at startup, the retired directory), `brief` 50 → 63
+(reservations across midnight, ownership and retirement in the store),
+`session` 28 → 44 (a superseded tab, a self-change, a disable, and a
+terminal reset, each over a real loopback socket, with the code the
+browser sees), `brain` 12 → 19 (the drain timing out, the stream
+breaking mid-drain, the stale result never read), `probe_files.py` 17 →
+21 (the runaway pattern killed at the deadline while a heartbeat keeps
+ticking, no child left behind). The repro scripts read: old transcript
+accessible False; socket closed True, audio appended False; midnight
+frees the current day False; connection retired True.
+
+## 2026-09-05 — the interview that ended on its own (the cut-off race)
+
+**Why.** Two interviews on the hub ended in `error` three and four
+questions in, each right after the candidate went on talking while the
+interviewer was still thinking. The room cancels the interviewer's turn
+and sends the SDK an interrupt — but the CLI still posts a ResultMessage
+for the aborted turn (an `error_during_execution` one carrying its
+`[ede_diagnostic]` line when no word had been said yet), and the reader
+that would have taken it was the cancelled turn. So it sat in the
+stream, and the next question's `ask()` read it as its own reply: an
+error result ended the interview; a stale text (a cut-off mid-sentence)
+would have had the interviewer answer the previous question.
+
+**What.**
+
+- *The interrupt reads out the aborted turn.* `AgentSdkBackend` keeps
+  an in-flight flag per query; `interrupt()` drains the stream to the
+  pending ResultMessage (bounded at fifteen seconds), and `ask()` does
+  the same before a query if a debt is still owed. A broken stream
+  surfaces as `BackendError` rather than a crash.
+- *One bad turn is not the end.* A turn that fails before it has said a
+  word is asked once more; a second failure ends the interview as
+  before. `_speak_turn` closes the `ask()` generator on the way out
+  (`aclosing`), so a cancellation landing in `_say` cannot leave the
+  backend's lock held until the collector gets to it.
+- *The page says why.* An `interviewer`/`crash` error frame is no longer
+  a `console.warn`: the closing view says the interviewer hit an error
+  and the debrief covers what was said; the review header shows
+  `end_reason` (now in the session row) for `error` and `idle`.
+- *A probe for the race.* `probe_interview.py brain` drives the real
+  `AgentSdkBackend` against a fake CLI that posts the aborted turn's
+  result the way the real one does (cut-off while thinking, cut-off
+  mid-sentence), and runs a whole scripted interview whose second turn
+  fails once. 12 checks; the same race was reproduced against the real
+  CLI on Haiku before and after.
+
+## 2026-09-04 — the review's six (boundaries, reconciliation, mute)
+
+**Why.** A focused review of the working checkout
+(`reports/2026-09-04-codebase-review.md`) found six defects where the
+protocol, policy, and hardware pieces meet, each reproduced with
+temporary data (`reports/2026-09-04-review-repros.py`). All six are
+fixed here, plus the deterministic-test defect it found in
+`probe_world.py`.
+
+**What.**
+
+- *The search boundary.* `Grep` and `Glob` took a root the guard
+  approved and then walked it themselves — into `credentials.json`,
+  through a symlink out, into `.ssh` — and their output carried the
+  contents before any `Read` could be refused. Both built-ins are now
+  refused outright (hook and `disallowed_tools`, path or no path) and
+  replaced by Ciel's own `search_files` / `find_files`
+  (`brain/tools/files.py`, codename **Sieve**): the same
+  `WorkspaceGuard`, applied to every directory entered and every file
+  opened, symlinks resolved first, no model-supplied exclusions.
+  `WorkspaceGuard.from_config` so the hook and the sieve are built the
+  same way; the Witness lists the two as observers; the prompt names
+  them.
+- *Account writes are transactional.* Every mutation of
+  `interview-accounts.json` holds a lock across the whole
+  read-modify-write — a `threading.Lock` for the room's worker threads
+  and an `flock` on `<file>.lock` for the CLI — with scrypt computed
+  outside it and the account reloaded inside it. A reset that paused
+  in scrypt while an admin disabled the account no longer re-enables
+  it. `atomic_write` (shared by every file-backed store) now uses a
+  unique temp file per call and keeps the target's mode, so the
+  owner-only files stay owner-only and two writers cannot replace each
+  other's half-written temp.
+- *Cookies name the account, not the username.* Each account carries
+  an immutable `id` minted at creation and an `auth` generation that
+  every reset bumps; the cookie is
+  `username|id|auth|expiry|hmac` and is refused unless both still
+  match the live account. A reset logs the old cookies out; a username
+  deleted and recreated is a stranger to them; a friend changing their
+  own password is handed a fresh cookie in the same response and keeps
+  their seat. Accounts from before ids existed are upgraded once, under
+  the lock. Admin reset, disable, and delete also end the user's live
+  interviews (`pause`, with the reason). Every existing cookie is
+  three-part and expires: everyone signs in again once.
+- *A seated spoke gets the timer set.* `note_timers` dedupes against the
+  last set *sent*, so a change broadcast to an empty seat was recorded
+  as delivered and the next spoke never heard it. `_welcome` now sends
+  the authoritative set privately (unstamped: state, not an event) to
+  every spoke it seats, whatever the resume claim did — new timers and
+  cancellations made during a disconnect both arrive.
+- *The mirror holds its tongue while muted.* The offline fallback's poll
+  never looked at the switch, and `_ring_locally` played regardless.
+  Both check now — the poll before scheduling, the ring at the moment
+  of playback and between timers. A due timer in a muted room is held,
+  not marked rung, and rings on the first poll after the unmute.
+- *The daily cap is a ledger.* A session's slot is reserved before the
+  brief is generated (`users/<u>/usage.json`, under the same lock
+  helper), so two requests in the same instant get one slot between
+  them; deleting a session keeps its charge; a failed or cancelled
+  generation hands the slot back. Regeneration has a budget of its own
+  (`[interview] daily_regenerations_per_user`, default 8). `me`
+  reports `used_today`. The dev room is no longer exempt from the cap —
+  `probe_interview.py brief` always expected the 429.
+- *One clock.* `Pipeline._presence_now` judged freshness on the wall
+  clock while the world's facts were stamped by the table's own
+  (injectable) clock; `World.now()` is the one it uses now, and the
+  probe ages a reading by advancing that clock.
+
+**Probes.** New `probe_files.py` (18: the sieve over a fixture with a
+fake secret, a forbidden subtree, a symlink out, the walkers refused).
+`probe_interview.py auth` 57 → 70 (the race, ids, retired cookies, the
+recreated username, the fresh cookie on a self-change), `brief` 47 → 50
+(two at once, a deleted session's slot, the regeneration budget).
+`probe_hub_arbiter.py` 48 → 50, `probe_spoke.py` 50 → 52,
+`probe_vigil.py` observers updated, `probe_world.py` passes again (121).
+The repro script now reads False / [200, 429] / snapshot present /
+nothing played.
+
+## 2026-09-04 — speak back (typed replies, spoken)
+
+**Why.** The new voice can only be judged by ear, and the only lane that
+speaks is the one that needs the user to talk — useless in a lecture
+hall. The Chart's turns were text by design (the page is the delivery),
+with no way to ask for the room as well.
+
+**What.** A speak-back switch: `speakback.set` from a Chart, `speakback`
+broadcast to every client (and in the hello), the **VOICE** chip on the
+page, and the typed/spoken command "speak back on|off" (also "voice",
+"talk back", "read back", "speak your replies"). On, a web-lane turn
+runs through `_SpokenTextSink`: the transcript tap still feeds the page
+and each reply sentence is spoken — on the hub as a `turn.begin` with
+`lane: "web"`, sentences, `turn.end` down the wire; locally through the
+player. The spoke accepts web-lane turns as playback only: no ack
+filler, no BUSY, no follow-up window, the room held (`_delivering`) for
+each sentence so the wake word does not hear the voice. Muted wins; no
+spoke or no player means text alone; a sentence that will not play
+silences the rest of that reply without cutting the text. `[web]
+speak_back` (default off) is the starting state; the switch is not
+persisted.
+
+**Probes.** `probe_turns.py` 51 → 63 (the sink, the command both ways,
+muted, no player, a stopped sentence, the hub's framing); `probe_spoke.py`
+44 → 50 (a web-lane turn end to end); `probe_wire.py` two samples;
+`probe_web.py --live` round-trips the chip.
+
+## 2026-09-04 — Apple's voice, streamed (native TTS)
+
+**Why.** Piper became the default by beating `say` on first-audio latency
+and on sound — but `say` had only ever been heard with a compact voice.
+macOS ships neural Premium voices (free, ~1 GB, under Accessibility →
+Spoken Content) that `say -o` renders no faster than the compact ones,
+because it writes a whole file before the first byte. Driven through
+AVSpeechSynthesizer's buffer callback instead, the same voices stream.
+
+**What.** `tts/native.py` and `tts/native/CielVoice.swift`: a small Swift
+helper, compiled once with `swiftc` (command-line tools suffice), cached
+under `~/.ciel/bin` by source hash, kept alive as a subprocess and driven
+over pipes — JSON lines in, framed PCM out, with begin/pcm/end/error
+frames per utterance and a cancel op for barge-in that drains to the
+utterance's end so the next sentence starts in sync. A voice is named
+(the best quality installed under that name wins) or given by identifier;
+`rate` in words per minute paces it like `say`. `engine = "native"`,
+`native_voice = "Jamie"`; the chain is now native → piper → `say`, and both
+warm-up fallbacks (pipeline and spoke) walk it rather than jumping to
+`say`. The hub and the interview room keep piper.
+
+**Measured** (`probe_native_voice.py --ab`, Jamie Premium vs
+`en_GB-alan-medium`, M-series Mac, warm): first audio 25–49 ms vs 41–100
+ms; a 5.5 s sentence in 117 ms vs 155 ms; the cold first utterance ~480 ms
+(the voice loading), paid once at warm-up. Sound is the user's call; the
+four A/B pairs are the probe's output.
+
+**Probes.** `probe_native_voice.py` (13): the build and its hash reuse,
+the voice and rate handshake, chunking and first-chunk latency, a barge-in
+followed by a clean sentence, the rate mapping, a missing voice as one
+clear error with the installed voices named. The spoke was switched to
+`native` and came back ready with Jamie.
+
+## 2026-09-04 — the spine under the point (Phase Space, second pass)
+
+**Why.** The first Phase Space was a latest-readings cache: `observe`
+replaced whatever was there, so a reading from the past could overwrite
+one from the present; a spoke could name any fact, including the hub's
+own; the ring's activity-only fetch erased the morning's readiness; a
+calendar read that failed became "nothing more today"; the block —
+place, presence, calendar, the ring — opened every turn, public
+channels included, with meeting titles written by whoever sent the
+invite sitting inside a block the prompt called the system's own; the
+file was rewritten every second and world-readable; and a write that
+failed was never retried. A review at `b6c3298` found all of it. This
+is the fix, and the spine the review asked for.
+
+**What.**
+
+- *Observations per source, reducers, ordering.* The table keeps the
+  latest observation from every source that has reported a name and a
+  reducer per name resolves the fact: newest wins by default (a tie
+  keeps the incumbent), the ring merges the day's numbers across reads,
+  an observation older than the one held from its source is refused,
+  and a candidate a day older than the fact is let go. `revision` —
+  changes only, persisted — and `observations(name)` are exposed.
+- *The door.* `RELAYED` names what a spoke may send up (place, sections,
+  the ring); the hub refuses a `fact` frame for anything else, stamps
+  `received_at`, and clamps an `observed_at` that runs ahead of it.
+- *Projections.* `render(public=…)` / `snapshot(public=…)` leave the
+  `PRIVATE` readings (presence, place, agenda, the ring) out of a public
+  channel's turn; `world_now` is scoped per turn. Outside strings
+  (`EXTERNAL`: agenda lines, section ids) render in “quotes” and the
+  block's rule says quotes mean reported, not instructed; the static
+  prompt section says the same and that what a public turn leaves out
+  is not to be repeated there from memory.
+- *Sources apart from facts.* `agenda_today()` answers None on a failed
+  read (EventKit, Google, the RPC, the executor); the refresher marks
+  the calendar source failed and leaves the reading standing, with a
+  ttl of two refreshes; `note_source`/`sources()` ride the `world` frame
+  and the file, and the Chart dims the NEXT chip and says why.
+- *The file and the history.* `world.json` is owner-only, written on a
+  change and at most every five minutes for a steady re-observation
+  (was: every second), carries the revision and the observations, and
+  stays dirty when a write fails. `world-history.jsonl` (owner-only,
+  bounded by `history_max_bytes`) gets one line per change.
+- *Vigil on the table.* Presence is observed once a second locally
+  (10 s ttl) and per heartbeat on the hub; the policy decides on the
+  table's resolved presence when fresh, the probe otherwise — the one
+  place a second device's reading will ever be folded in.
+- *The user's clock.* A top-level `timezone` sets the process zone at
+  startup, and the hub's unit sets `TZ`; the Azure box is UTC, and
+  every clock the hub spoke — the block, alarms, the brief's quiet
+  hours — was the box's.
+
+**Probes.** `probe_world.py` 72 → 121: ordering, the ring's reducer,
+projections and quoting, the file's mode and write cadence and failed
+write, the history and its bound, source health, the hub's ownership
+and clamp, a public Discord turn's block and tool scope, Vigil's
+presence, the calendar's failures. Every other probe unchanged and
+green (`probe_interview.py brief`'s "fifth session → 429" fails on the
+previous commit too). Owed: revision-named preconditions on actions
+(nothing consumes `revision` yet); the deployed hub needs the unit's
+`TZ` (daemon-reload + restart) and `timezone` in its config.
+
 ## 2026-09-04 — one point that says where everything is (Phase Space)
 
 **Why.** What Ciel knew about the world was scattered by producer, each

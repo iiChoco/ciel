@@ -8,6 +8,7 @@ import dataclasses
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", help="override the Claude model")
     parser.add_argument("--voice", help="override the TTS voice")
     parser.add_argument(
-        "--tts", choices=["say", "piper"], help="override the speech engine"
+        "--tts", choices=["say", "piper", "native"], help="override the speech engine"
     )
     parser.add_argument(
         "--indicator",
@@ -150,6 +151,12 @@ def main(argv: list[str] | None = None) -> int:
     _check_auth()
 
     config = _apply_overrides(load_config(), args)
+    if config.timezone:
+        # Before the first clock is read: the hub's host is UTC, and every
+        # time the runtime speaks or compares is meant in the user's zone.
+        os.environ["TZ"] = config.timezone
+        if hasattr(time, "tzset"):
+            time.tzset()
     if not args.verbose:
         # -v forces DEBUG; otherwise config.log_level (into which load_config
         # folds CIEL_LOG_LEVEL) sets the level. basicConfig above already
