@@ -86,7 +86,10 @@ from ciel.schedule import Snapshot, Source, State, pick_next
 from ciel.commands import Command, match as match_command
 from ciel.timers import Timer, announcement, spoken_clock, spoken_duration
 from ciel.transcript import Transcript
-from ciel.turn import TurnRequest, TurnSink, lane_spec, prompt_note
+from ciel.turn import TurnRequest, TurnSink, lane_spec, prompt_note, owner_origin
+from ciel.tasks import Origin
+from ciel.task_controls import TaskController
+from ciel.brain.tools.tasks import bind_tasks
 from ciel.ui.indicator import Indicator, TeeIndicator, build_indicator
 
 if TYPE_CHECKING:
@@ -966,6 +969,10 @@ class Pipeline:
             and (config.shell.enabled or config.files.enabled),
             mac_snapshot=self._remote.mac.snapshot_file if self._remote is not None else None,
         )
+        self._task_controller = TaskController(config.tasks, self._journal)
+        bind_tasks(self._task_controller, self._brain._task_authority.capture)
+        if self._web_link is not None:
+            self._web_link.bind_tasks(self._task_controller)
         # Memory writes carry provenance: "proactive" when a Vigil turn with
         # nobody around is writing, "conversation" otherwise — reflection
         # included, since it distills a conversation the user was part of.
@@ -1059,6 +1066,8 @@ class Pipeline:
         self._remote_link: DiscordLink | None = (
             DiscordLink(config.discord) if config.discord.enabled else None
         )
+        if self._remote_link is not None:
+            self._remote_link.task_owner = config.tasks.owner
         # Where the user is: the tool works with or without Vigil (it reads
         # on demand); the watcher below only exists with it.
         self._locator: Locator | None = (
@@ -1504,7 +1513,7 @@ class Pipeline:
             self._barge_run = 0
             item = server.pop_voice()
             assert item is not None  # pending was just checked
-            self._turn = asyncio.create_task(self._handle_voice_wire_turn(item[1]))
+            self._turn = asyncio.create_task(self._handle_voice_wire_turn(item[1], origin=getattr(item, "origin", None)))
             return True
 
         if source is Source.TYPED:
@@ -1541,7 +1550,7 @@ class Pipeline:
             batch = self._web_link.pop_batch()
             assert batch is not None  # pending was just checked
             line, _channel = batch
-            self._turn = asyncio.create_task(self._handle_web_turn(line))
+            self._turn = asyncio.create_task(self._handle_web_turn(line, origin=getattr(batch, "origin", None)))
             return True
 
         if source is Source.REMOTE:
@@ -1565,7 +1574,7 @@ class Pipeline:
             assert batch is not None  # pending was just checked
             line, channel = batch
             self._turn = asyncio.create_task(
-                self._handle_remote_turn(line, channel)
+                self._handle_remote_turn(line, channel, origin=getattr(batch, "origin", None))
             )
             return True
 
@@ -1810,7 +1819,7 @@ class Pipeline:
                 self._turn.cancel()
             await self._shutdown()
 
-    async def _handle_voice_wire_turn(self, text: str) -> None:
+    async def _handle_voice_wire_turn(self, text: str, *, origin: Origin | None = None) -> None:
         """One spoken turn that arrived from the spoke — the voice lane
         with the room one hop away. The guard ``_handle_turn`` keeps
         around the STT prelude lives here instead: a failed turn is
@@ -1820,7 +1829,7 @@ class Pipeline:
         sink = _WireSink(self, server, secrets.token_urlsafe(6))
         try:
             await self._run_turn(
-                TurnRequest(lane="voice", text=text, arrival_wall=time.time()),
+                TurnRequest(lane="voice", text=text, arrival_wall=time.time(), origin=origin),
                 sink,
             )
         except Exception:
@@ -2011,7 +2020,8 @@ class Pipeline:
             assert text is not None
 
             await self._run_turn(
-                TurnRequest(lane="voice", text=text, arrival_wall=time.time()),
+                TurnRequest(lane="voice", text=text, arrival_wall=time.time(),
+                            origin=None if self._config.voice.diagnostic or (self._config.voice.enabled and self._speaker is None) else owner_origin(self._config.tasks.owner, "voice")),
                 _VoiceSink(self, player),
             )
         except Exception:
@@ -2067,11 +2077,11 @@ class Pipeline:
         answers it just as well.
         """
         await self._run_turn(
-            TurnRequest(lane="typed", text=text, arrival_wall=time.time()),
+            TurnRequest(lane="typed", text=text, arrival_wall=time.time(), origin=owner_origin(self._config.tasks.owner, "typed")),
             _TextSink(self),
         )
 
-    async def _handle_remote_turn(self, text: str, channel=None) -> None:
+    async def _handle_remote_turn(self, text: str, channel=None, *, origin: Origin | None = None) -> None:
         """One turn that arrived over the Discord link (Parallel Transport).
 
         The typed lane's remote image: same brain, same session, same
@@ -2102,6 +2112,7 @@ class Pipeline:
             TurnRequest(
                 lane="discord",
                 text=text,
+                origin=origin,
                 channel=channel,
                 public=getattr(channel, "guild", None) is not None,
                 arrival_wall=time.time(),
@@ -2109,7 +2120,7 @@ class Pipeline:
             _DiscordSink(self, send_here),
         )
 
-    async def _handle_web_turn(self, text: str) -> None:
+    async def _handle_web_turn(self, text: str, *, origin: Origin | None = None) -> None:
         """One turn that arrived through the GUI (Chart).
 
         The typed lane with the room's quietness made explicit: same
@@ -2127,7 +2138,7 @@ class Pipeline:
         """
         assert self._web_link is not None
         await self._run_turn(
-            TurnRequest(lane="web", text=text, arrival_wall=time.time()),
+            TurnRequest(lane="web", text=text, arrival_wall=time.time(), origin=origin),
             self._web_sink(),
         )
 
@@ -2224,8 +2235,13 @@ class Pipeline:
                 # generator — without an explicit close, the lock stays
                 # held until garbage collection, and the next turn (or a
                 # reflection) deadlocks behind it.
+                turn_args = {}
+                if req.public:
+                    turn_args['public_audience'] = f'discord:{getattr(req.channel, "id", id(req.channel))}'
+                elif req.origin is not None:
+                    turn_args['origin'] = req.origin
                 stream = await stack.enter_async_context(
-                    aclosing(self._brain.ask(prompt))
+                    aclosing(self._brain.ask(prompt, **turn_args))
                 )
                 async for kind, sentence in stream:
                     if not sink.gate():
@@ -3645,6 +3661,7 @@ class Pipeline:
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     async def _startup(self) -> None:
+        await self._task_controller.start()
         started = time.monotonic()
         # Whisper, the wake model, and the Agent SDK subprocess all take
         # seconds to start; do them together so startup is bounded by the
@@ -3754,6 +3771,8 @@ class Pipeline:
             self._agenda_task.cancel()
             closers.append(asyncio.gather(self._agenda_task, return_exceptions=True))
         await asyncio.gather(*closers, return_exceptions=True)
+        await self._task_controller.close()
+        bind_tasks(None, lambda: None)
         if self._world is not None:
             self._world.flush()
         if self._transcript is not None:

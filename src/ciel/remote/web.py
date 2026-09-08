@@ -148,6 +148,10 @@ from ciel.config import HubConfig, WebConfig
 if TYPE_CHECKING:
     from ciel.interview.app import InterviewApp
 
+from ciel.turn import Ingress, TurnBatch, owner_origin, pop_turn_batch
+from ciel.task_controls import TaskController
+from ciel.task_context import TaskBinding
+
 log = logging.getLogger(__name__)
 
 _PAGE = Path(__file__).with_name("chart.html")
@@ -285,6 +289,9 @@ class WebLink:
         interview: "InterviewApp | None" = None,
     ) -> None:
         self._config = config
+        self.task_owner = "local-owner"
+        self._task_controller: TaskController | None = None
+        self._task_requests: set[asyncio.Task[None]] = set()
         self._hub = hub or HubConfig()
         self._interview = interview
         """The interview room, when the hub serves one: its routes ride
@@ -304,7 +311,7 @@ class WebLink:
         self.stir = asyncio.Event()
         """Set on every inbound frame and every client change — the
         hub's arbiter waits on it instead of polling the queues."""
-        self._queue: deque[tuple[float, str, None]] = deque()
+        self._queue: deque[Ingress] = deque()
         """Inbound turns awaiting the frame loop, oldest first:
         ``(arrival, text, None)`` — the Discord deque's shape, with the
         channel pinned to None because every reply broadcasts to every
@@ -344,28 +351,59 @@ class WebLink:
         The same ownership rule as on_mute — the re-exec belongs to the
         pipeline's frame loop; the link only relays the request."""
 
+    def bind_tasks(self, controller: TaskController) -> None:
+        self._task_controller = controller
+        self.task_owner = controller.config.owner
+
+    @property
+    def task_token_required(self) -> bool:
+        return self._hub.require_token or bool(self._task_controller and self._task_controller.config.enabled and self.bind_host not in _LOOPBACK_HOSTS)
+
+    def _task_request(self, frame: dict[str, Any], ws: Any) -> None:
+        if ws not in self._peers or ws not in self._clients:
+            return
+        controller = self._task_controller
+        if controller is None or len(self._task_requests) >= max(1, controller.config.max_pending_controls):
+            self._send_to(ws, {'type': 'task.result', 'request_id': frame['request_id'], 'ok': False, 'data': {}, 'error': 'Task controls are unavailable or busy; refresh and retry.'})
+            return
+        task = asyncio.create_task(self._run_task_request(controller, frame, ws))
+        self._task_requests.add(task)
+        task.add_done_callback(self._task_requests.discard)
+
+    async def _run_task_request(self, controller: TaskController, frame: dict[str, Any], ws: Any) -> None:
+        response = {'type': 'task.result', 'request_id': frame['request_id'], 'ok': True, 'data': {}}
+        try:
+            binding = TaskBinding(owner_origin(self.task_owner, 'web', frame['request_id'], namespace='chart-control'), 0, 0)
+            operation = frame['operation']
+            if operation in ('list', 'inspect'):
+                response['data'] = await controller.view(binding, frame.get('task_id') if operation == 'inspect' else None)
+            else:
+                response['data'] = await controller.apply(binding, operation, frame, revision=frame['revision'])
+                for peer in tuple(self._peers):
+                    if peer is not getattr(self, '_spoke', None):
+                        self._send_to(peer, {'type': 'task.changed'})
+        except (ValueError, RuntimeError) as exc:
+            response.update(ok=False, error=str(exc))
+        except Exception:
+            log.exception('task request failed')
+            response.update(ok=False, error='Task controls failed; refresh to see the current record.')
+        self._send_to(ws, response)
+
     # ── inbound: the turn queue ──────────────────────────────────────────────
 
     @property
     def pending(self) -> bool:
         return bool(self._queue)
 
-    def peek(self) -> tuple[float, str, None] | None:
+    def peek(self) -> Ingress | None:
         return self._queue[0] if self._queue else None
 
-    def pop(self) -> tuple[float, str, None] | None:
+    def pop(self) -> Ingress | None:
         return self._queue.popleft() if self._queue else None
 
-    def pop_batch(self) -> tuple[str, None] | None:
-        """Drain everything queued into one turn — the Discord lane's
-        burst-coalescing without the channel split, since every chart is
-        the same conversation."""
-        if not self._queue:
-            return None
-        lines = [self._queue.popleft()[1]]
-        while self._queue:
-            lines.append(self._queue.popleft()[1])
-        return "\n".join(lines), None
+    def pop_batch(self) -> TurnBatch | None:
+        """Preserve admitted identity while coalescing one contiguous audience."""
+        return pop_turn_batch(self._queue)
 
     # ── outbound: the view taps ──────────────────────────────────────────────
 
@@ -564,6 +602,11 @@ class WebLink:
         log.info("web GUI at %s", self.url)
 
     async def close(self) -> None:
+        for task in tuple(self._task_requests):
+            task.cancel()
+        if self._task_requests:
+            await asyncio.gather(*self._task_requests, return_exceptions=True)
+        self._task_requests.clear()
         if self._interview is not None:
             with contextlib.suppress(Exception):
                 await self._interview.close()
@@ -644,7 +687,7 @@ class WebLink:
             first,
             loopback=loopback_peer(peer),
             token=self._token,
-            require_token=self._hub.require_token,
+            require_token=self.task_token_required,
         )
         if not verdict.ok:
             log.warning(
@@ -720,6 +763,7 @@ class WebLink:
             "epoch": self._ring.epoch,
             "seq": self._ring.seq,
             "acks": True,
+            "tasks": True,
             "resumed": replay is not None,
             "muted": self._muted,
             "speakback": self._speak_back,
@@ -764,6 +808,9 @@ class WebLink:
                 # the socket already has its welcome. Ignored, not
                 # refused, so a client that re-sends on a hiccup is fine.
                 return
+            if kind == "task.request":
+                self._task_request(frame, ws)
+                return
             if kind == "say":
                 seq = frame.get("seq")
                 if isinstance(seq, int):
@@ -780,7 +827,11 @@ class WebLink:
                     return
                 if len(text) > self._config.max_inbound_chars:
                     text = text[: self._config.max_inbound_chars]
-                self._queue.append((time.monotonic(), text, None))
+                identity = frame.get('request_id')
+                origin = None
+                if ws in self._peers and isinstance(identity, str) and identity:
+                    origin = owner_origin(self.task_owner, 'web', identity, namespace='chart')
+                self._queue.append(Ingress(time.monotonic(), text, None, origin))
             elif kind == "ping":
                 self._send_to(ws, {"type": "pong"})
             elif kind == "mute":

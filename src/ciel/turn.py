@@ -25,6 +25,13 @@ which is the point of cutting here.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import deque
+from collections.abc import Iterator
+import hashlib
+import json
+import secrets
+
+from ciel.tasks import Origin
 from typing import Any, Protocol
 
 _REMOTE_NOTE = (
@@ -96,6 +103,87 @@ class TurnRequest:
     channel: Any = None
     public: bool = False
     arrival_wall: float | None = None
+    origin: Origin | None = None
+
+
+def owner_origin(owner: str, lane: str, identity: str | None = None, *, namespace: str = 'local', private: bool = True) -> Origin:
+    """Mint local input once; remote callers retain their admitted ingress ID."""
+    identity = identity or secrets.token_urlsafe(18)
+    if not owner.strip() or len(identity) > 256 or not identity.strip() or len(namespace) > 256:
+        raise ValueError('owner and bounded ingress identity are required')
+    ingress = json.dumps((lane, namespace, identity), separators=(',', ':'))
+    request = hashlib.sha256(json.dumps((owner, lane, [ingress]), separators=(',', ':')).encode()).hexdigest()
+    return Origin(owner, request, lane, private=private, ingress_ids=(ingress,))
+
+
+@dataclass(frozen=True, eq=False)
+class Ingress:
+    """Trusted identity accompanies text; tuple access keeps confirmation readers simple."""
+    arrival: float
+    text: str
+    channel: Any = None
+    origin: Origin | None = None
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter((self.arrival, self.text, self.channel))
+
+    def __getitem__(self, index: int) -> Any:
+        return (self.arrival, self.text, self.channel)[index]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Ingress):
+            return tuple(self) == tuple(other) and self.origin == other.origin
+        return tuple(self) == other
+
+
+@dataclass(frozen=True, eq=False)
+class TurnBatch:
+    text: str
+    channel: Any
+    origin: Origin | None
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter((self.text, self.channel))
+
+    def __getitem__(self, index: int) -> Any:
+        return (self.text, self.channel)[index]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, TurnBatch):
+            return tuple(self) == tuple(other) and self.origin == other.origin
+        return tuple(self) == other
+
+
+def pop_turn_batch(queue: deque) -> TurnBatch | None:
+    """Coalesce only matching authority and audience, retaining ordered message IDs."""
+    if not queue:
+        return None
+    def record(raw: Any) -> Ingress:
+        return raw if isinstance(raw, Ingress) else Ingress(*raw)
+    def authority(item: Ingress) -> Any:
+        origin = item.origin
+        if origin is None:
+            return None
+        namespace = json.loads(origin.ingress_ids[0])[1]
+        return origin.owner, origin.lane, origin.attended, origin.private, namespace
+    first = record(queue.popleft())
+    lines = [first.text]
+    ids = list(first.origin.ingress_ids) if first.origin else []
+    while queue:
+        next_item = record(queue[0])
+        if next_item.channel != first.channel or authority(next_item) != authority(first):
+            break
+        queue.popleft()
+        incoming = list(next_item.origin.ingress_ids) if next_item.origin else []
+        if incoming and all(identity in ids for identity in incoming):
+            continue
+        lines.append(next_item.text)
+        ids.extend(identity for identity in incoming if identity not in ids)
+    origin = first.origin
+    if origin is not None:
+        request = hashlib.sha256(json.dumps((origin.owner, origin.lane, ids), separators=(',', ':')).encode()).hexdigest()
+        origin = Origin(origin.owner, request, origin.lane, origin.attended, origin.private, tuple(ids))
+    return TurnBatch('\n'.join(lines), first.channel, origin)
 
 
 @dataclass(frozen=True)

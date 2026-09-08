@@ -42,6 +42,8 @@ from typing import Any, AsyncIterator
 
 from ciel.config import DiscordConfig
 
+from ciel.turn import Ingress, TurnBatch, owner_origin, pop_turn_batch
+
 log = logging.getLogger(__name__)
 
 _DISCORD_MESSAGE_LIMIT = 2000
@@ -107,7 +109,8 @@ class DiscordLink:
 
     def __init__(self, config: DiscordConfig) -> None:
         self._config = config
-        self._queue: deque[tuple[float, str, Any]] = deque()
+        self.task_owner = "local-owner"
+        self._queue: deque[Ingress] = deque()
         """Inbound turns awaiting the frame loop, oldest first:
         ``(arrival, text, channel)``. The monotonic arrival stamp is the
         typed deque's contract, for the typed deque's reason — it lets a
@@ -135,30 +138,15 @@ class DiscordLink:
     def pending(self) -> bool:
         return bool(self._queue)
 
-    def peek(self) -> tuple[float, str, Any] | None:
+    def peek(self) -> Ingress | None:
         return self._queue[0] if self._queue else None
 
-    def pop(self) -> tuple[float, str, Any] | None:
+    def pop(self) -> Ingress | None:
         return self._queue.popleft() if self._queue else None
 
-    def pop_batch(self) -> tuple[str, Any] | None:
-        """Drain the head run of same-channel messages into one turn.
-
-        People text in bursts — "hey" / "quick question" / the question —
-        and three brain turns for one thought would answer the greeting
-        with a paragraph. Only a *contiguous same-channel* run coalesces:
-        a DM and a server mention are different conversations with
-        different audiences, and their replies must not fuse. Returns
-        ``(text, channel)``; anything arriving after simply becomes the
-        next turn.
-        """
-        if not self._queue:
-            return None
-        _ts, text, channel = self._queue.popleft()
-        lines = [text]
-        while self._queue and _same_channel(self._queue[0][2], channel):
-            lines.append(self._queue.popleft()[1])
-        return "\n".join(lines), channel
+    def pop_batch(self) -> TurnBatch | None:
+        """Preserve admitted identity while coalescing one contiguous audience."""
+        return pop_turn_batch(self._queue)
 
     # ── outbound ─────────────────────────────────────────────────────────────
 
@@ -412,7 +400,8 @@ class DiscordLink:
             if len(text) > self._config.max_inbound_chars:
                 text = text[: self._config.max_inbound_chars]
             self._queue.append(
-                (0.0 if backfill else time.monotonic(), text, message.channel)
+                Ingress(0.0 if backfill else time.monotonic(), text, message.channel,
+                        owner_origin(self.task_owner, 'discord', str(message.id), namespace=str(author.id), private=message.guild is None))
             )
         except Exception:  # noqa: BLE001
             log.exception("discord message handling failed")

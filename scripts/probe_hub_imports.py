@@ -7,7 +7,9 @@ no Metal, no pyobjc, no EventKit. This runs a child interpreter with an
 import hook that refuses every one of those modules by name — the
 audio stack, the Mac frameworks, the speech models — and then imports
 the hub's modules and constructs ``Pipeline(config, role="hub")`` with a
-throwaway state directory. Construction is the whole audit: it builds
+throwaway state directory. Construction opens no task store; a separate async fixture opens and closes
+the enabled store and retains the disabled case. Every default home path,
+including memory, resolves inside the temporary fixture. Construction builds: it builds
 the tool registry, the brain (unconnected), the broker, the server, and
 Vigil's queue and policy, which is everything the hub touches before
 it opens a socket. A module-level import of anything Mac-shaped fails
@@ -15,6 +17,8 @@ here before it fails on the server.
 
 The spoke is expected to fail the same test, and is checked to.
 """
+
+from __future__ import annotations
 
 import subprocess
 import sys
@@ -52,19 +56,42 @@ if what == "hub":
     from pathlib import Path
     from ciel.config import Config, ProactiveConfig, ShellConfig, FilesConfig
     from ciel.pipeline import Pipeline
-    tmp = Path(tempfile.mkdtemp())
-    cfg = replace(
-        Config(), state_dir=tmp,
-        proactive=replace(ProactiveConfig(), enabled=True, state_file=tmp / "p.json",
-                          watches_file=tmp / "w.json", brief_time="08:30"),
-        shell=replace(ShellConfig(), enabled=True),
-        files=replace(FilesConfig(), enabled=True, workspace=tmp / "ws"),
-    )
-    p = Pipeline(cfg, role="hub")
-    assert p._stt is None and p._tts is None and p._wake is None
-    assert p._remote is not None and p._presence is p._remote.presence
-    names = [t.name for t in __import__("ciel.brain.tools", fromlist=["TOOLS"]).TOOLS]
-    print("HUB OK", len(names), "tools registered in the catalog")
+    import asyncio
+    from unittest.mock import patch
+    from ciel.config import TasksConfig
+    with tempfile.TemporaryDirectory(prefix="ciel-hub-imports-") as fixture:
+        tmp = Path(fixture)
+        with patch.object(Path, "home", return_value=tmp):
+            cfg = replace(
+                Config(), state_dir=tmp,
+                proactive=replace(ProactiveConfig(), enabled=True, state_file=tmp / "p.json",
+                                  watches_file=tmp / "w.json", brief_time="08:30"),
+                shell=replace(ShellConfig(), enabled=True),
+                files=replace(FilesConfig(), enabled=True, workspace=tmp / "ws"),
+                tasks=TasksConfig(enabled=True, directory=tmp / "tasks"),
+            )
+            assert cfg.memory.dir == tmp / ".ciel" / "memory"
+            p = Pipeline(cfg, role="hub")
+            assert p._stt is None and p._tts is None and p._wake is None
+            assert p._remote is not None and p._presence is p._remote.presence
+            assert p._task_controller.store is None and not cfg.tasks.directory.exists()
+            print("HUB CONSTRUCTION HAS NO TASK STORE")
+            async def lifecycle():
+                await p._task_controller.start()
+                assert p._task_controller.store is not None
+                await p._task_controller.close()
+                assert p._task_controller.store is None
+                print("HUB TASK STORE OPENS AND CLOSES")
+                disabled = Pipeline(replace(cfg, tasks=replace(cfg.tasks, enabled=False)), role="hub")
+                await disabled._task_controller.start()
+                assert disabled._task_controller.store is None
+                await disabled._task_controller.close()
+                print("HUB TASK STORE DISABLED")
+            asyncio.run(lifecycle())
+            names = [t.name for t in __import__("ciel.brain.tools", fromlist=["TOOLS"]).TOOLS]
+            print("HUB FIXTURE MEMORY IS PRIVATE TO THE PROBE")
+            print("HUB OK", len(names), "tools registered in the catalog")
+
 else:
     try:
         import ciel.spoke.frontend
@@ -93,6 +120,11 @@ def main() -> None:
     print(f"  {'ok  ' if ok else 'FAIL'} the hub imports and constructs with no Mac in it")
     if not ok:
         sys.exit(1)
+    for marker in ("HUB CONSTRUCTION HAS NO TASK STORE", "HUB TASK STORE OPENS AND CLOSES", "HUB TASK STORE DISABLED", "HUB FIXTURE MEMORY IS PRIVATE TO THE PROBE"):
+        if marker not in out:
+            print("FAIL", marker)
+            sys.exit(1)
+        print("  ok  ", marker.lower())
     print("\nthe spoke, same test")
     code, out = run("spoke")
     ok = code == 0 and "SPOKE REFUSED" in out
@@ -100,7 +132,7 @@ def main() -> None:
     print(f"  {'ok  ' if ok else 'FAIL'} the spoke needs the room's modules, as it should")
     if not ok:
         sys.exit(1)
-    print("\nall 2 checks passed")
+    print("\nall 6 checks passed")
 
 
 if __name__ == "__main__":

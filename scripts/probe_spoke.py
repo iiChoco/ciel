@@ -1,4 +1,6 @@
-"""Probe the spoke — the room's half, with a fake hub on the other end.
+"""Accepted speech carries owner-input policy; diagnostic bypass does not.
+
+Probe the spoke — the room's half, with a fake hub on the other end.
 
     uv run scripts/probe_spoke.py
 
@@ -16,6 +18,8 @@ a confirmation spoken and answered, and one that times out; a
 delivery rung and receipted; mute from the hub and from the sentinel;
 and the state machine's reports.
 """
+from __future__ import annotations
+
 
 import asyncio
 import sys
@@ -56,7 +60,8 @@ class FakeLink:
         self.frames.append(frame)
         return True
 
-    def say(self, text, lane="voice"):
+    def say(self, text, lane="voice", *, owner_input=False):
+        self.owner_input = owner_input
         self.says.append((text, lane))
         return self.connected
 
@@ -286,6 +291,19 @@ async def probe_voice_turn() -> None:
 
 
 async def probe_prelude() -> None:
+    s = make_spoke()
+    await s._handle_utterance(UTT)
+    check('ordinary accepted speech carries the owner-input policy to the hub', s._link.owner_input)
+    s = make_spoke()
+    s._config = replace(s._config, voice=replace(s._config.voice, diagnostic=True))
+    await s._handle_utterance(UTT)
+    check('diagnostic speaker bypass never claims task owner authority', not s._link.owner_input)
+    s = make_spoke()
+    s._config = replace(s._config, voice=replace(s._config.voice, enabled=True))
+    s._speaker = None
+    await s._handle_utterance(UTT)
+    check('an enabled speaker gate missing its profile cannot grant task authority', not s._link.owner_input)
+
     print("\nthe prelude: gate, hold, dismissal")
     s = make_spoke(recognized=False)
     await s._handle_utterance(UTT)

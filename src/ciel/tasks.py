@@ -2,8 +2,8 @@
 
 **A task is a mandate.** Its desired state, observations, scope, actions, and
 verification live together. Atlas remains the human-readable project context;
-this store holds the runtime's records. Stage one offers no model tools and
-executes no actions. Step kinds and owner/origin arguments must come from trusted runtime
+this store holds the runtime's records. The store executes no actions; owner controls save requests and keep them
+waiting until an executor is available. Step kinds and owner/origin arguments must come from trusted runtime
 context and a validated adapter when tools arrive, never from model claims.
 Recording dispatch intent is not an authorization grant.
 
@@ -49,6 +49,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, TypeVar
@@ -60,7 +61,9 @@ Phase = Literal['prepared', 'dispatched', 'observed', 'checkpointed', 'verified'
 WaitReason = Literal['owner', 'external', 'resource', 'reconciliation']
 _TERMINAL = frozenset(('done', 'failed', 'cancelled'))
 _NOTICE = frozenset(('waiting', 'paused', 'done', 'failed', 'cancelled'))
-_SCHEMA = 1
+_SCHEMA = 2
+RESOURCE_WAIT = "Saved; execution is unavailable."
+Fence = Callable[[], AbstractContextManager[None]]
 _APPLICATION = 0x4349454C
 _T = TypeVar('_T')
 
@@ -83,11 +86,14 @@ class TaskLimit(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Origin:
+    """A live private owner turn; attendance is not physical room presence."""
+
     owner: str
     request_id: str
     lane: Literal['voice', 'typed', 'web', 'discord']
     attended: bool = True
     private: bool = True
+    ingress_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +248,7 @@ class TaskStore:
         if self._closed:
             raise TaskStoreError('task store is closed')
         future = asyncio.get_running_loop().run_in_executor(self._executor, operation)
+        future.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         return await asyncio.shield(future)
 
     async def start(self, *, now: float | None = None) -> tuple[Task, ...]:
@@ -358,19 +365,34 @@ class TaskStore:
                 revision INTEGER NOT NULL, status TEXT NOT NULL, outcome TEXT NOT NULL,
                 detail TEXT NOT NULL, created_at REAL NOT NULL, UNIQUE(task_id,revision)
             );
+            CREATE TABLE ingress (
+                owner TEXT NOT NULL, ingress_id TEXT NOT NULL,
+                task_id TEXT NOT NULL REFERENCES tasks(id), PRIMARY KEY(owner,ingress_id)
+            );
+            CREATE TABLE questions (
+                id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+                revision INTEGER NOT NULL, prompt TEXT NOT NULL, choices_json TEXT NOT NULL,
+                step_json TEXT, answer TEXT, answered_revision INTEGER
+            );
+            CREATE TABLE bindings (
+                attempt_id TEXT NOT NULL REFERENCES attempts(id), task_revision INTEGER NOT NULL,
+                client_generation TEXT NOT NULL, tool_use_id TEXT NOT NULL, journal_ref TEXT,
+                PRIMARY KEY(client_generation,tool_use_id)
+            );
             PRAGMA application_id={_APPLICATION};
             PRAGMA user_version={_SCHEMA};
             COMMIT;
         ''')
 
-    def _transaction(self, operation: Callable[[], _T]) -> _T:
+    def _transaction(self, operation: Callable[[], _T], fence: Fence | None = None) -> _T:
         if self._db is None or self._poisoned:
             raise TaskStoreError('task store is not available')
         try:
             self._db.execute('BEGIN IMMEDIATE')
-            result = operation()
-            self._db.execute('COMMIT')
-            return result
+            with fence() if fence else nullcontext():
+                result = operation()
+                self._db.execute('COMMIT')
+                return result
         except BaseException as exc:
             rollback_failed = False
             if self._db.in_transaction:
@@ -398,6 +420,10 @@ class TaskStore:
     def _validate_request(self, origin: Origin, spec: Specification, step: Step) -> None:
         _text(origin.owner, 'owner')
         _text(origin.request_id, 'request identity')
+        if not isinstance(origin.ingress_ids, tuple) or len(set(origin.ingress_ids)) != len(origin.ingress_ids):
+            raise ValueError('ingress identities must be a unique immutable tuple')
+        for identity in origin.ingress_ids:
+            _text(identity, 'ingress identity')
         if origin.attended is not True or origin.private is not True or origin.lane not in ('voice','typed','web','discord'):
             raise TaskConflict('only an attended private owner request may create task responsibility')
         _text(spec.outcome, 'outcome')
@@ -433,7 +459,7 @@ class TaskStore:
 
     def _task(self, row: sqlite3.Row) -> Task:
         request = json.loads(row['request_json'])
-        return Task(row['id'], Origin(**request['origin']), _spec(json.loads(row['specification_json'])),
+        return Task(row['id'], Origin(**{**request['origin'], 'ingress_ids': tuple(request['origin'].get('ingress_ids', ()))}), _spec(json.loads(row['specification_json'])),
                     _step(json.loads(row['step_json'])), row['status'], row['revision'],
                     row['attempts'], row['max_attempts'], row['polls'], row['max_polls'], row['evidence_max_age'], row['current_attempt'],
                     row['wait_reason'], row['detail'], row['eligible_at'], row['created_at'], row['updated_at'])
@@ -456,6 +482,9 @@ class TaskStore:
             'evidence': 'attempt_id criterion_id record_json',
             'transitions': 'task_id revision before_status after_status detail at',
             'outbox': 'id task_id revision status outcome detail created_at',
+            'ingress': 'owner ingress_id task_id',
+            'questions': 'id task_id revision prompt choices_json step_json answer answered_revision',
+            'bindings': 'attempt_id task_revision client_generation tool_use_id journal_ref',
         }
         for table, expected in columns.items():
             actual = [row['name'] for row in self._db.execute(f'PRAGMA table_info({table})')]
@@ -501,6 +530,35 @@ class TaskStore:
             elif task.status in ('running','verifying'):
                 raise TaskStoreError('task lost its current attempt')
 
+        for row in self._db.execute('SELECT * FROM ingress'):
+            task = self._get(row['owner'], row['task_id'])
+            if row['ingress_id'] not in task.origin.ingress_ids:
+                raise TaskStoreError('ingress identity does not belong to its request')
+        for row in self._db.execute('SELECT * FROM tasks'):
+            task = self._task(row)
+            ids = {r[0] for r in self._db.execute('SELECT ingress_id FROM ingress WHERE task_id=?', (task.id,))}
+            if ids != set(task.origin.ingress_ids):
+                raise TaskStoreError('request lost its ingress identities')
+        for row in self._db.execute('SELECT * FROM questions'):
+            task_row = self._db.execute('SELECT * FROM tasks WHERE id=?', (row['task_id'],)).fetchone()
+            task = self._task(task_row)
+            choices = json.loads(row['choices_json'])
+            if not choices or any(not isinstance(c, str) or not c.strip() for c in choices) or len(set(choices)) != len(choices):
+                raise TaskStoreError('owner question lost its choices')
+            _text(row['prompt'], 'question')
+            if not 0 < row['revision'] <= task.revision or ((row['answer'] is None) != (row['answered_revision'] is None)):
+                raise TaskStoreError('owner question has an inconsistent revision')
+            if row['answer'] is not None and (row['answer'] not in choices or not row['revision'] < row['answered_revision'] <= task.revision):
+                raise TaskStoreError('owner answer does not match its question')
+            if row['step_json'] is not None:
+                self._validate_step(task.specification, _step(json.loads(row['step_json'])))
+        for row in self._db.execute('SELECT * FROM bindings'):
+            attempt = self._attempt(row['attempt_id'])
+            if not 0 < row['task_revision'] <= attempt.task_revision:
+                raise TaskStoreError('tool binding changed its attempt revision')
+            _text(row['client_generation'], 'client generation')
+            _text(row['tool_use_id'], 'tool-use identity')
+
     def _event(self, task: Task, before: str | None) -> None:
         assert self._db is not None
         self._db.execute('INSERT INTO transitions VALUES(?,?,?,?,?,?)', (task.id, task.revision, before, task.status, task.detail, task.updated_at))
@@ -534,28 +592,52 @@ class TaskStore:
             raise TaskConflict('attempt is no longer current')
         return task
 
-    async def create(self, origin: Origin, specification: Specification, step: Step, *, now: float | None = None) -> Task:
+    async def create(self, origin: Origin, specification: Specification, step: Step, *, now: float | None = None,
+                     resource_wait: bool = False, fence: Fence | None = None, record: Callable[[Task], None] | None = None) -> Task:
         self._validate_request(origin, specification, step)
         data = self._bounded({'origin':asdict(origin), 'specification':asdict(specification), 'step':asdict(step)})
         stamp = _clock(now)
+        applied = False
         def write() -> Task:
+            nonlocal applied
             assert self._db is not None
             row = self._db.execute('SELECT * FROM tasks WHERE owner=? AND request_id=?', (origin.owner,origin.request_id)).fetchone()
             if row is not None:
                 if row['request_json'] != data:
                     raise TaskConflict('originating request was reused for different work')
                 return self._task(row)
+            matches = [self._db.execute('SELECT task_id FROM ingress WHERE owner=? AND ingress_id=?',
+                       (origin.owner, identity)).fetchone() for identity in origin.ingress_ids]
+            found = {r[0] for r in matches if r is not None}
+            if found:
+                if len(found) != 1 or any(r is None for r in matches):
+                    raise TaskConflict('this batch overlaps a saved request; repeat the new part on its own')
+                existing = self._get(origin.owner, next(iter(found)))
+                original = json.loads(self._db.execute('SELECT request_json FROM tasks WHERE id=?', (existing.id,)).fetchone()[0])
+                if original['specification'] != json.loads(_json(asdict(specification))) or original['step'] != json.loads(_json(asdict(step))):
+                    raise TaskConflict('originating request was reused for different work')
+                return existing
             count = self._db.execute("SELECT count(*) FROM tasks WHERE status NOT IN ('done','failed','cancelled')").fetchone()[0]
             if count >= self._config.max_active:
                 raise TaskLimit('active task allowance exhausted')
+            applied = True
             task_id = uuid.uuid4().hex
             self._db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                              (task_id,origin.owner,origin.request_id,data,self._bounded(asdict(specification)),self._bounded(asdict(step)), 'queued',1,0,
                               self._config.max_attempts,0,self._config.max_polls,self._config.evidence_max_age_s,None,None,'created',stamp,stamp,stamp))
             task = self._get(origin.owner,task_id)
             self._event(task,None)
+            for identity in origin.ingress_ids:
+                self._db.execute('INSERT INTO ingress VALUES(?,?,?)', (origin.owner, identity, task.id))
+            if resource_wait:
+                task = self._advance(task, 'waiting', stamp, detail=RESOURCE_WAIT, wait_reason='resource')
             return task
-        return await self._run(lambda: self._transaction(write))
+        def execute() -> Task:
+            result = self._transaction(write, fence)
+            if applied and record is not None:
+                record(result)
+            return result
+        return await self._run(execute)
 
     async def get(self, owner: str, task_id: str) -> Task:
         return await self._run(lambda: self._transaction(lambda: self._get(owner,task_id)))
@@ -716,39 +798,147 @@ class TaskStore:
         return await self._control(owner,task_id,revision,'failed',_clock(now),detail)
 
     async def _control(self, owner: str, task_id: str, revision: int, status: Status, now: float, detail: str | None = None) -> Task:
-        def write() -> Task:
-            assert self._db is not None
-            task = self._get(owner,task_id,revision)
-            if task.status in _TERMINAL or task.status == status:
-                raise TaskConflict('task is already terminal or in that state')
-            uncertain = task.wait_reason == 'reconciliation'
-            if task.current_attempt:
-                attempt = self._attempt(task.current_attempt)
-                uncertain |= attempt.phase == 'unknown' or (attempt.phase in ('dispatched','observed') and attempt.step.kind == 'mutation')
-                if attempt.phase in ('prepared','dispatched','observed'):
-                    self._db.execute('UPDATE attempts SET phase=?,updated_at=? WHERE id=?',('unknown' if uncertain else 'interrupted',now,attempt.id))
-                    self._db.execute('UPDATE tasks SET attempts=attempts+1 WHERE id=?', (task.id,))
-            return self._advance(task,status,now,detail='in-flight action needs reconciliation' if uncertain else (detail or status),
-                                 wait_reason='reconciliation' if uncertain else None)
-        return await self._run(lambda: self._transaction(write))
+        return await self._run(lambda: self._transaction(lambda: self._control_now(owner, task_id, revision, status, now, detail)))
+
+    def _control_now(self, owner: str, task_id: str, revision: int | None, status: Status, now: float, detail: str | None = None) -> Task:
+        assert self._db is not None
+        task = self._get(owner,task_id,revision)
+        if task.status in _TERMINAL or task.status == status:
+            raise TaskConflict('task is already terminal or in that state')
+        uncertain = task.wait_reason == 'reconciliation'
+        if task.current_attempt:
+            attempt = self._attempt(task.current_attempt)
+            uncertain |= attempt.phase == 'unknown' or (attempt.phase in ('dispatched','observed') and attempt.step.kind == 'mutation')
+            if attempt.phase in ('prepared','dispatched','observed'):
+                self._db.execute('UPDATE attempts SET phase=?,updated_at=? WHERE id=?',('unknown' if uncertain else 'interrupted',now,attempt.id))
+                self._db.execute('UPDATE tasks SET attempts=attempts+1 WHERE id=?', (task.id,))
+        return self._advance(task,status,now,detail='in-flight action needs reconciliation' if uncertain else (detail or status),
+                             wait_reason='reconciliation' if uncertain else ('owner' if task.wait_reason == 'owner' and status == 'paused' else None))
 
     async def resume(self, owner: str, task_id: str, revision: int, *, now: float | None = None) -> Task:
         stamp = _clock(now)
+        return await self._run(lambda: self._transaction(lambda: self._resume_now(owner, task_id, revision, stamp)))
+
+    def _resume_now(self, owner: str, task_id: str, revision: int | None, stamp: float, *, execution: bool = True) -> Task:
+        task = self._get(owner,task_id,revision)
+        if task.status not in ('paused','waiting','failed') or task.wait_reason == 'reconciliation':
+            raise TaskConflict('task cannot resume without reconciliation or a resumable state')
+        assert self._db is not None
+        question = self._db.execute('SELECT id FROM questions WHERE task_id=? AND answer IS NULL ORDER BY revision DESC LIMIT 1', (task_id,)).fetchone()
+        if task.wait_reason == 'owner' and question is not None:
+            if task.status != 'paused':
+                raise TaskConflict('answer the waiting question before resuming')
+            task = self._advance(task, 'waiting', stamp, detail=task.detail, wait_reason='owner')
+            self._db.execute('UPDATE questions SET revision=? WHERE id=?', (task.revision, question['id']))
+            return task
+        if task.status == 'failed':
+            count = self._db.execute("SELECT count(*) FROM tasks WHERE status NOT IN ('done','failed','cancelled')").fetchone()[0]
+            if count >= self._config.max_active:
+                raise TaskLimit('active task allowance exhausted')
+        if task.attempts >= task.max_attempts:
+            raise TaskLimit('task attempt allowance exhausted')
+        if task.polls >= task.max_polls:
+            raise TaskLimit('task polling allowance exhausted')
+        return self._advance(task, 'queued' if execution else 'waiting', stamp,
+                             detail='owner resumed' if execution else RESOURCE_WAIT,
+                             wait_reason=None if execution else 'resource', eligible_at=max(stamp,task.eligible_at))
+
+    async def ask_owner(self, owner: str, task_id: str, revision: int, prompt: str, choices: tuple[str, ...],
+                        *, step: Step | None = None, now: float | None = None) -> Task:
+        """A trusted runtime supplies exact answer choices and any scoped next step."""
+        _text(prompt, 'question')
+        if not isinstance(choices, tuple) or not choices or len(set(choices)) != len(choices):
+            raise ValueError('a question needs distinct answer choices')
+        for choice in choices:
+            _text(choice, 'answer choice')
+        stamp = _clock(now)
         def write() -> Task:
-            task = self._get(owner,task_id,revision)
-            if task.status not in ('paused','waiting','failed') or task.wait_reason == 'reconciliation':
-                raise TaskConflict('task cannot resume without reconciliation or a resumable state')
             assert self._db is not None
-            if task.status == 'failed':
-                count = self._db.execute("SELECT count(*) FROM tasks WHERE status NOT IN ('done','failed','cancelled')").fetchone()[0]
-                if count >= self._config.max_active:
-                    raise TaskLimit('active task allowance exhausted')
-            if task.attempts >= task.max_attempts:
-                raise TaskLimit('task attempt allowance exhausted')
-            if task.polls >= task.max_polls:
-                raise TaskLimit('task polling allowance exhausted')
-            return self._advance(task,'queued',stamp,detail='owner resumed',eligible_at=max(stamp,task.eligible_at))
+            task = self._get(owner, task_id, revision)
+            if task.status not in ('queued', 'waiting') or task.wait_reason == 'reconciliation':
+                raise TaskConflict('task cannot ask an owner question in this state')
+            if step is not None:
+                self._validate_step(task.specification, step)
+            task = self._advance(task, 'waiting', stamp, detail=prompt, wait_reason='owner')
+            self._db.execute('INSERT INTO questions VALUES(?,?,?,?,?,?,NULL,NULL)',
+                             (uuid.uuid4().hex, task.id, task.revision, prompt, self._bounded(choices),
+                              self._bounded(asdict(step)) if step else None))
+            return task
         return await self._run(lambda: self._transaction(write))
+
+    async def owner_control(self, owner: str, task_id: str, operation: str, *, revision: int | None = None,
+                            question_id: str | None = None, answer: str | None = None,
+                            fence: Fence | None = None, now: float | None = None, record: Callable[[Task], None] | None = None) -> Task:
+        """Owner controls never queue work; a missing revision means the current record."""
+        stamp = _clock(now)
+        def write() -> Task:
+            assert self._db is not None
+            task = self._get(owner, task_id, revision)
+            if operation in ('pause', 'cancel'):
+                return self._control_now(owner, task_id, task.revision, 'paused' if operation == 'pause' else 'cancelled', stamp)
+            if operation == 'resume':
+                return self._resume_now(owner, task_id, task.revision, stamp, execution=False)
+            if operation != 'answer':
+                raise ValueError('unknown owner control')
+            question = self._db.execute('SELECT * FROM questions WHERE id=? AND task_id=?', (question_id, task.id)).fetchone()
+            if (question is None or question['answer'] is not None or question['revision'] != task.revision
+                    or task.status != 'waiting' or task.wait_reason != 'owner'):
+                raise TaskConflict('the owner question is no longer waiting')
+            if answer not in json.loads(question['choices_json']):
+                raise TaskConflict('choose an exact answer; the question is still waiting')
+            if task.attempts >= task.max_attempts or task.polls >= task.max_polls:
+                raise TaskLimit('task allowance exhausted')
+            step = _step(json.loads(question['step_json'])) if question['step_json'] else task.next_step
+            self._validate_step(task.specification, step)
+            task = self._advance(task, 'waiting', stamp, detail=RESOURCE_WAIT, wait_reason='resource', step=step)
+            self._db.execute('UPDATE questions SET answer=?,answered_revision=? WHERE id=?', (answer, task.revision, question_id))
+            return task
+        def execute() -> Task:
+            result = self._transaction(write, fence)
+            if record is not None:
+                record(result)
+            return result
+        return await self._run(execute)
+
+    async def owner_view(self, owner: str, task_id: str | None = None, *, fence: Fence | None = None) -> dict[str, Any]:
+        """One bounded private snapshot; callers do not join separate stale reads."""
+        def read() -> dict[str, Any]:
+            assert self._db is not None
+            if task_id is None:
+                rows = self._db.execute('SELECT * FROM tasks WHERE owner=? ORDER BY updated_at DESC,id LIMIT ?',
+                                        (owner, self._config.max_active)).fetchall()
+                result = {'tasks': [asdict(self._task(row)) for row in rows]}
+            else:
+                task = self._get(owner, task_id)
+                questions = [dict(r) for r in self._db.execute('SELECT * FROM questions WHERE task_id=? ORDER BY revision DESC LIMIT 1', (task_id,))]
+                question = questions[0] if questions else None
+                if question:
+                    question['choices'] = json.loads(question.pop('choices_json'))
+                    question.pop('step_json')
+                result = {'task': asdict(task), 'question': question,
+                          'history': [dict(r) for r in self._db.execute('SELECT * FROM transitions WHERE task_id=? ORDER BY revision DESC LIMIT 64', (task_id,))],
+                          'evidence': [json.loads(r[0]) for r in self._db.execute('SELECT record_json FROM evidence WHERE attempt_id=(SELECT id FROM attempts WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT 1) LIMIT 64', (task.id,))]}
+            self._bounded(result)
+            return result
+        return await self._run(lambda: self._transaction(read, fence))
+
+    async def bind_call(self, owner: str, attempt: Attempt, generation: str, tool_use_id: str,
+                        journal_ref: str | None = None) -> None:
+        """Reserve correlation without deriving permission from a tool-use ID."""
+        _text(generation, 'client generation')
+        _text(tool_use_id, 'tool-use identity')
+        self._bounded((generation, tool_use_id, journal_ref))
+        def write() -> None:
+            assert self._db is not None
+            self._get(owner, attempt.task_id)
+            if self._attempt(attempt.id) != attempt:
+                raise TaskConflict('attempt binding is stale')
+            values = (attempt.id, attempt.task_revision, generation, tool_use_id, journal_ref)
+            row = self._db.execute('SELECT * FROM bindings WHERE client_generation=? AND tool_use_id=?', (generation, tool_use_id)).fetchone()
+            if row is not None and tuple(row) != values:
+                raise TaskConflict('tool call is already bound to another attempt')
+            self._db.execute('INSERT OR IGNORE INTO bindings VALUES(?,?,?,?,?)', values)
+        await self._run(lambda: self._transaction(write))
 
     def _recover(self, now: float) -> tuple[Task, ...]:
         assert self._db is not None

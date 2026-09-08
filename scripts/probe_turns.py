@@ -8,11 +8,13 @@ The lane registry's labels, notes, and delivery rules are load-bearing:
 renders rows by these exact strings, and the system notes are the
 model's only way to know where the user is. This probe drives every lane
 through the one shared skeleton with fakes and pins that contract —
-golden row sequences, prompt composition, reply routing, confirm-context
+golden row sequences, public client/history isolation, admitted task context, prompt composition, reply routing, confirm-context
 origins, the conversation flags, and the failure shapes. A regression
 here is a lane quietly changing meaning, which is exactly what the
 hub split must never do.
 """
+from __future__ import annotations
+
 
 import asyncio
 import sys
@@ -57,7 +59,8 @@ class FakeBrain:
         self.last_turn_cost_usd = 0.0
         self.last_reconnect_s = 0.0
 
-    async def ask(self, text):
+    async def ask(self, text, **context):
+        self.context = context
         self.prompts.append(text)
         for item in self.script:
             yield item
@@ -286,6 +289,54 @@ async def probe_labels_and_rows() -> None:
 
 
 # ── prompt composition ───────────────────────────────────────────────────────
+
+
+async def probe_public_sessions() -> None:
+    import tempfile
+    from unittest.mock import patch
+    from contextlib import aclosing
+    from claude_agent_sdk import ResultMessage
+    from ciel.brain.agent import Brain
+    from ciel.turn import owner_origin
+    instances = []
+    class Client:
+        def __init__(self, options=None):
+            self.options = options
+            self.cost = 0.0
+            self.closed = False
+            instances.append(self)
+        async def connect(self): pass
+        async def disconnect(self): self.closed = True
+        async def query(self, text): self.cost += 0.1
+        async def receive_response(self):
+            yield ResultMessage(subtype='success', duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1, session_id='public-fixture' if self.options else 'private-fixture', total_cost_usd=self.cost)
+    async def ask(brain, **kwargs):
+        async with aclosing(brain.ask('hello', **kwargs)) as stream:
+            async for _ in stream: pass
+    with tempfile.TemporaryDirectory() as tmp, patch.object(Path, 'home', return_value=Path(tmp)):
+        cfg = Config()
+        brain = Brain(cfg, memory_index_provider=lambda: 'private memory')
+        private = Client()
+        brain._client = private
+        with patch('ciel.brain.agent.ClaudeSDKClient', Client):
+            await ask(brain, origin=owner_origin(cfg.tasks.owner, 'typed'))
+            await ask(brain, public_audience='channel-one')
+            public = brain._public_brain._client
+            check('a public turn uses a distinct client without private tools or resume', public is not private and public.options.mcp_servers == {} and public.options.resume is None and 'private memory' not in public.options.system_prompt)
+            await ask(brain, public_audience='channel-one')
+            check('one public audience can reuse its own warm client', brain._public_brain._client is public)
+            await ask(brain, public_audience='channel-two')
+            check('another public audience cannot inherit the first history', public.closed and brain._public_brain._client is not public)
+            check('public replies leave the private session resume record alone', brain._session_id == 'private-fixture' and 'public-fixture' not in cfg.session_file.read_text())
+            await ask(brain, origin=owner_origin(cfg.tasks.owner, 'typed'))
+            check('returning to private conversation retains client and cost accounting', brain._client is private and abs(brain.last_turn_cost_usd - 0.1) < 0.0001)
+            last_public = brain._public_brain._client
+            await brain.close()
+            check('shutdown closes both public and private clients', last_public.closed and private.closed)
+    p = make_pipeline(STREAM)
+    origin = owner_origin(p._config.tasks.owner, 'web', 'fixture-message', namespace='chart')
+    await p._run_turn(TurnRequest(lane='web', text='hi', origin=origin), _TextSink(p))
+    check('the turn skeleton forwards immutable admitted identity to the Brain', p._brain.context['origin'] == origin)
 
 
 async def probe_prompts() -> None:
@@ -721,6 +772,7 @@ async def main() -> int:
     probe_registry()
     await probe_labels_and_rows()
     await probe_prompts()
+    await probe_public_sessions()
     await probe_confirm_contexts()
     await probe_escalation()
     await probe_voice()

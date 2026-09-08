@@ -1,5 +1,7 @@
 """Durable tasks keep their place without granting themselves new authority.
 
+Structured owner questions, atomic resource waits, whole-batch retries, tool/current
+and Chart/rendered revisions, and reserved tool bindings survive reopening.
 Temporary stores exercise request identity, owner scope, exact criteria,
 transitions, stale results, task allowances, private files, competing owners,
 and unsupported/corrupt databases. Held read locks exercise both a successful
@@ -192,14 +194,16 @@ async def probe_limits_and_storage(root: Path) -> None:
         await refused('a second runtime cannot own the same task store',second.start(),TaskStoreError)
         await second.close()
         check('a rejected competing owner does not harm the first', (await create(first)).status=='queued')
-    for variant in ('ahead','foreign','corrupt','empty','missing-table','bad-json','bad-polls','bad-attempts','changed-mandate'):
+    for variant in ('ahead','behind','foreign','corrupt','empty','missing-table','bad-json','bad-polls','bad-attempts','changed-mandate'):
         directory = root/variant
-        if variant in ('ahead','foreign','missing-table','bad-json','bad-polls','bad-attempts','changed-mandate'):
+        if variant in ('ahead','behind','foreign','missing-table','bad-json','bad-polls','bad-attempts','changed-mandate'):
             async with TaskStore(config(directory)) as store:
                 await create(store)
             with sqlite3.connect(directory/'tasks.sqlite3') as db:
                 if variant=='ahead':
                     db.execute('PRAGMA user_version=99')
+                elif variant=='behind':
+                    db.execute('PRAGMA user_version=1')
                 elif variant=='foreign':
                     db.execute('PRAGMA application_id=42')
                 elif variant=='missing-table':
@@ -525,6 +529,64 @@ async def probe_retarget(root: Path) -> None:
         await refused('a mutation observation cannot retarget a mandate', store.retarget(OWNER, task.id, task.revision, 'fixture:pr', 'head-2', now=105))
 
 
+async def probe_owner_controls(root: Path) -> None:
+    cfg = config(root / 'owner-controls')
+    origin = Origin(OWNER, 'batch', 'discord', ingress_ids=('dm:1', 'dm:2'))
+    async with TaskStore(cfg) as store:
+        task = await store.create(origin, SPEC, READ, resource_wait=True, now=100)
+        check('an owner DM saves directly into a resource wait', task.status == 'waiting' and task.wait_reason == 'resource' and task.revision == 2)
+        check('creation and its wait retain both history rows', len(await store.history(OWNER, task.id)) == 2)
+        check('an exact batch retry returns its existing task', (await store.create(origin, SPEC, READ, resource_wait=True)).id == task.id)
+        retry = replace(origin, request_id='subset', ingress_ids=('dm:2',))
+        check('a consumed message retried alone finds its original batch', (await store.create(retry, SPEC, READ, resource_wait=True)).id == task.id)
+        await refused('a partly consumed batch asks for the new part alone', store.create(replace(origin, request_id='overlap', ingress_ids=('dm:2', 'dm:3')), SPEC, READ, resource_wait=True))
+        await refused('a consumed message cannot silently change its mandate', store.create(retry, replace(SPEC, outcome='different'), READ, resource_wait=True))
+        paused = await store.owner_control(OWNER, task.id, 'pause')
+        await refused('a Chart control carries the revision it rendered', store.owner_control(OWNER, task.id, 'resume', revision=task.revision))
+        resumed = await store.owner_control(OWNER, task.id, 'resume')
+        check('a spoken resume uses the current record and remains resource waiting', resumed.revision == paused.revision + 1 and resumed.wait_reason == 'resource' and resumed.status == 'waiting')
+        again = await store.owner_control(OWNER, task.id, 'resume')
+        check('resuming an unavailable resource never queues execution', again.wait_reason == 'resource' and again.polls == 0)
+        task = await store.ask_owner(OWNER, task.id, again.revision, 'Which check?', ('checks', 'review'), now=101)
+        detail = await store.owner_view(OWNER, task.id)
+        question = detail['question']['id']
+        await refused('a question cannot be bypassed with plain resume', store.owner_control(OWNER, task.id, 'resume'))
+        await refused('an ambiguous answer leaves the question waiting', store.owner_control(OWNER, task.id, 'answer', question_id=question, answer='yes'))
+        await refused('a question cannot widen scope through its proposed next step', store.ask_owner(OWNER, task.id, task.revision, 'More?', ('yes',), step=replace(READ, target='elsewhere')))
+    async with TaskStore(cfg) as store:
+        check('a question and its identity survive reopening', (await store.owner_view(OWNER, task.id))['question']['id'] == question)
+        answered = await store.owner_control(OWNER, task.id, 'answer', question_id=question, answer='checks')
+        check('answering without a runner leaves the task waiting on execution', answered.status == 'waiting' and answered.wait_reason == 'resource')
+        check('answering preserves scope and every durable allowance', answered.specification == SPEC and answered.polls == 0 and answered.max_polls == task.max_polls and answered.max_attempts == task.max_attempts)
+        await refused('an answer is applied only once', store.owner_control(OWNER, task.id, 'answer', question_id=question, answer='checks'))
+        task = await store.ask_owner(OWNER, task.id, answered.revision, 'Continue?', ('continue',))
+        question = (await store.owner_view(OWNER, task.id))['question']['id']
+        await store.owner_control(OWNER, task.id, 'cancel')
+        await refused('cancellation rejects an old owner answer', store.owner_control(OWNER, task.id, 'answer', question_id=question, answer='continue'))
+        check('another owner gets an empty private list', (await store.owner_view('another'))['tasks'] == [])
+        await refused('another owner cannot control a task', store.owner_control('another', task.id, 'resume'))
+        task = await create(store, 'bindings')
+        attempt = await store.claim(OWNER, task.id, task.revision)
+        await store.bind_call(OWNER, attempt, 'generation', 'tool-1')
+        await store.bind_call(OWNER, attempt, 'generation', 'tool-2')
+        await store.bind_call(OWNER, attempt, 'generation', 'tool-1')
+        check('one attempt can bind multiple distinct tool calls idempotently', True)
+        attempt = await store.mark_dispatched(OWNER, attempt)
+        task = await store.observe(OWNER, attempt, (Evidence('checks', 'fixture:pr', 'passed', 'fixture', __import__('time').time(), 'head-1'),))
+        task = await store.complete(OWNER, task.id, task.revision)
+        check('completion keeps its evidence available to the owner view', len((await store.owner_view(OWNER, task.id))['evidence']) == 1)
+
+        another = await create(store, 'other-binding')
+        other_attempt = await store.claim(OWNER, another.id, another.revision)
+        await refused('a tool binding cannot be reassigned to another attempt', store.bind_call(OWNER, other_attempt, 'generation', 'tool-1'))
+    async with TaskStore(cfg) as store:
+        check('ingress associations and tool bindings validate after reopening', (await store.create(retry, SPEC, READ)).id != another.id)
+    async with TaskStore(config(root / 'empty-v2')):
+        pass
+    async with TaskStore(config(root / 'empty-v2')) as store:
+        check('an empty version-two bindings table validates', not await store.list(OWNER))
+
+
 async def main() -> None:
     with tempfile.TemporaryDirectory(prefix='ciel-task-probe-') as tmp:
         root = Path(tmp)
@@ -546,6 +608,7 @@ async def main() -> None:
         await probe_contention(root)
         await probe_polling(root)
         await probe_retarget(root)
+        await probe_owner_controls(root)
     print(f'\nall {len(CHECKS)} checks passed')
 
 

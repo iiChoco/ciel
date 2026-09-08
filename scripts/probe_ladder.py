@@ -1,4 +1,6 @@
-"""Probe the turn-slot arbiter — the priority ladder as a table.
+"""Identity-carrying queues retain arrival priority and separate owner batches.
+
+Probe the turn-slot arbiter — the priority ladder as a table.
 
     uv run scripts/probe_ladder.py
 
@@ -10,6 +12,8 @@ the table directly — no pipeline, no clock, no audio — so a reordering
 live listening window) fails here before it fails as a misbehavior
 someone has to notice by ear.
 """
+from __future__ import annotations
+
 
 import sys
 from pathlib import Path
@@ -41,6 +45,12 @@ EVERYTHING = dict(
 
 
 def main() -> int:
+    from collections import deque
+    from ciel.turn import Ingress, owner_origin, pop_turn_batch
+    queue = deque([Ingress(1.0, 'one', None, owner_origin('owner', 'web', 'one')), Ingress(2.0, 'two', None, owner_origin('other', 'web', 'two'))])
+    batch = pop_turn_batch(queue)
+    check('queue batching never joins two owner principals', batch.text == 'one' and len(queue) == 1)
+    check('identity records retain the arrival timestamp used by confirmation priority', queue[0][0] == 2.0)
     print("the ranks")
     check(
         "a pending confirmation outranks everything, even from BUSY",

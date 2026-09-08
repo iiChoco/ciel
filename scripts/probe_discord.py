@@ -1,4 +1,6 @@
-"""Probe the Discord lane (Parallel Transport) — scripted by default, live on request.
+"""Owner DM batches retain ordered message identities and live owner attendance.
+
+Probe the Discord lane (Parallel Transport) — scripted by default, live on request.
 
     uv run scripts/probe_discord.py               # scripted checks, no network
     uv run scripts/probe_discord.py --live        # connect, then echo your DMs
@@ -17,6 +19,8 @@ place to look; if nothing works here, it's the token, the id, or the
 missing mutual server (Discord only delivers DMs between accounts that
 share one).
 """
+from __future__ import annotations
+
 
 import argparse
 import asyncio
@@ -177,6 +181,11 @@ def link_checks(state_file) -> None:
     from ciel.remote.lane import Lane
 
     check("DiscordLink conforms to the Lane protocol", isinstance(link, Lane))
+    fixture = DiscordLink(config)
+    first, second = FakeMessage(42, 'watch one'), FakeMessage(42, 'check two')
+    fixture._on_message(first); fixture._on_message(second)
+    batch = fixture.pop_batch()
+    check('owner DMs retain ordered ingress identities through a batch', batch.origin is not None and batch.origin.attended and batch.origin.private and len(batch.origin.ingress_ids) == 2 and str(first.id) in batch.origin.ingress_ids[0] and str(second.id) in batch.origin.ingress_ids[1])
     check("token plus owner id arms the lane", link.armed)
     check("unconnected means can_send is False", not link.can_send)
 

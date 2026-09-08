@@ -93,7 +93,7 @@ CATALOG: dict[str, FrameSpec] = {
             "caps": "list", "resume": "dict",
             "seq": "int", "epoch": "str", "acks": "bool", "resumed": "bool",
             "muted": "bool", "state": "str", "agents": "list", "history": "list",
-            "world": "dict", "speakback": "bool",
+            "world": "dict", "speakback": "bool", "tasks": "bool",
         },
     ),
     "ping": FrameSpec("both", optional={"t_wall": "num"}),
@@ -105,8 +105,12 @@ CATALOG: dict[str, FrameSpec] = {
     "say": FrameSpec(
         "c2h",
         required={"text": "str"},
-        optional={"seq": "int", "lane": "str", "say_id": "str"},
+        optional={"seq": "int", "lane": "str", "say_id": "str", "request_id": "str", "owner_input": "bool"},
     ),
+    "task.request": FrameSpec("c2h", required={"request_id": "str", "operation": "str"},
+                              optional={"task_id": "str", "revision": "int", "question_id": "str", "answer": "str"}),
+    "task.result": FrameSpec("h2c", required={"request_id": "str", "ok": "bool", "data": "dict"}, optional={"error": "str"}),
+    "task.changed": FrameSpec("h2c"),
     "mute": FrameSpec("c2h", required={"muted": "bool"}),
     "restart": FrameSpec("c2h"),
     "turn.cancel": FrameSpec(
@@ -256,6 +260,21 @@ def validate(frame: Any, direction: Direction) -> dict[str, Any]:
     for name, shape in spec.optional.items():
         if name in frame and frame[name] is not None and not _SHAPES[shape](frame[name]):
             raise WireError(f"{kind}: {name!r} is not {shape}")
+    if kind.startswith('task.'):
+        if len(json.dumps(frame)) > 65536:
+            raise WireError('task frame exceeds its size bound')
+        if 'request_id' in frame and not 0 < len(frame['request_id']) <= 256:
+            raise WireError('task request identity is missing or too long')
+        if kind == 'task.request':
+            if frame['operation'] not in ('list', 'inspect', 'pause', 'resume', 'answer', 'cancel'):
+                raise WireError('unknown task operation')
+            if frame['operation'] != 'list' and not frame.get('task_id'):
+                raise WireError('task identity is required')
+            if frame['operation'] not in ('list', 'inspect') and (type(frame.get('revision')) is not int or frame['revision'] < 1):
+                raise WireError('a Chart control needs its rendered revision')
+    for name in ('say_id', 'request_id'):
+        if kind == 'say' and name in frame and frame[name] is not None and not 0 < len(frame[name]) <= 256:
+            raise WireError('message identity is missing or too long')
     return frame
 
 

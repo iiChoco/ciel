@@ -94,14 +94,14 @@ class HubClient:
         asyncio.get_running_loop().create_task(self._send_now(ws, frame))
         return True
 
-    def say(self, text: str, lane: str = "voice") -> bool:
+    def say(self, text: str, lane: str = "voice", *, owner_input: bool = False) -> bool:
         """A turn: numbered, held until acked, resent after a reconnect.
         Returns whether it could be sent *now*; a held say still goes
         the moment the socket is back."""
         self._say_seq += 1
         # The id is what makes the resend safe: the hub queues each id once.
         frame = {"type": "say", "text": text, "lane": lane, "seq": self._say_seq,
-                 "say_id": secrets.token_urlsafe(9)}
+                 "say_id": secrets.token_urlsafe(9), "owner_input": owner_input}
         self._unacked[self._say_seq] = frame
         return self.send(frame)
 

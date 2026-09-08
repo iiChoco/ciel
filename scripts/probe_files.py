@@ -1,4 +1,6 @@
-"""Probe the file boundary as the search tools see it.
+"""Task database, rollback journal, and ownership lock remain outside model file access.
+
+Probe the file boundary as the search tools see it.
 
 The workspace guard is a PreToolUse hook: it judges the path a tool names.
 A search names a root and then opens files the guard never saw, which is
@@ -139,6 +141,11 @@ async def main() -> None:
         result = await shell({"tool_name": "Bash", "tool_input": {"command": f"cat {alternate}"}}, None, None)
         check("the configured cookie is denied by the shell without asking", not questions
               and result["hookSpecificOutput"]["permissionDecision"] == "deny")
+        for name in ('tasks.sqlite3', 'tasks.sqlite3-journal', 'owner.lock'):
+            private = ws / name
+            private.write_text('private-task-fixture')
+            check(f'{name} is refused even in a broad fixture workspace', guard.permits(str(private)) is not None)
+        check('file search cannot expose private task records or their journal', await run(files.search_files, pattern='private-task-fixture') == 'No matches.')
         check("an ordinary search still answers", "almost.txt:1:" in await run(files.search_files, pattern="a{29}!"))
 
     print(f"\nall {len(CHECKS)} checks passed" if not FAILED else f"\n{FAILED} FAILED")

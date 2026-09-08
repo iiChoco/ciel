@@ -2,7 +2,8 @@
 
     uv run scripts/probe_wire.py
 
-Four layers, no network until the last: the codec round-trips every
+Task requests require bounded identities and rendered revisions; task replies
+never enter replay. Four layers, no network until the last: the codec round-trips every
 frame in the catalog and refuses what it doesn't name; the replay ring
 numbers frames and answers resume claims (matching, stale, foreign,
 scrolled-off, too old to replay); ``admit`` — the whole auth policy as
@@ -17,6 +18,8 @@ note, when aiohttp is not installed.
 If everything here passes but the phone can't connect, look at the
 bind address, the token file, and the Tailscale ACLs — in that order.
 """
+from __future__ import annotations
+
 
 import asyncio
 import contextlib
@@ -58,6 +61,9 @@ def refused(raw: str, direction: wire.Direction) -> bool:
 SAMPLES: dict[str, dict] = {
     "hello": {"v": 1, "role": "chart", "token": "t", "client_id": "c",
               "caps": ["acks"], "resume": {"epoch": "e", "seq": 3}},
+    'task.request': {'request_id': 'r', 'operation': 'list'},
+    'task.result': {'request_id': 'r', 'ok': True, 'data': {}},
+    'task.changed': {},
     "ping": {}, "pong": {"t_wall": 1.5},
     "speakback.set": {"on": True}, "speakback": {"on": True},
     "say": {"text": "hi", "seq": 1}, "mute": {"muted": True}, "restart": {},
@@ -91,6 +97,11 @@ SAMPLES: dict[str, dict] = {
 
 
 def probe_codec() -> None:
+    check('task payloads and invalidation never enter the replay ring', not {'task.result', 'task.changed'} & wire.BROADCAST_TYPES)
+    check('Chart controls need the revision they rendered', refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'pause', 'task_id': 't'}), 'c2h'))
+    check('task request identities are bounded', refused(json.dumps({'type': 'task.request', 'request_id': 'r' * 257, 'operation': 'list'}), 'c2h'))
+    check('task frame payloads are bounded', refused(json.dumps({'type': 'task.result', 'request_id': 'r', 'ok': True, 'data': {'text': 'x' * 65536}}), 'h2c'))
+    check('Chart says retain a minted identity independently of their ack sequence', wire.decode(json.dumps({'type': 'say', 'text': 'watch', 'seq': 1, 'request_id': 'minted'}), 'c2h')['request_id'] == 'minted')
     print("\nthe codec")
     check(
         "every catalog type has a sample here",

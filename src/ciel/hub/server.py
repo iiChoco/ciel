@@ -34,6 +34,8 @@ from ciel.remote.web import Admission, WebLink
 if TYPE_CHECKING:
     from ciel.interview.app import InterviewApp
 
+from ciel.turn import Ingress, owner_origin
+
 log = logging.getLogger(__name__)
 
 
@@ -53,7 +55,7 @@ class HubServer(WebLink):
         super().__init__(config, hub, interview)
         self._spoke: Any = None
         """The seated spoke's socket, or None."""
-        self._voice: deque[tuple[float, str, None]] = deque()
+        self._voice: deque[Ingress] = deque()
         """Spoken turns the spoke sent up, awaiting the arbiter — the
         Chart queue's shape, so the pipeline pops it the same way."""
         self._played: dict[tuple[str, int], asyncio.Future[bool]] = {}
@@ -104,10 +106,10 @@ class HubServer(WebLink):
     def voice_pending(self) -> bool:
         return bool(self._voice)
 
-    def peek_voice(self) -> tuple[float, str, None] | None:
+    def peek_voice(self) -> Ingress | None:
         return self._voice[0] if self._voice else None
 
-    def pop_voice(self) -> tuple[float, str, None] | None:
+    def pop_voice(self) -> Ingress | None:
         return self._voice.popleft() if self._voice else None
 
     def note_timers(self, timers: list[dict[str, Any]]) -> None:
@@ -269,6 +271,9 @@ class HubServer(WebLink):
         self.stir.set()
         kind = frame["type"]
         try:
+            if kind == "task.request":
+                log.warning("task command from the spoke seat refused")
+                return
             if kind == "say":
                 seq = frame.get("seq")
                 if isinstance(seq, int):
@@ -288,7 +293,10 @@ class HubServer(WebLink):
                     self._say_ids.append(say_id)
                 if len(text) > self._config.max_inbound_chars:
                     text = text[: self._config.max_inbound_chars]
-                self._voice.append((time.monotonic(), text, None))
+                origin = None
+                if say_id and frame.get('owner_input') is True:
+                    origin = owner_origin(self.task_owner, 'voice', say_id, namespace='spoke')
+                self._voice.append(Ingress(time.monotonic(), text, None, origin))
             elif kind == "turn.played":
                 fut = self._played.get((frame["turn_id"], frame["n"]))
                 if fut is not None and not fut.done():

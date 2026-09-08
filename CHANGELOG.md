@@ -142,6 +142,58 @@ checks did not establish speech fidelity. Apple audio remains experimental;
 speech quality, acoustic rejection, gesture recognition, and user speech over
 music are not qualified.
 
+## 2026-09-07 — The owner can see and steer a task
+
+**Why.** A durable responsibility needs a way for its owner to inspect and
+change it without pretending execution has started. The stage-two review in
+`reports/2026-09-07-task-controls-plan-review.md` also found that SDK tools do
+not receive call identity, lane batches lose message identity, and a shared
+public session can retain private context.
+
+**What.**
+
+- *A saved request keeps its place.* Private owner tools and Chart share one
+  controller for listing, inspection, pause, resume, answers, and cancellation.
+  Explicit PR-check requests are validated offline and created atomically in
+  resource wait. Resume and answers also keep waiting: there is no runner or
+  GitHub observation. Questions preserve their identity, choices, and scope.
+- *Authority lasts one admitted turn.* Tools capture immutable owner context
+  after all owed results drain. A turn with drain debt has no task authority;
+  revocation meets the SQLite transaction before a queued operation can commit.
+  The private client stays warm. Public audiences use a separate client with
+  public tools and no private context or persisted resume.
+- *A retry remembers its messages.* Ordered ingress IDs survive lane batching
+  and store reopen. Chart mints an ID in its resend ledger rather than deriving
+  identity from its per-tab ack counter. Partially consumed batches ask the
+  owner to repeat the new part alone.
+- *Both doors see one record.* Chart sends rendered revisions; tools use the
+  current record inside the transaction. Private task frames never enter shared
+  replay, spoke-seat commands are refused, and remotely bound task hubs require
+  their token. The optional journal records applied controls after commit;
+  task history remains authoritative if journaling fails.
+- *Storage belongs to the runtime.* Pipeline opens and closes the store, and
+  cancelled startup releases its worker and ownership lock. Tasks remain
+  disabled by default. Schema two refuses older and newer stores without reset;
+  future attempt-to-tool bindings are reserved but have no runtime writer yet.
+
+**Probes.** `probe_tasks.py 140 → 166`, `probe_task_tools.py 0 → 24`, and
+`probe_task_wire.py 0 → 20` cover the real in-memory SDK dispatcher, stale calls,
+interrupt cancellation and commit fencing, repeated drain debt, two Chart views,
+conflicts, resource waits, questions, ingress retries, storage failures, and
+startup/shutdown. `probe_turns.py 71 → 78`, `probe_ladder.py 17 → 19`,
+`probe_hub_arbiter.py 51 → 54`, `probe_discord.py 38 → 39`,
+`probe_spoke.py 53 → 56`, `probe_web.py 37 → 40`, and `probe_wire.py 70 → 75`
+pin lane identity, session separation, and addressed admission.
+`probe_files.py 26 → 30` and `probe_shellguard.py 162 → 165` protect task files.
+`probe_hub_imports.py 2 → 6` redirects every fixture path, including memory,
+away from the real home. The existing closure, Witness, grants, confirmation
+wire, speaker, and shortcut probes pass, as do the hub import and all three
+storage-review acceptance scenarios. Chart was checked in Chrome at desktop
+and 390-pixel widths, including keyboard focus, long text, literal question
+text, evidence, terminal records, empty/error/offline states, and two tabs with
+matching ack counters but distinct message IDs. All probe state is temporary;
+no task execution, account access, or deployment was performed.
+
 ## 2026-09-07 — The controls plan follows the turn
 
 **Why.** The stage-two review found that the installed SDK gives an in-process

@@ -3,6 +3,7 @@
     uv run scripts/probe_web.py            # scripted checks, no server
     uv run scripts/probe_web.py --live     # serve the real page, echo turns
 
+Minted Chart identities survive batching/resend without trusting shared ack sequences.
 The scripted checks drive the link's queue mechanics, the inbound frame
 handling, and the Origin gate with no network at all, so a regression
 shows up here before it shows up as a silent page. The live mode starts
@@ -19,6 +20,8 @@ If the page works here but not under Ciel, the lane is fine and the
 pipeline wiring is the place to look; if nothing works here, it is the
 port, the dependency, or the page itself.
 """
+from __future__ import annotations
+
 
 import argparse
 import asyncio
@@ -435,6 +438,18 @@ def main() -> None:
             asyncio.run(live(args.port, args.require_token))
         return
 
+    from ciel.remote.web import Admission
+    link = WebLink(WebConfig())
+    link._welcome('first', Admission(True, role='chart', client_id='shared'))
+    link._welcome('second', Admission(True, role='chart', client_id='shared'))
+    for peer, identity in [('first', 'minted-one'), ('second', 'minted-two')]:
+        link._on_frame(json.dumps({'type': 'say', 'text': 'watch', 'seq': 1, 'request_id': identity}), peer)
+    batch = link.pop_batch()
+    check('Chart tabs sharing client and ack IDs retain distinct message identities', batch.origin is not None and len(batch.origin.ingress_ids) == 2)
+    link._on_frame(json.dumps({'type': 'say', 'text': 'watch', 'seq': 1, 'request_id': 'minted-one'}), 'first')
+    check('a resent Chart message keeps its consumed ingress identity', link.pop_batch().origin.ingress_ids == batch.origin.ingress_ids[:1])
+    link._on_frame(json.dumps({'type': 'say', 'text': 'watch', 'request_id': 'untrusted'}), 'unadmitted')
+    check('an unadmitted ingress cannot claim task authority', link.pop_batch().origin is None)
     probe_origin_gate()
     probe_queue()
     probe_delivery_receipts()

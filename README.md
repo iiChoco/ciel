@@ -140,7 +140,7 @@ environment variables for one-off runs. (Two carve-outs: `[mcp.<name>]`
 connector tables are TOML-only, and `state_dir`/`log_level` sit at the top
 level, outside any section.) The [Spotify connector](#spotify-from-whichever-device-is-playing)
 uses its own `[spotify]` section, documented with the account setup below.
-The `[tasks]` storage fields are documented under [Durable task records](#durable-task-records-stage-one).
+The `[tasks]` storage fields are documented under [Durable tasks](#durable-tasks-and-owner-controls).
 
 ```toml
 [brain]
@@ -1328,14 +1328,69 @@ Three mechanisms, deliberately separate:
 Only the one-line summaries go into the prompt each turn. Full contents load on
 demand, which is what keeps memory affordable as it grows.
 
-## Durable task records (stage one)
+## Durable tasks and owner controls
 
-A task is the runtime's record of a mandate: the desired outcome, explicit
-scope, completion criteria, next step, attempts, observations, and the reason
-it is waiting. Atlas remains the project notebook. `tasks.py` provides this
-storage foundation; task commands, Chart controls, scheduling, GitHub access,
-notification delivery, and execution are later stages. No production process
-opens a task store yet, and this change creates no live task database.
+A task is the runtime's record of an explicit owner mandate: outcome, scope,
+selected checks, next step, evidence, and the reason it is waiting. Atlas remains
+the project notebook. With `[tasks].enabled = true`, Ciel can save one PR-check
+watch per owner request, list and inspect saved tasks, and pause, resume, answer,
+or cancel them. For example: “Save a watch for the build and unit-test checks on
+repo-owner/repo PR 12.” The repository, PR, and exact check names are required;
+missing targets or a request for several watches need clarification first.
+
+**Saved is not started.** There is no task runner, GitHub observation, credential
+setup, automatic task notification, or external action in this stage. Creation
+commits directly into a resource wait. Resume and accepted owner answers also
+remain waiting while execution is unavailable. Ciel says it saved the request;
+it does not claim to be watching. The hub owns one asynchronous store in split
+mode, standalone owns its local store, and the spoke owns neither. Failure to
+open storage disables task controls while ordinary conversation continues.
+
+The implementation follows the [stage-two plan](design/2026-09-07-task-controls-plan.md)
+and its [review](reports/2026-09-07-task-controls-plan-review.md). Task attendance
+means a live private owner turn on any lane, not physical room presence. An
+owner Discord DM qualifies; public channels, reflection, and Vigil do not.
+Diagnostic speaker bypass and an enabled voice gate with no profile confer no
+task authority. Admitted local input, the spoke, Chart, and the configured
+Discord owner map to one stable `[tasks].owner`; do not change that principal to
+switch identities in an existing store.
+
+The SDK gives in-process tools arguments alone. The Brain installs immutable
+owner context only after draining all owed results, and revokes it at turn end
+or interruption. A turn starting with drain debt has no task authority and
+reports controls unavailable. A worker checks the captured authority through
+commit; cancellation cannot turn a queued stale callback into a new owner's
+operation. Private sessions stay warm. Public Discord audiences use a separate
+client with public web tools, no private MCP tools or prompt context, and no
+persisted resume; changing public channels starts a fresh public history.
+
+Chart's **Tasks** section uses private, addressed requests and the same controller
+as the tools. It shows waits, questions, history, and evidence, including the
+last observed head and age. Controls submit the rendered revision; a conflict
+refreshes the view. Spoken controls read the current revision in their store
+transaction. Question answers must match the specific waiting question and an
+offered choice. An ambiguous answer leaves it waiting; cancellation makes old
+answers stale. No answer can widen scope or refill allowances.
+
+The server advertises task support in its hello without task data; an older hub
+hides the section. Reconnect fetches a fresh snapshot, and unavailable, offline,
+pending, and error states never claim success early. Task frames never enter the
+shared replay ring. Eligibility is admission on the Chart path, not a claimed
+role: loopback uses the existing reach/Origin policy; a remotely bound task hub
+requires its token even for loopback peers. Spoke-seat task frames are refused;
+the interview room has no task route.
+
+Chart mints each message's ID and keeps it in the resend ledger; ack `seq` is
+not identity across tabs. The spoke keeps `say_id`, Discord keeps its message
+IDs, and local input gets a fresh ID. Ordered ingress IDs survive batching and
+reopen. A retry resolves its saved task or a conflict, never a second mandate.
+A mixed batch containing consumed and new IDs conflicts as a whole; repeat the
+new part alone. The model cannot split one batch into several tasks.
+
+Explicit owner controls need no second confirmation. The shared controller
+journals each applied control, including Chart controls, if journaling is on.
+The journal is best-effort; task history is durable. Future external mutations
+still require the confirmation broker and action journal before dispatch.
 
 The store uses Python's built-in SQLite in a dedicated private directory, with
 one worker thread and a process ownership lock. Task state, attempt state,
@@ -1348,8 +1403,10 @@ store refuses a shared directory rather than changing its permissions.
 
 ```toml
 [tasks]
-enabled = false              # reserved for runtime integration; no executor in stage one
+enabled = false             # private owner controls; no execution
 directory = "~/.ciel/tasks"  # contains tasks.sqlite3 and owner.lock
+owner = "local-owner"       # stable principal for this single-owner runtime
+max_pending_controls = 32   # concurrent Chart task requests
 max_active = 32
 max_attempts = 8
 max_polls = 288
@@ -1359,7 +1416,9 @@ max_record_chars = 16000
 ```
 
 These fields also accept `CIEL_TASKS_*` environment overrides. `max_active`
-bounds non-terminal records. `max_attempts` counts attempts that end without a
+bounds non-terminal records and the bounded recent task view.
+`max_pending_controls` bounds concurrent Chart requests; overflow returns busy.
+`owner` is the stable ingress-to-store mapping, never a model argument. `max_attempts` counts attempts that end without a
 clean checkpoint or completion: interruptions, failures during an attempt, and
 uncertain actions. Successful polling does not spend or refill it. `max_polls`
 bounds all claimed execution rounds, including retries and mutations; the
@@ -1369,8 +1428,14 @@ evidence-age limit are captured at creation; defaults and restarts cannot refill
 them. Attempt history retains every round and records clean checkpoints.
 A rejected claim reports an exhausted allowance; a later runner must persist
 its wait/failure policy explicitly. The size limit bounds each serialized
-request, next step, and observation batch. Enabling the reserved flag does not
-start scheduling in this stage.
+request, next step, observation batch, and private view. Enabling controls does
+not start scheduling.
+
+This is schema version two. Version-one stores and newer stores are refused
+without migration or reset. Choose a fresh dedicated directory for these
+controls; keep an existing store intact. The database, its full rollback-journal
+name `tasks.sqlite3-journal`, and `owner.lock` are forbidden to model file and
+shell tools, even in a broad workspace.
 
 SQLite waits up to `busy_timeout_s` for a lock on the worker thread. If that
 wait expires, `TaskBusy` refuses the operation after a certain rollback; the
@@ -1380,13 +1445,13 @@ corruption, or other storage failure disables the handle until reopening.
 The internal async `TaskStore` API can create/deduplicate an owner request,
 inspect/list records, claim an attempt, record dispatch intent and observations,
 checkpoint a scoped next step, retarget an observed head, wait, pause, cancel,
-fail, or resume. Structured attempts, observations, history, and notices are
-available for inspection.
-Owner identity, origin privacy/attendance, and a step's read/mutation class
-must come from trusted runtime/adapter context when tools are added. A stored
+fail, or resume. It also stores structured questions/answers, ingress retry
+associations, and reserved attempt-to-tool bindings. Bindings have no runtime
+writer until a runner exists. Owner identity, origin privacy/attendance, and a
+step's read/mutation class come from trusted runtime/adapter context. A stored
 scope or dispatch marker grants no tool permission and bypasses no broker.
 
-Every change checks the expected task revision. Old callbacks cannot dispatch
+Every change checks its task revision within the transaction. Old callbacks cannot dispatch
 or complete a replaced attempt. Reopening recovers prepared attempts and
 interrupted reads to the queue; a possibly dispatched mutation becomes
 `waiting/reconciliation`. Pause/resume cannot erase that uncertainty, and
@@ -1395,7 +1460,7 @@ adapters are not implemented yet: uncertain actions remain blocked.
 
 Only `complete` can enter `done`: all criteria must have matching observations
 for the current attempt, with the expected target revision and acceptable age.
-Stage one supports exact string-value criteria; it does not independently read
+The store supports exact string-value criteria; it does not independently read
 external systems. The later verifier must supply authentic observations and
 recheck changing targets. Empty, stale, unknown, or mismatched evidence cannot
 complete a task. Completion and its durable notification intent are atomic;
@@ -1679,13 +1744,20 @@ blame:
 
 ```bash
 uv run scripts/probe_input.py         # the microphone's silence watch, no mic
+uv run --no-sync python scripts/probe_apple_audio.py # Apple audio: native build, framing, audible receipts, failures; no mic
+uv run --no-sync python scripts/probe_apple_audio.py --live # processed mic + short quiet tone; no recording
 uv run scripts/probe_audio.py vad     # endpointing, synthetic speech, no mic
 uv run scripts/probe_audio.py hold    # the Cauchy mid-thought judgement
 uv run scripts/probe_audio.py mic     # live capture -> /tmp/ciel_capture.wav
 uv run scripts/probe_voice.py speak   # TTS + playback only
 uv run scripts/probe_voice.py barge   # interrupt path
 uv run scripts/probe_voice.py echo    # mic -> STT -> TTS, no model in the loop
-uv run --no-sync python scripts/probe_tasks.py       # durable task records, ownership, evidence, and crash recovery
+uv run --no-sync python scripts/probe_tasks.py       # records, owner controls, questions, retries, evidence, crash recovery
+uv run --no-sync python scripts/probe_task_tools.py  # real SDK dispatcher, turn authority, cancellation, drain debt
+uv run --no-sync python scripts/probe_task_wire.py   # two private Chart sockets, controls, conflicts, reconnect
+uv run --no-sync python scripts/probe_task_wire.py --live  # synthetic task states in Chart; temporary storage
+uv run --no-sync python scripts/probe_turns.py       # lane contract, trusted ingress, public/private clients
+uv run --no-sync python scripts/probe_hub_imports.py # Linux imports and temporary task-store lifecycle
 uv run --no-sync python scripts/probe_shellguard.py  # confirmation and mutating command options
 uv run --no-sync python scripts/probe_shortcuts.py   # global Mac controls: chords, lifecycle, interruption, mute, both voice paths
 uv run --no-sync python scripts/probe_speaker.py     # Barn Door: diagnostic policy, private readings, both voice paths
@@ -1744,8 +1816,6 @@ mic ──▶ wake word ──▶ VAD capture ──▶ whisper ──▶ Claude
 
 One loop reads the microphone and routes each frame by state: to the wake
 detector when idle, the endpointer while you're talking, the barge-in check
-uv run --no-sync python scripts/probe_apple_audio.py # Apple audio: native build, framing, audible receipts, failures; no mic
-uv run --no-sync python scripts/probe_apple_audio.py --live # processed mic + short quiet tone; no recording
 while Ciel is. Replies stream back sentence by sentence, so Ciel starts speaking
 as soon as the first complete thought exists rather than after the whole answer.
 
@@ -1768,7 +1838,9 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `music.py` | Spotify on the Mac, through one narrow AppleScript door |
 | `spotify.py` | Spotify Web API — browser login, search and Connect playback from the brain's host |
 | `projects.py` | Atlas — durable working state per project |
-| `tasks.py` | Stage-one task records, private transactional storage, evidence, and recovery; no executor yet |
+| `tasks.py` | Private task records, atomic owner controls, questions, evidence, and recovery; no executor |
+| `task_context.py` | Turn authority captured by in-process tools and fenced through commit |
+| `task_controls.py` | Shared private owner controller, offline PR-watch validation, and control journaling |
 | `transcript.py` | Trace — the record of the path actually taken |
 | `reload.py` | Analytic Continuation — watch the source, re-exec, resume |
 | `oura.py` | The Oura client — sleep, readiness, activity; read-only |

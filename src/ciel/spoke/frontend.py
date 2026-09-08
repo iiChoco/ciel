@@ -546,13 +546,13 @@ class Spoke:
         if not self._link.connected:
             # Held in the ledger and sent when the hub is back — but the
             # user is here now, and silence would read as deafness.
-            self._link.say(text)
+            self._link.say(text, owner_input=not self._config.voice.diagnostic and (not self._config.voice.enabled or self._speaker is not None))
             asyncio.create_task(self._hub_lost_notice())
             return
         self._awaiting_hub = True
         self._turn_deadline = time.monotonic() + _HUB_BEGIN_TIMEOUT_S
         self._indicator.set_state("thinking")
-        self._link.say(text)
+        self._link.say(text, owner_input=not self._config.voice.diagnostic and (not self._config.voice.enabled or self._speaker is not None))
 
     def _finish_turn(self, mic: MicStream) -> None:
         """The BUSY exit: drain, then the follow-up window or waiting."""
@@ -681,7 +681,7 @@ class Spoke:
             self._publish.acked(frame["publish_id"])
         # rows, agents, confirm banners, hellos: the Chart's business
 
-    async def _play_sentence(self, turn_id: str, n: int, kind: str, text: str) -> None:
+    async def _play_sentence(self, turn_id: str, n: int, kind: str, text: str, *, epoch: int | None = None) -> None:
         """One sentence through the speakers, receipted."""
         assert self._player is not None
         epoch = self._shortcut_epoch if epoch is None else epoch
@@ -731,7 +731,7 @@ class Spoke:
             else:
                 self._indicator.set_state("thinking")
 
-    async def _ask(self, confirm_id: str, text: str, listen: bool) -> None:
+    async def _ask(self, confirm_id: str, text: str, listen: bool, *, epoch: int | None = None) -> None:
         """Speak a confirm line; open the answer window when asked to."""
         epoch = self._shortcut_epoch if epoch is None else epoch
         assert self._player is not None and self._mic is not None

@@ -6,7 +6,8 @@ convention (their docstrings each say "built hub-shaped on purpose");
 writing the shape down means the third implementation — the hub link the
 endgame notes describe — conforms by type check rather than by prose.
 
-The queue element is ``(arrival, text, channel)``: a monotonic arrival
+The queue element is an immutable ``Ingress`` carrying owner/request identity
+alongside tuple-compatible ``(arrival, text, channel)``: a monotonic arrival
 stamp (the confirm broker's predating rule needs it), the message, and
 an opaque channel the lane's ``send`` knows how to route back to —
 ``None`` means the lane's default destination. ``pop_batch`` coalesces
@@ -22,6 +23,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+from ciel.turn import Ingress, TurnBatch
+
 
 @runtime_checkable
 class Lane(Protocol):
@@ -34,15 +37,15 @@ class Lane(Protocol):
         """Whether at least one message is queued."""
         ...
 
-    def peek(self) -> tuple[float, str, Any] | None:
+    def peek(self) -> Ingress | None:
         """The head of the queue, unconsumed: (arrival, text, channel)."""
         ...
 
-    def pop(self) -> tuple[float, str, Any] | None:
+    def pop(self) -> Ingress | None:
         """Consume and return the head of the queue."""
         ...
 
-    def pop_batch(self) -> tuple[str, Any] | None:
+    def pop_batch(self) -> TurnBatch | None:
         """Consume the head run of same-channel messages, joined into one
         turn's text: (text, channel)."""
         ...

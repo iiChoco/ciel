@@ -1,4 +1,6 @@
-"""Fake-driven verification of the shell gate.
+"""Task database, rollback journal, and ownership lock are forbidden to the shell.
+
+Fake-driven verification of the shell gate.
 
 No audio hardware and no model: the broker takes an injectable endpointer and
 everything else it touches is duck-typed, so the entire confirmation
@@ -679,6 +681,15 @@ async def main() -> None:
           build_speaker_gate(VoiceConfig(enabled=False)) is None)
     shutil.rmtree(iff_tmp)
 
+    from ciel.brain.permissions import FORBIDDEN_NAMES
+    for name in ('tasks.sqlite3', 'tasks.sqlite3-journal', 'owner.lock'):
+        asked = []
+        async def allow_task(question: str) -> bool:
+            asked.append(question)
+            return True
+        gate = ShellGuard(ShellConfig(), allow_task, forbidden=FORBIDDEN_NAMES)
+        result = await gate({'tool_name': 'Bash', 'tool_input': {'command': 'cat ' + name}}, None, None)
+        check(name + ' cannot be read through the shell or approved around the guard', not asked and result['hookSpecificOutput']['permissionDecision'] == 'deny')
     print("config:")
     with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
         f.write('[shell]\nenabled = true\nauto_allow = ["git status", "ls"]\n'

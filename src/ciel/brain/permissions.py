@@ -96,6 +96,8 @@ FORBIDDEN_NAMES = frozenset({
     # user's next login, which makes it the highest-value target here.
     ".zshrc", ".zshenv", ".zprofile", ".zlogin",
     ".bashrc", ".bash_profile", ".profile", ".bash_login",
+    # Task records and the rollback journal contain private owner mandates.
+    "tasks.sqlite3", "tasks.sqlite3-journal", "owner.lock",
     # Credentials and keys
     ".ssh", ".aws", ".gnupg", ".gpg", ".netrc", ".env",
     ".npmrc", ".pypirc", ".docker", ".kube", ".terraform.d",

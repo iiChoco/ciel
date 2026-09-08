@@ -400,6 +400,22 @@
     footer { gap: 10px; padding: 12px 15px calc(12px + env(safe-area-inset-bottom)); }
     #send { padding: 13px 17px; font-size: 9.5px; }
   }
+  #taskpanel { margin: 0 18px 8px; border: 1px solid var(--line); padding: 8px 12px; flex-shrink: 0; max-height: 42vh; overflow: auto; }
+  #taskpanel[hidden] { display: none; }
+  #taskpanel summary { color: var(--gold); font: 12px var(--mono); cursor: pointer; padding: 4px 0; }
+  #taskstatus { color: var(--text-dim); font: 12px var(--mono); margin: 8px 0; overflow-wrap: anywhere; }
+  #taskstatus.error { color: var(--st-error); }
+  #tasklist, #taskdetail { overflow-wrap: anywhere; }
+  #tasklist button { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; width: 100%; text-align: left; border-bottom: 1px solid var(--line); padding: 8px 0; }
+  #tasklist button[aria-pressed="true"] { color: var(--gold); }
+  #taskdetail { padding-top: 12px; }
+  #taskdetail h3 { font: 16px var(--serif); margin-bottom: 6px; }
+  #taskdetail p, #taskdetail li { margin-bottom: 6px; }
+  #taskdetail ol { padding-left: 20px; color: var(--text-dim); }
+  .task-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+  .task-actions button, #taskrefresh { border: 1px solid var(--glass-border); padding: 5px 9px; font: 12px var(--mono); }
+  #taskpanel button:disabled { opacity: .45; cursor: wait; }
+  @media (max-width: 480px) { #taskpanel { margin: 0 10px 6px; padding: 8px; } }
 </style>
 </head>
 <body data-state="idle">
@@ -442,6 +458,14 @@
 </div>
 
 <div id="world" title="The system's own readings — what Ciel currently holds true, with its age"></div>
+<details id="taskpanel" hidden>
+  <summary>Tasks · saved responsibilities</summary>
+  <p id="taskstatus" role="status" aria-live="polite">Loading tasks…</p>
+  <button id="taskrefresh" type="button">Refresh</button>
+  <div id="tasklist" aria-label="Saved tasks"></div>
+  <section id="taskdetail" aria-label="Task details" tabindex="-1"></section>
+</details>
+
 
 <div id="agentsbar">
   <div class="caption">working on your behalf</div>
@@ -885,11 +909,18 @@ function sendFrame(obj) {
 // process behind the socket, and an ack-less server would leave every
 // say owed forever while the probe shot healthy sockets.
 let acks = false; // what the hello said this server speaks
+function messageId() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+}
 let saySeq = 0;
-const unacked = new Map(); // seq → text; insertion order is send order
+const unacked = new Map(); // seq → {text, request_id}; insertion order is send order
 try {
   for (const [seq, t] of JSON.parse(sessionStorage.getItem("unacked") || "[]")) {
-    unacked.set(seq, t);
+    const message = typeof t === "string" ? {text: t, request_id: messageId()} : t;
+    if (!message || typeof message.text !== "string" || typeof message.request_id !== "string") continue;
+    unacked.set(seq, message);
     saySeq = Math.max(saySeq, seq);
   }
 } catch {}
@@ -898,15 +929,22 @@ function saveLedger() {
   try { sessionStorage.setItem("unacked", JSON.stringify([...unacked])); } catch {}
 }
 
+saveLedger();
+
 function say(t) {
+  const message = {text: t, request_id: messageId()};
   if (!acks) {
     // No hello yet, or an older server: the pre-ledger lane, fire-and-forget.
-    if (!sendFrame({ type: "say", text: t })) return false;
+    if (!sendFrame({ type: "say", ...message })) return false;
   } else {
     const seq = ++saySeq;
-    if (!sendFrame({ type: "say", text: t, seq })) return false;
-    unacked.set(seq, t);
+    unacked.set(seq, message);
     saveLedger();
+    if (!sendFrame({ type: "say", ...message, seq })) {
+      unacked.delete(seq);
+      saveLedger();
+      return false;
+    }
   }
   clearAsk(); // whatever was pending, this line is the user's word on it
   return true;
@@ -921,6 +959,124 @@ function answer(word) {
   if (!sendFrame({ type: "say", text: word })) return;
   clearAsk();
 }
+
+const taskPanel = document.getElementById("taskpanel");
+const taskStatus = document.getElementById("taskstatus");
+const taskList = document.getElementById("tasklist");
+const taskDetail = document.getElementById("taskdetail");
+const taskRefresh = document.getElementById("taskrefresh");
+const taskRequests = new Map();
+let selectedTask = null;
+let taskRefreshGeneration = 0;
+let taskBusy = false;
+
+function taskNotice(text, error = false) {
+  taskStatus.textContent = text;
+  taskStatus.classList.toggle("error", error);
+}
+function requestTask(operation, fields = {}) {
+  return new Promise((resolve, reject) => {
+    const request_id = messageId();
+    const timeout = setTimeout(() => {
+      taskRequests.delete(request_id);
+      reject(new Error("No task response. Refresh before retrying; the control may have been saved."));
+    }, 20000);
+    taskRequests.set(request_id, {resolve, reject, timeout});
+    if (!sendFrame({type: "task.request", request_id, operation, ...fields})) {
+      clearTimeout(timeout);
+      taskRequests.delete(request_id);
+      reject(new Error("Offline. Reconnect and refresh to see the saved state."));
+    }
+  });
+}
+function taskText(parent, tag, text) {
+  const element = document.createElement(tag);
+  element.textContent = text;
+  parent.appendChild(element);
+  return element;
+}
+function taskState(task) {
+  if (task.status === "waiting" && task.wait_reason === "resource") return "saved · execution unavailable";
+  if (task.status === "waiting" && task.wait_reason === "owner") return "waiting for your answer";
+  return task.status + (task.wait_reason ? " · " + task.wait_reason : "");
+}
+function showTask(data) {
+  const task = data.task;
+  taskDetail.replaceChildren();
+  taskText(taskDetail, "h3", task.specification.outcome);
+  taskText(taskDetail, "p", taskState(task));
+  taskText(taskDetail, "p", "Next: read the selected checks · " + task.next_step.target);
+  taskText(taskDetail, "p", task.detail || "No blocker recorded.");
+  const question = data.question;
+  const actions = document.createElement("div");
+  actions.className = "task-actions";
+  taskDetail.appendChild(actions);
+  const control = (label, operation, fields = {}) => {
+    const button = taskText(actions, "button", label);
+    button.type = "button";
+    button.disabled = taskBusy;
+    button.addEventListener("click", async () => {
+      if (taskBusy) return;
+      taskBusy = true;
+      actions.querySelectorAll("button").forEach(b => b.disabled = true);
+      taskNotice("Saving control…");
+      let failure = null;
+      try { await requestTask(operation, {task_id: task.id, revision: task.revision, ...fields}); }
+      catch (error) { failure = error.message; }
+      finally { taskBusy = false; }
+      await refreshTasks();
+      taskDetail.focus();
+      if (failure) taskNotice(failure + " The view has been refreshed where available.", true);
+    });
+  };
+  if (!["done", "failed", "cancelled", "paused"].includes(task.status)) control("Pause", "pause");
+  if (task.status === "paused" || task.status === "failed" || (task.status === "waiting" && task.wait_reason === "resource")) control("Resume", "resume");
+  if (!["done", "failed", "cancelled"].includes(task.status)) control("Cancel", "cancel");
+  if (question && task.status === "waiting" && task.wait_reason === "owner") {
+    taskText(taskDetail, "p", question.prompt);
+    for (const answer of question.choices) control(answer, "answer", {question_id: question.id, answer});
+  }
+  taskText(taskDetail, "p", task.status === "done" ? "Completion evidence" : "Last observations");
+  if (!data.evidence.length) taskText(taskDetail, "p", "No observation recorded.");
+  for (const evidence of data.evidence) {
+    const age = Math.max(0, Math.floor(Date.now() / 1000 - evidence.observed_at));
+    taskText(taskDetail, "p", `${evidence.criterion_id}: ${evidence.observed ?? "unknown"} · ${evidence.source} · ${age}s ago · head ${evidence.target_revision || "unverified"}`);
+  }
+  const history = document.createElement("ol");
+  taskDetail.appendChild(history);
+  for (const entry of data.history) taskText(history, "li", `${entry.after_status}: ${entry.detail}`);
+}
+async function refreshTasks() {
+  if (taskPanel.hidden || !taskPanel.open) return;
+  const generation = ++taskRefreshGeneration;
+  taskNotice("Loading tasks…");
+  try {
+    const data = await requestTask("list");
+    if (generation !== taskRefreshGeneration) return;
+    taskList.replaceChildren();
+    for (const task of data.tasks) {
+      const button = taskText(taskList, "button", task.specification.outcome + " · " + taskState(task));
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(selectedTask === task.id));
+      button.title = task.specification.outcome;
+      button.addEventListener("click", async () => {
+        selectedTask = task.id;
+        await refreshTasks();
+        taskDetail.focus();
+        taskDetail.scrollIntoView({block: "nearest"});
+      });
+    }
+    taskNotice(data.tasks.length ? "Saved requests. No background execution is available." : "No saved tasks.");
+    if (selectedTask) {
+      const detail = await requestTask("inspect", {task_id: selectedTask});
+      if (generation === taskRefreshGeneration) showTask(detail);
+    } else taskDetail.replaceChildren();
+  } catch (error) {
+    if (generation === taskRefreshGeneration) taskNotice(error.message, true);
+  }
+}
+taskPanel.addEventListener("toggle", () => { if (taskPanel.open) refreshTasks(); });
+taskRefresh.addEventListener("click", refreshTasks);
 
 function connect() {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
@@ -955,10 +1111,12 @@ function connect() {
       // The capability handshake: the ledger, the probe, and the restart
       // chip all wait for the server to say it speaks them.
       acks = !!f.acks;
+      taskPanel.hidden = f.tasks !== true;
+      if (!taskPanel.hidden) refreshTasks();
       restartBtn.style.display = acks ? "" : "none";
       if (acks) {
         // Settle the ledger: whatever the last socket swallowed rides again.
-        for (const [seq, t] of unacked) sendFrame({ type: "say", text: t, seq });
+        for (const [seq, message] of unacked) sendFrame({ type: "say", ...message, seq });
       } else if (unacked.size) {
         unacked.clear(); // debts an ack-less server can never settle
         saveLedger();
@@ -981,6 +1139,16 @@ function connect() {
       setSpeakBack(!!f.speakback);
       setAgents(f.agents);
       setWorld(f.world);
+    } else if (f.type === "task.result") {
+      const pending = taskRequests.get(f.request_id);
+      if (pending) {
+        clearTimeout(pending.timeout);
+        taskRequests.delete(f.request_id);
+        if (f.ok) pending.resolve(f.data);
+        else pending.reject(new Error(f.error || "Task request failed."));
+      }
+    } else if (f.type === "task.changed") {
+      if (!taskBusy) refreshTasks();
     } else if (f.type === "row") {
       addRow(f.role, f.text, f.t);
       if (f.role && f.role.startsWith("you-confirm")) clearAsk();
@@ -1007,6 +1175,12 @@ function connect() {
   };
 
   ws.onclose = (ev) => {
+    for (const pending of taskRequests.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("Disconnected. Refresh after reconnecting; a control may already have been saved."));
+    }
+    taskRequests.clear();
+    taskNotice("Offline. Reconnect to refresh saved tasks.", true);
     attempts += 1;
     document.body.classList.add("disconnected");
     sendBtn.disabled = true;

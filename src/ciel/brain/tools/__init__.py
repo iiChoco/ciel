@@ -42,6 +42,7 @@ from ciel.brain.tools.oura import OURA_TOOLS, bind_oura
 from ciel.brain.tools.projects import PROJECT_TOOLS, bind_projects
 from ciel.brain.tools.screen import SCREEN_TOOLS, bind_screen
 from ciel.brain.tools.spotify import SPOTIFY_ACTIONS, SPOTIFY_TOOLS, bind_spotify
+from ciel.brain.tools.tasks import TASK_TOOLS, bind_tasks
 from ciel.brain.tools.timers import TIMER_TOOLS, bind_timers
 from ciel.brain.tools.watch import WATCH_TOOLS, bind_watcher
 from ciel.brain.tools.world import WORLD_TOOLS, bind_world
@@ -63,7 +64,7 @@ SERVER_NAME = "ciel"
 TOOLS = [
     *MEMORY_TOOLS, *MESSAGE_TOOLS, *ACTION_TOOLS, *PROJECT_TOOLS,
     *SCREEN_TOOLS, *TIMER_TOOLS, *WATCH_TOOLS, *GRANT_TOOLS, *OURA_TOOLS,
-    *LOCATION_TOOLS, *MAIL_TOOLS, *WORLD_TOOLS, *FILE_SEARCH_TOOLS, *SPOTIFY_TOOLS,
+    *LOCATION_TOOLS, *MAIL_TOOLS, *WORLD_TOOLS, *FILE_SEARCH_TOOLS, *SPOTIFY_TOOLS, *TASK_TOOLS,
 ]
 
 
@@ -124,6 +125,9 @@ def build_tool_server(
     projects: ProjectStore | None = None
     timers: TimerService | None = None
     tools = list(TOOLS)
+    bind_tasks(None, lambda: None)
+    if not config.tasks.enabled:
+        tools = [t for t in tools if t not in TASK_TOOLS]
 
     if config.memory.enabled:
         store = MemoryStore(config.memory.dir, config.memory.max_index_entries)

@@ -2094,10 +2094,16 @@ class WorldConfig:
 
 @dataclass(frozen=True, slots=True)
 class TasksConfig:
-    """Durable task records. Stage one exposes storage, not an executor."""
+    """Private owner task controls and durable records; no executor."""
 
     enabled: bool = False
-    """Reserved for runtime integration; does not start scheduling in stage one."""
+    """Open task storage and enable private owner controls; never starts execution."""
+
+    max_pending_controls: int = 32
+    """Maximum in-flight Chart task requests; excess requests fail visibly."""
+
+    owner: str = "local-owner"
+    """Stable principal shared by admitted local input, Chart, spoke, and owner DMs."""
 
     directory: Path = field(default_factory=lambda: Path.home() / ".ciel" / "tasks")
     """Dedicated owner-only directory for the database and ownership lock."""

@@ -1,4 +1,6 @@
-"""Probe the hub role — the pipeline with the room one hop away.
+"""Spoke ingress identity survives; diagnostic speech and spoke task frames gain no authority.
+
+Probe the hub role — the pipeline with the room one hop away.
 
     uv run scripts/probe_hub_arbiter.py
 
@@ -14,6 +16,8 @@ unfinished receipt, the spoke leaving mid-sentence, confirm requests
 through the sink, timers and Vigil nudges as deliveries, and mute
 flowing both ways without a sentinel.
 """
+from __future__ import annotations
+
 
 import asyncio
 import json
@@ -54,7 +58,8 @@ class FakeBrain:
         self.last_reconnect_s = 0.0
         self.deep_thought_since = None
 
-    async def ask(self, text):
+    async def ask(self, text, **context):
+        self.context = context
         self.prompts.append(text)
         for item in self.script:
             yield item
@@ -261,6 +266,14 @@ async def probe_seat() -> None:
         and not server.pending
         and any(f["type"] == "ack" and f["seq"] == 1 for f in frames(q1)),
     )
+    server.pop_voice()
+    server._on_frame(json.dumps({'type': 'say', 'text': 'save this', 'say_id': 'stable-spoke-id', 'owner_input': True}), 'spoke')
+    accepted = server.pop_voice()
+    check('the hub retains a spoke say identity and admitted owner policy', accepted.origin is not None and 'stable-spoke-id' in accepted.origin.ingress_ids[0])
+    server._on_frame(json.dumps({'type': 'say', 'text': 'diagnostic', 'say_id': 'diagnostic-id', 'owner_input': False}), 'spoke')
+    check('the hub refuses task authority from diagnostic speech', server.pop_voice().origin is None)
+    server._on_frame(json.dumps({'type': 'task.request', 'request_id': 'spoke-task', 'operation': 'list'}), 'spoke')
+    check('the spoke seat cannot submit Chart task controls', not server._task_requests)
     seen: list[tuple[bool, str | None]] = []
     server.on_voice_state = lambda listening, source: seen.append((listening, source))
     server._on_frame(json.dumps({"type": "voice.state", "listening": True, "speaking": True}), "spoke")

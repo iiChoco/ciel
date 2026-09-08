@@ -1,6 +1,11 @@
 """The brain: Claude, wrapped so it speaks in sentences.
 
-Two responsibilities, both about latency.
+**One turn, one authority.** Task tools capture the admitted owner only after
+stale messages drain, and lose authority at interruption or turn end. A public
+channel uses a separate client with public tools and no private session resume.
+The private client stays warm across owner turns.
+
+Two conversational responsibilities, both about latency.
 
 The first is authentication, by omission: the Agent SDK inherits Claude Code's
 subscription OAuth, so there is no API key here and none should be introduced.
@@ -22,6 +27,7 @@ import re
 import sys
 import time
 from contextlib import aclosing
+from dataclasses import replace
 from types import TracebackType
 from typing import AsyncIterator, Awaitable, Callable, Self
 
@@ -47,6 +53,8 @@ from ciel.brain.toolguard import ConfirmToolGuard
 from ciel.brain.witness import UnattendedMode, WitnessGuard, witness_allowed
 from ciel.config import BrainConfig, Config
 from ciel.journal import ActionJournal
+from ciel.tasks import Origin
+from ciel.task_context import TaskAuthority
 
 log = logging.getLogger(__name__)
 
@@ -88,7 +96,15 @@ class Brain:
         verify_emitter: "Callable[[str, dict], None] | None" = None,
         mac_tools: bool = False,
         mac_snapshot: Callable[[str, int], Awaitable[tuple[bytes | None, str | None]]] | None = None,
+        public: bool = False,
     ) -> None:
+        self._public_mode = public
+        if public:
+            config = replace(config, files=replace(config.files, enabled=False), shell=replace(config.shell, enabled=False))
+        self._task_authority = TaskAuthority()
+        self._public_brain: Brain | None = None
+        self._public_audience: str | None = None
+        self._public_active = False
         self._config = config
         self._mac_tools = mac_tools
         """The hub's tools onto the user's Mac are registered: their shell
@@ -120,6 +136,7 @@ class Brain:
         self._last_connect_s = 0.0
         self._last_reconnect_s = 0.0
         self._needs_drain = False
+        self._owed_results = 0
         self._deep_thought_since: float | None = None
         """Wall-clock start of the deep-thought escalation in flight, None
         when there isn't one. The pipeline's agent roster reads this
@@ -302,6 +319,15 @@ class Brain:
         mcp_servers: dict | None = None,
         extra_tools: list[str] | None = None,
     ) -> ClaudeAgentOptions:
+        if self._public_mode:
+            return ClaudeAgentOptions(
+                model=self._brain_config.model, tools=['WebSearch', 'WebFetch'],
+                allowed_tools=['WebSearch', 'WebFetch'], mcp_servers={}, resume=None,
+                system_prompt='You are Ciel, answering in a public channel. Use only this conversation and public information. Reply concisely; offer a private conversation for personal requests.',
+                setting_sources=[], permission_mode='dontAsk', include_partial_messages=True,
+                max_turns=self._brain_config.max_turns, effort=self._brain_config.effort,
+                max_buffer_size=_MAX_MESSAGE_BYTES,
+            )
         previous = self._sessions.load()
 
         file_tools = list(FILE_TOOLS) if self._guard else []
@@ -558,11 +584,13 @@ class Brain:
         )
         await client.connect()
         self._client = client
+        await self._task_authority.clear(new_client=True)
         # A fresh client has no abandoned turn behind it, so any drain debt from
         # the previous (now-discarded) client is void. Centralizing the reset
         # here means every reconnect path — lazy, rotation, post-eviction —
         # starts clean without each having to remember to clear it.
         self._needs_drain = False
+        self._owed_results = 0
         self._last_connect_s = time.monotonic() - started
         log.info(
             "brain connected in %.2fs (model=%s)",
@@ -571,10 +599,15 @@ class Brain:
         )
 
     async def close(self) -> None:
+        await self._task_authority.clear(new_client=True)
+        if self._public_brain is not None:
+            await self._public_brain.close()
+            self._public_brain = None
         if self._client is not None:
             await self._client.disconnect()
             self._client = None
             self._needs_drain = False  # nothing stale survives a new client
+            self._owed_results = 0
 
     async def rotate(self) -> None:
         """Retire the current session and start a clean one.
@@ -583,11 +616,16 @@ class Brain:
         the old one; fresh memory and project indexes in the system prompt.
         """
         async with self._turn_lock:
+            await self._task_authority.clear(new_client=True)
+            if self._public_brain is not None:
+                await self._public_brain.close()
+                self._public_brain = None
             if self._client is None:
                 return
             await self._client.disconnect()
             self._client = None
             self._needs_drain = False
+            self._owed_results = 0
             # Reflection (or any turn) may have persisted the current session
             # again minutes ago — well inside the resume window. Rotation
             # intentionally breaks conversational continuity, so the
@@ -604,6 +642,10 @@ class Brain:
     async def interrupt(self) -> None:
         """Abort the turn in flight, so a barge-in doesn't leave the model
         generating a response nobody will hear."""
+        await self._task_authority.clear()
+        if self._public_active and self._public_brain is not None:
+            await self._public_brain.interrupt()
+            return
         if self._client is not None:
             try:
                 await self._client.interrupt()
@@ -618,9 +660,11 @@ class Brain:
         which only reconnects when ``_client is None`` — queries the corpse and
         fails identically, wedging Ciel until the process restarts.
         """
+        await self._task_authority.clear(new_client=True)
         client = self._client
         self._client = None
         self._needs_drain = False
+        self._owed_results = 0
         if client is not None:
             try:
                 await client.disconnect()
@@ -629,7 +673,7 @@ class Brain:
 
     # ── the conversational turn ──────────────────────────────────────────────
 
-    async def ask(self, text: str) -> AsyncIterator[tuple[str, str]]:
+    async def ask(self, text: str, *, origin: Origin | None = None, public_audience: str | None = None) -> AsyncIterator[tuple[str, str]]:
         """Send a user turn; yield ``(kind, sentence)`` as they become available.
 
         ``kind`` is ``"thinking"`` for spoken reasoning and ``"reply"`` for the
@@ -650,6 +694,27 @@ class Brain:
         around to finalizing it, and everything that needs a turn —
         including the next user question — deadlocks behind it.
         """
+        if public_audience is not None:
+            async with self._turn_lock:
+                await self._task_authority.clear()
+                if self._public_brain is None or self._public_audience != public_audience:
+                    if self._public_brain is not None:
+                        await self._public_brain.close()
+                    self._public_brain = Brain(self._config, public=True)
+                    self._public_audience = public_audience
+                public_brain = self._public_brain
+                self._public_active = True
+                public_cost_before = public_brain.total_cost_usd
+                try:
+                    async with aclosing(public_brain.ask(text)) as stream:
+                        async for item in stream:
+                            yield item
+                finally:
+                    self._public_active = False
+                    self._last_turn_cost = public_brain.last_turn_cost_usd
+                    self._lifetime_cost += max(0.0, public_brain.total_cost_usd - public_cost_before)
+                    self._last_reconnect_s = public_brain.last_reconnect_s
+            return
         buffer = ""
         spoken_any = False
         saw_result = False
@@ -664,9 +729,13 @@ class Brain:
                 self._last_reconnect_s = self._last_connect_s
             assert self._client is not None
 
+            await self._task_authority.clear()
             await self._drain_stale()
+            if origin is not None and not self._needs_drain and not self._unattended.engaged and not self._public_mode:
+                self._task_authority.install(origin)
             await self._client.query(text)
             query_sent = True
+            self._owed_results += 1
 
             stream = self._client.receive_response()
             while True:
@@ -780,7 +849,12 @@ class Brain:
                 # Runs promptly only because consumers close the generator (see
                 # the docstring) — that close is also what releases the lock.
                 self._needs_drain = True
-            self._turn_lock.release()
+            if self._owed_results:
+                self._needs_drain = True
+            try:
+                await self._task_authority.clear()
+            finally:
+                self._turn_lock.release()
 
     def unattended(self, label: str = "unattended"):
         """Engage the Witness rule for the enclosing block.
@@ -817,7 +891,8 @@ class Brain:
                 pass
 
     def _record_result(self, message: ResultMessage) -> None:
-        if message.session_id:
+        self._owed_results = max(0, self._owed_results - 1)
+        if message.session_id and not self._public_mode:
             self._session_id = message.session_id
             self._sessions.save(message.session_id)
         if message.total_cost_usd:
@@ -837,13 +912,22 @@ class Brain:
 
         client = self._client
 
+        self._owed_results = max(1, self._owed_results)
         async def consume() -> None:
-            async for message in client.receive_response():
-                if isinstance(message, ResultMessage):
-                    self._record_result(message)
+            while self._owed_results:
+                saw_result = False
+                async for message in client.receive_response():
+                    if isinstance(message, ResultMessage):
+                        self._record_result(message)
+                        saw_result = True
+                if not saw_result:
+                    raise StreamDied('stale stream ended without its result')
 
         try:
             await asyncio.wait_for(consume(), timeout=10.0)
+            # More than one result can be owed when a timed-out drain was
+            # followed by another query. Authority returns only after all of
+            # them, never after mistaking the oldest result for the newest.
             # Cleared only on success: a drain that times out has NOT consumed
             # the abandoned turn's ResultMessage, so the flag must survive to
             # retry on the next turn. Clearing it up front (as before) left the
