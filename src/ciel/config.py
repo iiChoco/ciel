@@ -361,6 +361,21 @@ class VoiceConfig:
     silently bricks the assistant would be worse than the strangers it
     filters."""
 
+    diagnostic: bool = False
+    """With enabled=true, measure Barn Door without blocking utterances.
+    Records the decision and capture measurements locally; never saves
+    rejected clips in this mode or treats a bypass as a verified pass."""
+
+    diagnostic_file: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "voice" / "diagnostics.jsonl"
+    )
+    """Owner-only diagnostic readings, without audio, text, or embeddings.
+    Written on the machine doing speaker verification (the Mac in hub/spoke)."""
+
+    diagnostic_max_bytes: int = 1_000_000
+    """Start a new diagnostic window before this many bytes are exceeded.
+    At least 4,096 bytes; the ordinary process log also receives each reading."""
+
     threshold: float | None = None
     """Cosine similarity at or above which an utterance counts as you.
 

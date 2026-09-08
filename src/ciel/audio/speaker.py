@@ -30,6 +30,14 @@ your own score. Three design choices follow from that:
   window opens seconds after a verified command; it is not separately
   verified, for the same short-utterance reason.
 
+**Measure before enforcing.** Diagnostic mode runs the same judgement but
+lets every utterance continue. Only a would-accept embedding advances its
+own grace clock; letting an utterance through for measurement never earns
+trust. Bounded owner-only JSONL records keep scores, effective thresholds,
+reasons, and capture measurements, without audio, transcripts, or embeddings.
+Unavailable measurements stay unavailable, and a diagnostic failure cannot
+silence a conversation. Rejected clips are not saved in diagnostic mode.
+
 Enroll with ``scripts/enroll_voice.py``, which also measures your
 self-similarity and suggests a threshold.
 """
@@ -37,9 +45,13 @@ self-similarity and suggests a threshold.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
+import os
 import time
 import urllib.request
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -76,14 +88,14 @@ class SherpaEncoder:
         self._extractor = None
 
     async def warm_up(self) -> None:
+        import sherpa_onnx
+
         if not self._model_path.exists():
             log.info("downloading speaker model (~28 MB, one time)...")
             self._model_path.parent.mkdir(parents=True, exist_ok=True)
             partial = self._model_path.with_suffix(".part")
             await asyncio.to_thread(urllib.request.urlretrieve, _MODEL_URL, partial)
             partial.rename(self._model_path)
-
-        import sherpa_onnx
 
         started = time.monotonic()
         config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(
@@ -234,6 +246,25 @@ def load_profile(path: Path) -> np.ndarray | None:
 
 # ── the gate ─────────────────────────────────────────────────────────────────
 
+@dataclass(frozen=True, slots=True)
+class SpeakerDecision:
+    """The gate's judgement, separate from permission to continue speaking.
+
+    None means identity could not be measured, rather than a recognized user.
+    A short blip can still have a contextual verdict with no similarity.
+    """
+
+    would_accept: bool | None
+    reason: str
+    similarity: float | None
+    base_threshold: float
+    threshold: float
+    short_discount: float
+    recent_discount: float
+    recent: bool
+    best_reference: str | None = None
+
+
 class SpeakerGate:
     """Decides whether an utterance is the enrolled user speaking."""
 
@@ -245,6 +276,8 @@ class SpeakerGate:
         self._min_samples = int(SAMPLE_RATE * config.min_utterance_ms / 1000)
         self._min_judge_samples = int(SAMPLE_RATE * config.min_judge_ms / 1000)
         self._last_pass: float | None = None
+        self.last_decision: SpeakerDecision | None = None
+        self._unavailable_reason = "no_profile"
         self._rejected_dir = config.profile.expanduser().parent / "rejected"
 
     @property
@@ -253,6 +286,10 @@ class SpeakerGate:
 
     async def warm_up(self) -> None:
         self._references = load_profile(self._config.profile)
+        self._last_pass = None
+        self._unavailable_reason = "no_profile"
+        if self._config.diagnostic:
+            log.warning("voice diagnostic mode: every utterance continues; Barn Door only measures")
         # Config wins when the user set a number; otherwise the calibrated
         # threshold stored with the profile; 0.5 as the uncalibrated default.
         self._threshold = (
@@ -293,67 +330,101 @@ class SpeakerGate:
             )
             log.warning("voice gate model unavailable — failing open", exc_info=True)
             self._references = None
+            self._unavailable_reason = "model_unavailable"
 
     async def check(self, utterance: np.ndarray) -> tuple[bool, float]:
-        """(is the enrolled speaker, similarity).
+        """(may continue, similarity), with the actual judgement retained.
 
-        Similarity is the *best* match across the enrolled takes and their
-        centroid, not the centroid alone: a voice is multimodal (morning
-        voice, excited voice, across-the-room voice), and averaging modes
-        produces a reference nobody actually sounds like. ``nan`` marks the
-        unjudged cases — no profile, or below ``min_judge_ms``, where the
-        verdict came from context (grace window) rather than the audio.
-
-        A small grace margin applies shortly after a verified pass: the
-        costliest false rejection is the one mid-conversation, and the
-        speaker two sentences after a verified sentence is overwhelmingly
-        the same person.
+        Diagnostic mode always permits continuation. Both modes use exactly
+        the same scorer and grace clock; nan still marks an unscored result
+        for existing callers. Only enforcing mode retains rejected audio.
         """
-        if self._references is None:
-            return True, float("nan")
+        decision = await self._judge(utterance)
+        self.last_decision = decision
+        similarity = decision.similarity if decision.similarity is not None else float("nan")
+        if self._config.diagnostic:
+            try:
+                await asyncio.to_thread(self._record_diagnostic, utterance, decision)
+            except Exception as exc:
+                # Observation cannot cost the user the turn it was measuring.
+                log.warning("voice diagnostic record unavailable (%s)", type(exc).__name__)
+            return True, similarity
+        if decision.would_accept is False and decision.similarity is not None:
+            await asyncio.to_thread(self._keep_rejected, utterance, similarity)
+        if decision.would_accept is True and decision.similarity is not None:
+            log.info("voice recognized (%.2f, %s)", similarity, decision.best_reference)
+        return decision.would_accept is not False, similarity
 
+    async def _judge(self, utterance: np.ndarray) -> SpeakerDecision:
+        """Apply the ordinary gate policy, regardless of diagnostic delivery."""
         recent = (
             self._last_pass is not None
             and time.monotonic() - self._last_pass < self._config.recent_window_s
         )
+        short = self._short_discount(len(utterance))
+        margin = self._config.recent_margin if recent else 0.0
+        threshold = self._threshold - max(short, margin)
 
+        def result(accepted: bool | None, reason: str, similarity: float | None = None,
+                   best: str | None = None) -> SpeakerDecision:
+            return SpeakerDecision(accepted, reason, similarity, self._threshold,
+                                   threshold, short, margin, recent, best)
+
+        if self._references is None:
+            return result(None, self._unavailable_reason)
+        if self._config.diagnostic and not np.all(np.isfinite(utterance)):
+            return result(None, "invalid_audio")
         if len(utterance) < self._min_judge_samples:
-            # Genuinely unjudgeable — a syllable, a cough. Inside a verified
-            # conversation these are the "yes"/"no" that matter, so they
-            # pass; from cold, an unverifiable sound is not a command. This
-            # asymmetry is the whole answer to "short words let anyone in":
-            # context is evidence when the audio can't be.
-            return (True, float("nan")) if recent else (False, float("nan"))
+            return result(recent, "short_grace" if recent else "too_short")
 
-        embedding = await asyncio.to_thread(self._encoder.embed, utterance)
-        scores = self._references @ embedding
-        similarity = float(np.max(scores))
+        try:
+            embedding = await asyncio.to_thread(self._encoder.embed, utterance)
+            scores = self._references @ embedding
+            similarity = float(np.max(scores))
+            if self._config.diagnostic and not np.all(np.isfinite(scores)):
+                return result(None, "invalid_embedding")
+        except Exception:
+            if not self._config.diagnostic:
+                raise
+            return result(None, "encoder_error")
 
-        # The two leniencies cover distinct failure modes (weak measurement;
-        # mid-conversation continuity). When both apply, take the larger —
-        # summing them is how a gate quietly drops to two-thirds of its
-        # threshold and lets the room in.
-        discount = max(
-            self._short_discount(len(utterance)),
-            self._config.recent_margin if recent else 0.0,
-        )
-        threshold = self._threshold - discount
-
-        if similarity >= threshold:
+        best = int(np.argmax(scores))
+        which = "centroid" if best == len(self._references) - 1 else f"take {best + 1}"
+        accepted = similarity >= threshold
+        if accepted:
             self._last_pass = time.monotonic()
-            # The last reference row is the centroid, not a take — logging
-            # it as "take N+1" would send a pruning session hunting for a
-            # take that does not exist.
-            best = int(np.argmax(scores))
-            which = (
-                "centroid" if best == len(self._references) - 1
-                else f"take {best + 1}"
-            )
-            log.info("voice recognized (%.2f, %s)", similarity, which)
-            return True, similarity
+        return result(accepted, "matched" if accepted else "below_threshold", similarity, which)
 
-        await asyncio.to_thread(self._keep_rejected, utterance, similarity)
-        return False, similarity
+    def _record_diagnostic(self, utterance: np.ndarray, decision: SpeakerDecision) -> None:
+        """Keep capture numbers beside the verdict, never the speech itself."""
+        samples = np.asarray(utterance, dtype=np.float64)
+        finite = bool(np.all(np.isfinite(samples)))
+        measurable = samples.size > 0 and finite
+        row = {
+            "at": time.time(), "mode": "diagnostic", "allowed": True,
+            **asdict(decision),
+            "duration_ms": len(utterance) * 1000.0 / SAMPLE_RATE,
+            "rms": float(np.sqrt(np.mean(samples ** 2))) if measurable else None,
+            "peak": float(np.max(np.abs(samples))) if measurable else None,
+            "clipped_fraction": float(np.mean(np.abs(samples) >= 0.999)) if measurable else None,
+            "zero_fraction": float(np.mean(samples == 0)) if measurable else None,
+            "finite_audio": finite,
+        }
+        # Strict JSON keeps an unavailable reading distinct from the nonstandard
+        # NaN/Infinity literals produced by failed numerical measurements.
+        row = {key: None if isinstance(value, float) and not math.isfinite(value) else value
+               for key, value in row.items()}
+        line = json.dumps(row, allow_nan=False, separators=(",", ":")) + "\n"
+        log.info("voice diagnostic: %s", line.rstrip())
+        data = line.encode("utf-8")
+        path = self._config.diagnostic_file.expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "ab") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            if os.fstat(stream.fileno()).st_size + len(data) > max(4096, self._config.diagnostic_max_bytes):
+                os.ftruncate(stream.fileno(), 0)
+            stream.write(data)
 
     def _short_discount(self, samples: int) -> float:
         """Threshold leniency that tapers with utterance length.
@@ -417,14 +488,16 @@ def build_speaker_gate(config: VoiceConfig) -> SpeakerGate | None:
     except ImportError:
         log.warning(
             "voice gate enabled but sherpa-onnx is not installed — "
-            "run `uv sync --extra voice`; letting everyone through"
+            "run `uv sync --locked --all-extras`; letting everyone through"
         )
-        return None
+        if not config.diagnostic:
+            return None
     return SpeakerGate(config, SherpaEncoder(config.model))
 
 
 __all__ = [
     "SpeakerGate",
+    "SpeakerDecision",
     "SpeakerEncoder",
     "SherpaEncoder",
     "build_speaker_gate",
