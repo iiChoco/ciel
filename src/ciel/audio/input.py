@@ -95,6 +95,9 @@ class MicStream:
                 ...
     """
 
+    _warn_on_digital_silence = True
+    """Raw capture should contain room noise; processed capture may be zero."""
+
     def __init__(self, config: AudioConfig, max_queued_frames: int = 100) -> None:
         self._config = config
         self._queue: deque[bytes] = deque(maxlen=max_queued_frames)
@@ -185,13 +188,14 @@ class MicStream:
         """
         assert self._wakeup is not None, "MicStream used outside its context manager"
         stalls = 0
-        silence = SilenceWatch()
+        silence = SilenceWatch() if self._warn_on_digital_silence else None
         while not self._closed:
             while self._queue:
                 frame = self._queue.popleft()
-                said = silence.push(frame)
-                if said:
-                    (log.warning if silence.silent else log.info)("%s", said)
+                if silence is not None:
+                    said = silence.push(frame)
+                    if said:
+                        (log.warning if silence.silent else log.info)("%s", said)
                 yield frame
             self._wakeup.clear()
             if self._queue:  # raced with the callback between pop and clear

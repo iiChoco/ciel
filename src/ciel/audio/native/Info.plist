@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>ai.ciel.audio</string>
+<key>CFBundleName</key><string>Ciel Audio</string>
+<key>NSMicrophoneUsageDescription</key><string>Ciel uses the microphone to hear you while removing sound played by the Mac.</string>
+</dict></plist>

@@ -2,6 +2,146 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-08 — The canceller hears; the old speaker speaks
+
+**Why.** Ciel lisped whenever her voice went through Apple's engine, and the
+lisp survived every code fix: the rates were 48 kHz all the way through, a
+Python stall no longer cut a word, and synthesis and capture faults were
+isolated. A standalone listen (`reports/2026-09-07-split-pair-experiment.py`)
+played one Piper sentence through PortAudio alone, through PortAudio while the
+helper captured, and inside the engine; only the engine lisped. Apple's far end
+treats what the engine plays as a phone call, and nothing in the helper chooses
+that.
+
+**What.**
+
+- *The speaker leaves the engine.* With `backend = "apple"`, capture still
+  comes from Apple's voice processing, but Ciel's voice plays through the
+  PortAudio speaker on the same default output. The echo reference is taken at
+  the device rather than at the engine, and the listen found the split route
+  left no more of Ciel's voice in processed capture than the engine route did.
+  A speaker failure can no longer close the microphone.
+- *The engine route is kept, named, and not default.* `audio.apple_playback`
+  chooses `portaudio` or `engine`; the latter keeps its receipts and underrun
+  accounting so the two can be compared in a room.
+- *The one-owner rule is relaxed on purpose.* The pair is still decided in one
+  place; what changed is which speaker an Apple microphone may be paired with,
+  and why. Both Apple speakers keep the processed-speech gate for barge-in; the
+  README now says that on the tested MacBook the detector calls Apple's comfort
+  noise speech, so the loudness check is what gates.
+
+**Probes.** `probe_apple_audio.py 73 → 81`: the default pair, the engine route
+by choice, an invalid choice refused, the split speaker owning no helper and
+sending it nothing, capture without a player node, and the helper reaped on
+close. `--live` now plays its tone through both routes. Existing input, spoke,
+and turn probes pass. The lisp itself was judged by ear on 2026-09-07 and
+2026-09-08, not by a probe.
+
+## 2026-09-07 — The room reports its playback gaps
+
+**Why.** The remaining findings in
+`reports/2026-09-07-apple-audio-review.md` needed observable playback failures,
+repeatable builds, and an accurate account of the Mac's lifecycle. A working
+microphone and a played receipt could not explain why a consonant sounded wrong.
+
+**What.**
+
+- *Starvation leaves a reading.* Explicit utterance boundaries let the helper
+  report an empty-queue refill without counting a normal ending or Stop. The
+  warning carries a count and lower bound on the gap; capture stays protected.
+- *A rebuild keeps its address.* Source and compiler identity govern the cache.
+  Locked atomic builds publish one owner-only executable with a stable signing
+  identifier, preserve the last working build on failure, and remove only old
+  Ciel audio hash-named files. Authorization can be checked without opening the
+  microphone. Ad-hoc signing still leaves final permission decisions to macOS.
+- *Failures explain the next step.* Missing VAD names the spoke dependency and
+  its repair command. The README states that nearby speech can duck other apps
+  between turns, minimum is not off, and launchd route recovery includes the
+  normal greeting. Echo cancellation stays enabled and the effect stays off.
+
+**Probes.** `probe_apple_audio.py 61 → 73` pins native underrun accounting,
+telemetry validation, source-error recovery, compiler changes, stable signing,
+cache cleanup, failed-build preservation, and missing VAD. Eight live smoke
+checks pass. The live stall reproduction reports one gap for the former window
+and none for the current window. Identical generated speech completed through
+PortAudio and Apple with processing off/on, with no Apple queue starvation.
+`reports/2026-09-07-apple-audio-review-response.md` records every review item and
+the remaining listening and macOS permission limitations.
+
+## 2026-09-07 — A short pause in Python need not cut a word
+
+**Why.** Ciel sounded wrong after Apple echo cancellation was enabled. The
+investigation in `reports/2026-09-07-apple-playback-investigation.md` reproduced
+a 203–214 ms gap when Python stalled for 300 ms. All three measured device
+rates were 48 kHz; a low microphone rate was not the cause on this Mac. The
+review in `reports/2026-09-07-apple-audio-review.md` also exposed two independent
+failure-boundary defects.
+
+**What.**
+
+- *The speaker has time to continue.* Twenty 50 ms buffers replace three.
+  The native queue remains bounded, starts playing immediately, and is
+  discarded on Stop. The same injected stall now leaves no internal silence.
+- *A synthesizer is not a microphone.* Source errors propagate to the caller
+  without closing healthy capture. Device transport and receipt failures still
+  end the audio session visibly. Capture lock contention now signals the worker
+  to report failure instead of silently losing a frame.
+- *The speaker names its own rate.* Core Audio supplies the default output
+  device's nominal rate independently of capture. The startup handshake checks
+  and logs negotiated input, output, and mixer rates. An unconnected output
+  node's zero-rate format is not used as the hardware rate.
+
+**Probes.** `probe_apple_audio.py 49 → 61`: the deeper queue, unchanged stop and
+receipt behavior, three synthesis-error types and subsequent recovery, device
+rates, and compiled capture-contention failure. The live probe passes seven
+checks; the separate live reproduction measures a 213.5 ms gap with the former
+window and none with the new one. Spoke and turn probes pass 56 and 78 checks.
+Echo cancellation remains enabled and the TTS effect remains off. A steady
+sibilant change is not diagnosed by this gap test; speech fidelity, snaps,
+real-room music rejection, and simultaneous user speech remain unqualified.
+
+## 2026-09-07 — The microphone can leave the speakers out
+
+**Why.** Ciel could hear its own answers or music as the next speaker, then
+open another follow-up window after answering that. Discarding buffered audio
+could not remove sound still playing in the room. The investigation in
+`reports/2026-09-07-echo-handling.md` traced the missing echo reference and the
+loudness-only interruption check.
+
+**What.**
+
+- *One engine hears and speaks.* The opt-in Apple backend pairs AVAudioEngine
+  voice processing with all of Ciel's playback. A small Swift helper, built
+  with the existing system toolchain, returns processed 16 kHz mono capture.
+  Both the local loop and the spoke use the pair; the hub stays audio-free.
+- *Finished means played.* Bounded scheduling waits for Apple's audible
+  receipts, including partial final chunks. Stop drops queued audio, cancels
+  stalled synthesis, and keeps old receipts out of the next utterance. Mute
+  schedules nothing. Apple barge-in requires speech as well as sustained energy.
+- *Failure cannot quietly remove protection.* Denied microphone access, bad
+  frames, helper death, and changed routes stop capture instead of falling back
+  to raw audio. Processed silence is allowed; missing-frame detection remains.
+  PortAudio remains the default while the room's acoustic behavior is checked.
+- *The room chooses the settings.* `audio.backend`, `apple_ducking`, and
+  `apple_agc` are documented together. Apple uses system default devices and
+  macOS 14+; minimum ducking is not zero, and gain control defaults off.
+
+**Probes.** `probe_apple_audio.py 0 → 49` covers native compilation and
+44.1/48 kHz conversion, bounded capture and playback, framing, audible receipts,
+mute, cancellation, stalled synthesis, late receipts, malformed data, helper
+failures, and speech-gated interruption in both loops. Existing input, spoke,
+turn, shortcut, and hub-import probes pass (9, 56, 78, 55, and 6 checks), as
+do endpointing and the 18 mid-thought cases with isolated configuration.
+The separate `--live` mode passes six checks on the Mac, including processed
+capture and an audible playback receipt, at both 16 and 22.05 kHz playback.
+It also exposed and resolved mismatched native I/O formats: both sides now use
+the same mono format instead of inheriting aggregate reference channels.
+No microphone audio was saved. The subsequent room trial reported lisp-like
+speech, so the previous playback backend was restored. The transport and tone
+checks did not establish speech fidelity. Apple audio remains experimental;
+speech quality, acoustic rejection, gesture recognition, and user speech over
+music are not qualified.
+
 ## 2026-09-07 — A task keeps its place
 
 **Why.** Atlas remembers a project's working state, but a remembered plan

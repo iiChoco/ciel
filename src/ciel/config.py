@@ -24,7 +24,8 @@ log = logging.getLogger(__name__)
 # ── Audio constants ──────────────────────────────────────────────────────────
 # 16 kHz mono int16 is the common denominator: webrtcvad requires it, Whisper
 # wants it, and openWakeWord expects it. Resampling anywhere in the chain is
-# pure loss, so the microphone is opened at this rate and it never changes.
+# unnecessary for raw capture. Apple voice processing converts its hardware
+# rate at the boundary; all consumers still receive this one format.
 SAMPLE_RATE = 16_000
 SAMPLE_WIDTH = 2  # bytes per sample (int16)
 CHANNELS = 1
@@ -39,6 +40,27 @@ FRAME_BYTES = FRAME_SAMPLES * SAMPLE_WIDTH  # 960
 @dataclass(frozen=True, slots=True)
 class AudioConfig:
     """Microphone capture and utterance endpointing."""
+
+    backend: Literal["portaudio", "apple"] = "portaudio"
+    """Paired microphone and playback engine. Apple enables native echo
+    cancellation on macOS 14+ using system default devices and a Swift helper.
+    Opt in after checking the room; an Apple failure never falls back to raw
+    capture. PortAudio preserves explicit input/output device selection."""
+
+    apple_playback: Literal["portaudio", "engine"] = "portaudio"
+    """Where Ciel's own voice plays when the backend is Apple. ``portaudio``
+    keeps the old speaker on the default output; the canceller's reference is
+    taken at the device, so the voice is still removed from capture. ``engine``
+    schedules it inside Apple's engine, whose far-end processing gave the
+    voice a lisp in the room on 2026-09-07; kept for comparison only."""
+
+    apple_ducking: Literal["min", "mid", "max"] = "min"
+    """Apple's attenuation of other apps while voice is active. Minimum is
+    not zero; advanced ducking relaxes attenuation between speech. Apple only."""
+
+    apple_agc: bool = False
+    """Apple automatic microphone gain. Off preserves the existing energy
+    gate's calibration; echo cancellation and noise suppression remain on."""
 
     input_device: int | str | None = None
     """Input device index or substring of its name. None = system default."""
@@ -129,8 +151,9 @@ class AudioConfig:
     barge_in: bool = False
     """Let the user interrupt Ciel mid-sentence by talking over it.
 
-    Off by default, and that default is measured rather than cautious. There is
-    no acoustic echo cancellation here, so on open speakers the microphone
+    Off by default until the room is checked. The Apple backend cancels echo
+    and adds speech detection; the PortAudio backend has no cancellation.
+    On raw capture with open speakers the microphone
     hears Ciel's own voice. On this hardware the room measured ~0.015 RMS
     quiet (~0.085 with background noise) and Ciel speaking reached ~0.18 —
     with the background up, barely a two-to-one separation, and well inside
@@ -138,9 +161,9 @@ class AudioConfig:
     catch you interrupting also catches Ciel interrupting itself, which is a
     far worse failure than not being interruptible.
 
-    **On headphones there is no echo path and this works properly — turn it
-    on.** On speakers, leave it off unless you have tuned the values below
-    against your own room using `scripts/probe_voice.py barge`."""
+    On raw capture, headphones avoid the speaker echo path. With Apple audio,
+    check speech over playback in the room before enabling interruption;
+    echo cancellation changes the signal these thresholds measure."""
 
     barge_in_ratio: float = 2.5
     """How far above the ambient noise floor a sound must be to count.

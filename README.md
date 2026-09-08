@@ -177,6 +177,10 @@ stop = "ctrl+option+escape"
 mute = "ctrl+option+m"
 
 [audio]
+backend = "portaudio"       # "apple": native echo cancellation, macOS 14+, system default devices
+apple_playback = "portaudio" # where Ciel's voice plays under "apple"; "engine" lisps, kept for comparison
+apple_ducking = "min"       # "min", "mid", "max": other audio attenuation during voice activity
+apple_agc = false           # Apple automatic microphone gain; echo cancellation stays on
 silence_ms = 500             # how long a pause ends your turn (toward 700 if she interrupts)
 barge_in = false             # see below
 ```
@@ -1413,23 +1417,118 @@ and shutdown drains submitted work before releasing ownership. The task probe
 uses real process kills and a synthetic external effect to exercise both sides
 of dispatch and commit, entirely in temporary directories.
 
-## Barge-in (off by default)
+## Echo cancellation and barge-in
 
-Talking over Ciel to interrupt it is implemented but **disabled**, because on
-laptop speakers it doesn't work reliably. There's no acoustic echo cancellation,
-so the microphone hears Ciel's own voice. Measured on this hardware: a silent
-room sits around 0.085 RMS and Ciel speaking reaches 0.18 — not enough
-separation to reliably tell "the user is interrupting" from "Ciel is talking".
+The Apple backend is **experimental**. A room trial reported lisp-like speech,
+and a controlled listen on 2026-09-07 found where it lives: one Piper sentence
+played three ways through the MacBook speakers, and only the play scheduled
+inside Apple's engine lisped. The engine reported 48 kHz on input, output, and
+mixer, and a 300 ms Python stall no longer cuts a word, so neither rate nor
+starvation explains it. Apple's voice-processing far end treats what the engine
+plays as a phone call. So the canceller hears, and the old speaker speaks: with
+`backend = "apple"`, capture comes from Apple's engine and Ciel's voice plays
+through the PortAudio speaker on the same default output. The echo reference is
+taken at the device rather than at the engine, and in that listen the split
+route left no more of Ciel's voice in the processed capture than the engine
+route did. Gesture detection and acoustic rejection in a full turn still need a
+room check; the experiment script is
+`reports/2026-09-07-split-pair-experiment.py`.
 
-**On headphones there's no echo path and it works properly.** Turn it on:
+Set the following in the **Mac's** `~/.ciel/config.toml`, then restart Ciel.
+The hub does not open an audio device.
 
 ```toml
 [audio]
-barge_in = true
+backend = "apple"
+apple_playback = "portaudio"
+apple_ducking = "min"
+apple_agc = false
 ```
 
-The detector adapts to your room's noise floor rather than using a fixed
-threshold, so it survives both a silent room and a noisy one.
+`apple_playback = "engine"` schedules Ciel's voice inside the engine instead,
+with audible receipts and underrun accounting as described below. It is kept
+so the two routes can be compared in a room; it is the route that lisped.
+
+The helper requires macOS 14 or later and the Xcode command-line tools
+(`xcode-select --install`). It compiles into `~/.ciel/bin/cielaudio`, with no
+new Python dependency. Source, embedded metadata, architecture, and compiler
+identity determine whether it rebuilds. A lock serializes builds; atomic
+replacement preserves a running helper and a failed build preserves the last
+working binary. Successful builds remove only the former `cielaudio-<hash>`
+files. The path and code-signing identifier `ai.ciel.audio` stay fixed.
+
+The signature is local and ad hoc, not a developer certificate: macOS still
+controls permission attribution and may ask again after a code change. Ciel
+does not reset permissions or remove other apps' privacy entries. Grant its
+microphone request if macOS asks; a denied request reports the Microphone page
+in System Settings. `~/.ciel/bin/cielaudio --permission-status` checks the
+calling context's authorization without requesting access or opening a mic.
+A missing `webrtcvad-wheels` installation reports the spoke dependency and
+`uv sync --locked --all-extras` repair command. This first version uses
+**system default input and output devices**: remove explicit `input_device` and
+`output_device` values and choose devices in macOS. An unsupported configuration,
+failed helper, or changed audio route ends the audio session visibly; it never
+silently switches to raw capture. Under the installed launchd service, a route
+change exits the spoke and `KeepAlive` starts it again after the service's retry
+delay, including the normal startup greeting. A foreground process must be
+restarted manually. Recovery is a new session, not seamless device switching.
+
+The processed input reaches wake detection, Barn Door, endpointing,
+confirmations, and transcription as the existing 16 kHz mono frames. Capture
+overflow or lock contention ends the session visibly. Echo-cancelled digital
+silence is normal; the missing-frame watchdog still catches a stopped capture
+stream. On the default route the speaker is the same PortAudio player the raw
+backend uses, so Stop, mute, and a lost output device behave as they always
+have, and a speaker failure never closes the microphone.
+
+On the engine route, Ciel's voice, wake acknowledgements, chimes, and alarms go
+through the same engine as the microphone. Playback remains active until Apple
+reports the last buffer played, and Stop discards scheduled sound. Up to twenty
+50 ms buffers keep a short Python stall from cutting a word; playback starts
+with the first buffer and does not wait for the window to fill. The speaker's
+hardware rate is selected independently of the microphone, and the startup log
+reports the negotiated input, output, and mixer rates. Synthesis errors stop
+that utterance without closing a healthy microphone.
+
+A refill after the last audible receipt inside an unfinished utterance logs
+`Apple playback underrun`, a count, and a lower bound on the empty-queue time.
+Normal sentence endings and Stop do not count. These diagnostics distinguish
+observed queue starvation from a possible timbre change; they do not promise to
+detect every render gap, since device latency and native callback delays can
+hide part of it. A logged gap does not disable echo cancellation.
+
+`apple_ducking` chooses Apple's attenuation of other apps during voice activity:
+`min`, `mid`, or `max`. Advanced ducking relaxes it between speech; `min` does
+not mean zero attenuation. The microphone is open between turns, so nearby
+speech can duck other apps even when nobody addresses Ciel. The supported Mac
+API has no ducking-off level; turning advanced ducking off would apply constant
+ducking instead. Minimum advanced ducking is the least intrusive supported
+choice here. `apple_agc` controls automatic microphone gain and
+is off by default to avoid adding gain changes to the existing energy gate.
+Echo cancellation and noise suppression remain enabled. Apple-mode capture
+may change snaps, claps, and speaker-verification scores, so check those in the
+room before relying on them. A separate TV or independently playing Spotify
+Connect speaker has no audio reference in this engine.
+
+**Barge-in stays off by default.** Set `[audio] barge_in = true` after checking
+that Ciel hears you over playback without interrupting itself. Both Apple routes
+add speech detection to the sustained ambient-relative loudness check. Know its
+limit: on the MacBook tested, the detector called Apple's processed silence
+speech in every frame, since the canceller's comfort noise sits well above the
+raw microphone's floor, so the loudness check is what actually gates there. With
+`backend = "portaudio"`, the original raw microphone and device selection remain
+available; there is no echo cancellation, and barge-in is most useful with
+headphones. The default backend remains `portaudio` until the room is checked.
+
+`uv run --no-sync python scripts/probe_apple_audio.py` checks the native build,
+resampling, framing, the default split pair and the engine route, playback
+receipts, interruption, synthesis-error isolation, reported device rates,
+capture contention, underrun accounting, compiler-aware builds, and cache
+cleanup without opening a microphone. Add `--live` for a separate device smoke
+check: it captures processed frames and plays a short quiet tone through each
+route, without saving audio.
+That checks the device path, not echo reduction, Spotify/browser rejection,
+speaker recognition, or simultaneous user speech; those need a room trial.
 
 ## Extending it
 
@@ -1645,6 +1744,8 @@ mic ──▶ wake word ──▶ VAD capture ──▶ whisper ──▶ Claude
 
 One loop reads the microphone and routes each frame by state: to the wake
 detector when idle, the endpointer while you're talking, the barge-in check
+uv run --no-sync python scripts/probe_apple_audio.py # Apple audio: native build, framing, audible receipts, failures; no mic
+uv run --no-sync python scripts/probe_apple_audio.py --live # processed mic + short quiet tone; no recording
 while Ciel is. Replies stream back sentence by sentence, so Ciel starts speaking
 as soon as the first complete thought exists rather than after the whole answer.
 
@@ -1655,7 +1756,7 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `shortcuts.py` | Global Mac Talk, Stop, and Mute controls, with a passive keyboard listener |
 | `commands.py` | The no-brain fast path — mechanical requests matched locally |
 | `confirm.py` | Proof Obligation — the spoken/texted yes-or-no broker |
-| `audio/` | Capture, endpointing, playback, wake (the phrase and the gesture ear), speaker identity |
+| `audio/` | Paired PortAudio or Apple voice processing, capture, endpointing, playback, wake (the phrase and the gesture ear), speaker identity |
 | `stt/`, `tts/` | Engine protocols and implementations (plus the voice effect) |
 | `brain/` | Claude client, system prompt, sessions, guards, tools |
 | `memory/` | The durable file-backed store (Invariant) |

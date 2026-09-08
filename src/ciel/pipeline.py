@@ -1218,8 +1218,7 @@ class Pipeline:
         if self._role == "hub":
             await self._run_hub()
             return
-        from ciel.audio.input import MicStream
-        from ciel.audio.output import Player
+        from ciel.audio.device import build_audio
 
         assert self._tts is not None and self._stt is not None
         await self._startup()
@@ -1227,14 +1226,14 @@ class Pipeline:
         # The mute gate rides inside the player: one choke point silences
         # everything — greeting, acks, rings, sentences, apologies — with
         # no call site knowing mute exists.
-        player = Player(
-            self._config.audio, self._tts.sample_rate, muted=lambda: self._muted
-        )
-        self._player = player
         self._turn = None
 
         try:
-            async with MicStream(self._config.audio) as mic, player:
+            microphone, player = build_audio(
+                self._config.audio, self._tts.sample_rate, muted=lambda: self._muted
+            )
+            self._player = player
+            async with microphone as mic, player:
                 self._mic = mic
                 self._confirm.bind(
                     player=player,
@@ -3358,12 +3357,10 @@ class Pipeline:
     def _check_barge_in(self, frame: bytes, player: "Player") -> None:
         """Stop playback if the user talks over Ciel.
 
-        Runs on the main frame loop, so it stays cheap — RMS against an
-        adaptive threshold, sustained across several frames. No VAD model:
-        with no echo cancellation, Ciel's own voice through the speakers *is*
-        speech and a VAD says so confidently. Relative loudness is the only
-        signal that still separates the two, and only partially — see the
-        config note on why this is off by default on speakers.
+        Runs on the main frame loop: sustained RMS above the ambient
+        threshold. Apple audio also requires speech in the processed signal;
+        the raw backend keeps its existing loudness-only behavior. Barge-in
+        stays opt-in until the microphone and speakers have been checked.
         """
         if not self._config.audio.barge_in or not player.is_playing:
             self._barge_run = 0
@@ -3375,7 +3372,8 @@ class Pipeline:
             self._config.audio.barge_in_floor,
         )
 
-        if self._rms(frame) < threshold:
+        accepts = getattr(player, "accepts_barge", None)
+        if self._rms(frame) < threshold or (accepts is not None and not accepts(frame)):
             self._barge_run = 0
             return
 

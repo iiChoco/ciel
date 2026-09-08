@@ -42,6 +42,7 @@ from typing import Any
 import numpy as np
 
 from ciel.audio.input import MicStream, float_to_pcm
+from ciel.audio.device import build_audio
 from ciel.audio.output import Player
 from ciel.audio.speaker import build_speaker_gate
 from ciel.audio.vad import Endpointer
@@ -250,12 +251,12 @@ class Spoke:
 
     async def run(self) -> None:
         await self._startup()
-        player = Player(
-            self._config.audio, self._tts.sample_rate, muted=lambda: self._muted
-        )
-        self._player = player
         try:
-            async with MicStream(self._config.audio) as mic, player:
+            microphone, player = build_audio(
+                self._config.audio, self._tts.sample_rate, muted=lambda: self._muted
+            )
+            self._player = player
+            async with microphone as mic, player:
                 self._mic = mic
                 greeting = random.choice(self._config.wake.greeting_phrases)
                 await player.play(self._tts.stream(greeting))
@@ -914,7 +915,8 @@ class Spoke:
             floor * self._config.audio.barge_in_ratio,
             self._config.audio.barge_in_floor,
         )
-        if self._rms(frame) < threshold:
+        accepts = getattr(player, "accepts_barge", None)
+        if self._rms(frame) < threshold or (accepts is not None and not accepts(frame)):
             self._barge_run = 0
             return
         self._barge_run += 1
