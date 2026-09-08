@@ -142,6 +142,29 @@ checks did not establish speech fidelity. Apple audio remains experimental;
 speech quality, acoustic rejection, gesture recognition, and user speech over
 music are not qualified.
 
+## 2026-09-07 — The controls plan follows the turn
+
+**Why.** The stage-two review found that the installed SDK gives an in-process
+tool no tool-use ID to establish authority. Attendance, batched request identity,
+and session privacy also needed concrete contracts before implementation.
+
+**What.**
+
+- *Authority belongs to one turn.* The revised
+  [plan](design/2026-09-07-task-controls-plan.md) follows
+  `reports/2026-09-07-task-controls-plan-review.md`, with immutable
+  turn bindings installed after the drain, authority withheld while drain debt
+  remains, a separate public client, and minted Chart message IDs. The appended
+  revision check keeps the private client warm and adds gates for stale calls,
+  cross-tab identity, and retries whose batch membership changes.
+- *Saved requests keep waiting.* The plan specifies atomic resource waits,
+  current-record controls from tools, rendered revisions from Chart, admission
+  on the wire, controller journaling, and the expanded probes and temporary
+  fixtures needed to verify them. Runtime behavior remains stage one.
+
+**Probes.** Documentation only: local links and command paths checked against
+current files; `git diff --check`. No runtime probe or service check required.
+
 ## 2026-09-07 — A task keeps its place
 
 **Why.** Atlas remembers a project's working state, but a remembered plan
