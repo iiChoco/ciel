@@ -2,6 +2,53 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-07 — A task keeps its place
+
+**Why.** Atlas remembers a project's working state, but a remembered plan
+cannot distinguish an action never sent from one that happened just before a
+crash. Stage one of durable tasks gives the runtime that distinction before
+it gains an executor, following the plan and its review in
+`reports/2026-09-07-durable-tasks-plan-review.md` and
+`reports/2026-09-07-durable-tasks-review-response.md`. The storage review in
+`reports/2026-09-07-task-store-review.md` also caught three ways a watch could
+stop: a concurrent reader, eight ordinary polls, and a second commit on the PR.
+Those findings are addressed before the executor arrives.
+
+**What.**
+
+- *One responsibility, one durable record.* Typed task, scope, criterion,
+  step, attempt, observation, history, and notice records live in a private
+  SQLite store with one worker thread and one process owner. Task changes,
+  evidence, and notification intent commit together. Originating requests
+  deduplicate; revisions reject stale callbacks; allowances survive restart.
+- *Recovery says what is known.* Prepared attempts and dispatched reads can
+  return to the queue. Possibly dispatched mutations wait for reconciliation;
+  pause, cancellation, and resume cannot quietly turn uncertainty into a
+  second action. Recorded observations resume verification without dispatch.
+- *Completion has a gate.* Fresh exact-value evidence for every criterion
+  and target revision is required for `done`, which commits with its notice.
+  Corrupt, incomplete, foreign, and newer stores are refused without reset;
+  cancelled callers and failed writes cannot masquerade as clean rollbacks.
+- *A watch can keep watching.* A bounded SQLite lock wait refuses one operation
+  without poisoning a certainly rolled-back store. Clean checkpoints leave the
+  retry allowance alone; a separate durable polling bound counts every round.
+  A trusted read can retarget a changed head, with a revision-checked history
+  entry that preserves scope, desired values, and the originating request.
+- *A foundation, not a new background agent.* `[tasks]` documents the storage
+  bounds. No runtime store, model tools, scheduler, GitHub adapter, delivery,
+  or external action is enabled in this stage. Existing guards stay intact.
+
+**Probes.** `probe_tasks.py 0 → 140` (92 → 140 after review): identity and owner
+scope, transitions and stale results, evidence and budgets, private storage and competing processes,
+schema refusal, real process kills around dispatch/commit, cancellation,
+shutdown, and injected storage failures. The review regressions hold read and
+write locks, refuse a failed rollback, poll across a reopen for over three hours,
+exhaust each allowance independently, and complete a retargeted head while
+rejecting stale callbacks and old-head evidence. Repeated recovery now closes
+and reopens the store. The review reproduction's `--accept` mode verifies all
+three findings against the fix. All state and external effects are fixtures in
+temporary directories.
+
 ## 2026-09-07 — Ciel asks to hear the keys
 
 **Why.** Enabled shortcuts only logged that Input Monitoring was missing,

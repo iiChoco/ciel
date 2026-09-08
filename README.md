@@ -140,6 +140,7 @@ environment variables for one-off runs. (Two carve-outs: `[mcp.<name>]`
 connector tables are TOML-only, and `state_dir`/`log_level` sit at the top
 level, outside any section.) The [Spotify connector](#spotify-from-whichever-device-is-playing)
 uses its own `[spotify]` section, documented with the account setup below.
+The `[tasks]` storage fields are documented under [Durable task records](#durable-task-records-stage-one).
 
 ```toml
 [brain]
@@ -1323,6 +1324,95 @@ Three mechanisms, deliberately separate:
 Only the one-line summaries go into the prompt each turn. Full contents load on
 demand, which is what keeps memory affordable as it grows.
 
+## Durable task records (stage one)
+
+A task is the runtime's record of a mandate: the desired outcome, explicit
+scope, completion criteria, next step, attempts, observations, and the reason
+it is waiting. Atlas remains the project notebook. `tasks.py` provides this
+storage foundation; task commands, Chart controls, scheduling, GitHub access,
+notification delivery, and execution are later stages. No production process
+opens a task store yet, and this change creates no live task database.
+
+The store uses Python's built-in SQLite in a dedicated private directory, with
+one worker thread and a process ownership lock. Task state, attempt state,
+history, evidence, and notification intent commit together. It uses a DELETE
+rollback journal with EXTRA synchronization; database and journal files stay
+owner-only. A corrupt, foreign, incomplete, or newer schema is refused without
+resetting it. A rolled-back executable cannot silently downgrade the store.
+An existing directory must be dedicated to tasks and have mode `0700`; the
+store refuses a shared directory rather than changing its permissions.
+
+```toml
+[tasks]
+enabled = false              # reserved for runtime integration; no executor in stage one
+directory = "~/.ciel/tasks"  # contains tasks.sqlite3 and owner.lock
+max_active = 32
+max_attempts = 8
+max_polls = 288
+busy_timeout_s = 5.0
+evidence_max_age_s = 300.0
+max_record_chars = 16000
+```
+
+These fields also accept `CIEL_TASKS_*` environment overrides. `max_active`
+bounds non-terminal records. `max_attempts` counts attempts that end without a
+clean checkpoint or completion: interruptions, failures during an attempt, and
+uncertain actions. Successful polling does not spend or refill it. `max_polls`
+bounds all claimed execution rounds, including retries and mutations; the
+default allows 288 rounds (24 hours at five-minute intervals). A read followed
+by a durable wait also counts as a clean checkpoint. Both allowances and the
+evidence-age limit are captured at creation; defaults and restarts cannot refill
+them. Attempt history retains every round and records clean checkpoints.
+A rejected claim reports an exhausted allowance; a later runner must persist
+its wait/failure policy explicitly. The size limit bounds each serialized
+request, next step, and observation batch. Enabling the reserved flag does not
+start scheduling in this stage.
+
+SQLite waits up to `busy_timeout_s` for a lock on the worker thread. If that
+wait expires, `TaskBusy` refuses the operation after a certain rollback; the
+same store remains usable when the reader or writer leaves. A failed rollback,
+corruption, or other storage failure disables the handle until reopening.
+
+The internal async `TaskStore` API can create/deduplicate an owner request,
+inspect/list records, claim an attempt, record dispatch intent and observations,
+checkpoint a scoped next step, retarget an observed head, wait, pause, cancel,
+fail, or resume. Structured attempts, observations, history, and notices are
+available for inspection.
+Owner identity, origin privacy/attendance, and a step's read/mutation class
+must come from trusted runtime/adapter context when tools are added. A stored
+scope or dispatch marker grants no tool permission and bypasses no broker.
+
+Every change checks the expected task revision. Old callbacks cannot dispatch
+or complete a replaced attempt. Reopening recovers prepared attempts and
+interrupted reads to the queue; a possibly dispatched mutation becomes
+`waiting/reconciliation`. Pause/resume cannot erase that uncertainty, and
+cancellation records it rather than pretending to undo the action. Reconciliation
+adapters are not implemented yet: uncertain actions remain blocked.
+
+Only `complete` can enter `done`: all criteria must have matching observations
+for the current attempt, with the expected target revision and acceptable age.
+Stage one supports exact string-value criteria; it does not independently read
+external systems. The later verifier must supply authentic observations and
+recheck changing targets. Empty, stale, unknown, or mismatched evidence cannot
+complete a task. Completion and its durable notification intent are atomic;
+reading a notice has no delivery or execution side effect.
+
+When a trusted read observes a changed head, `retarget` takes the owner, expected
+task revision, target, and new target revision. It requires fresh evidence of
+that head from the current read attempt and moves all criteria for that target
+together, recording old and new revisions in history. Expected values and scope
+stay fixed, and the original request remains available for deduplication. Old
+callbacks are fenced by the new task revision; evidence for the old head still
+cannot complete any retargeted criterion. The adapter must checkpoint the next
+read's arguments if they name a head explicitly.
+
+Cancelling an async caller does not roll back a transaction already running on
+the worker. Reread the record instead of assuming failure. Request identity
+makes creation retries idempotent, revisions reject stale transition retries,
+and shutdown drains submitted work before releasing ownership. The task probe
+uses real process kills and a synthetic external effect to exercise both sides
+of dispatch and commit, entirely in temporary directories.
+
 ## Barge-in (off by default)
 
 Talking over Ciel to interrupt it is implemented but **disabled**, because on
@@ -1496,6 +1586,7 @@ uv run scripts/probe_audio.py mic     # live capture -> /tmp/ciel_capture.wav
 uv run scripts/probe_voice.py speak   # TTS + playback only
 uv run scripts/probe_voice.py barge   # interrupt path
 uv run scripts/probe_voice.py echo    # mic -> STT -> TTS, no model in the loop
+uv run --no-sync python scripts/probe_tasks.py       # durable task records, ownership, evidence, and crash recovery
 uv run --no-sync python scripts/probe_shellguard.py  # confirmation and mutating command options
 uv run --no-sync python scripts/probe_shortcuts.py   # global Mac controls: chords, lifecycle, interruption, mute, both voice paths
 uv run --no-sync python scripts/probe_speaker.py     # Barn Door: diagnostic policy, private readings, both voice paths
@@ -1576,6 +1667,7 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `music.py` | Spotify on the Mac, through one narrow AppleScript door |
 | `spotify.py` | Spotify Web API — browser login, search and Connect playback from the brain's host |
 | `projects.py` | Atlas — durable working state per project |
+| `tasks.py` | Stage-one task records, private transactional storage, evidence, and recovery; no executor yet |
 | `transcript.py` | Trace — the record of the path actually taken |
 | `reload.py` | Analytic Continuation — watch the source, re-exec, resume |
 | `oura.py` | The Oura client — sleep, readiness, activity; read-only |

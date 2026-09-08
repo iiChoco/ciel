@@ -2038,6 +2038,35 @@ class WorldConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TasksConfig:
+    """Durable task records. Stage one exposes storage, not an executor."""
+
+    enabled: bool = False
+    """Reserved for runtime integration; does not start scheduling in stage one."""
+
+    directory: Path = field(default_factory=lambda: Path.home() / ".ciel" / "tasks")
+    """Dedicated owner-only directory for the database and ownership lock."""
+
+    max_active: int = 32
+    """Maximum non-terminal tasks admitted to the store."""
+
+    max_attempts: int = 8
+    """Maximum attempts ending without a clean checkpoint; captured at creation."""
+
+    max_polls: int = 288
+    """Total execution rounds, including retries; captured at creation, never refilled."""
+
+    busy_timeout_s: float = 5.0
+    """How long a store operation waits for a SQLite lock before refusing it."""
+
+    evidence_max_age_s: float = 300.0
+    """Maximum evidence age at completion, captured separately for each task."""
+
+    max_record_chars: int = 16000
+    """Maximum serialized size of a request, step, or set of observations."""
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
@@ -2049,6 +2078,7 @@ class Config:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     reflection: ReflectionConfig = field(default_factory=ReflectionConfig)
     projects: ProjectsConfig = field(default_factory=ProjectsConfig)
+    tasks: TasksConfig = field(default_factory=TasksConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
     shell: ShellConfig = field(default_factory=ShellConfig)
     journal: JournalConfig = field(default_factory=JournalConfig)
@@ -2101,6 +2131,7 @@ _SECTIONS = {
     "memory": MemoryConfig,
     "reflection": ReflectionConfig,
     "projects": ProjectsConfig,
+    "tasks": TasksConfig,
     "files": FilesConfig,
     "shell": ShellConfig,
     "journal": JournalConfig,
