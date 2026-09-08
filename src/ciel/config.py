@@ -183,6 +183,23 @@ class AudioConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ShortcutsConfig:
+    """Global Mac controls, independent of the wake detector."""
+
+    enabled: bool = False
+    """Listen for shortcuts on the Mac; requires Input Monitoring permission."""
+
+    talk: str = "ctrl+option+space"
+    """Interrupt the current voice response and open listening, unless muted."""
+
+    stop: str = "ctrl+option+escape"
+    """Interrupt the response and close the listening window."""
+
+    mute: str = "ctrl+option+m"
+    """Toggle the existing persisted mute switch; muting also interrupts."""
+
+
+@dataclass(frozen=True, slots=True)
 class WakeConfig:
     """How Ciel decides it's being addressed."""
 
@@ -2108,6 +2125,7 @@ class TasksConfig:
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
+    shortcuts: ShortcutsConfig = field(default_factory=ShortcutsConfig)
     gestures: GestureConfig = field(default_factory=GestureConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     stt: STTConfig = field(default_factory=STTConfig)
@@ -2161,6 +2179,7 @@ class Config:
 _SECTIONS = {
     "audio": AudioConfig,
     "wake": WakeConfig,
+    "shortcuts": ShortcutsConfig,
     "gestures": GestureConfig,
     "voice": VoiceConfig,
     "stt": STTConfig,

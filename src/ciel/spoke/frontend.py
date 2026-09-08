@@ -48,6 +48,7 @@ from ciel.audio.speaker import build_speaker_gate
 from ciel.audio.vad import Endpointer
 from ciel.audio.wake import WakeDetector, build_wake_detector, wake_phrases
 from ciel.commands import match as match_command
+from ciel.shortcuts import GlobalShortcuts
 from ciel.config import SAMPLE_RATE, Config
 from ciel.pipeline import _SLEEP_GAP_S, build_tts, trails_off
 from ciel.reload import SourceWatcher, default_roots
@@ -97,6 +98,13 @@ async def _one(data: bytes):
 
 class Spoke:
     """Runs the room until stopped."""
+
+    _shortcuts: GlobalShortcuts | None = None
+    _talk_requested = False
+    _cancel_next_voice_turn = False
+    _silenced_turn: str | None = None
+    _shortcut_quiet = False
+    _shortcut_epoch = 0
 
     _world: WorldRelay | None = None
     _hub_lane: str | None = None
@@ -258,6 +266,8 @@ class Spoke:
             self._player = player
             async with microphone as mic, player:
                 self._mic = mic
+                self._shortcuts = GlobalShortcuts(self._config.shortcuts, self._shortcut)
+                await self._shortcuts.start()
                 greeting = random.choice(self._config.wake.greeting_phrases)
                 await player.play(self._tts.stream(greeting))
                 mic.drain()
@@ -265,6 +275,8 @@ class Spoke:
                 self._last_wall = time.time()
 
                 async for frame in mic.frames():
+                    if self._take_shortcut_talk():
+                        continue
                     now_wall = time.time()
                     if now_wall - self._last_wall > _SLEEP_GAP_S:
                         log.info("wall clock jumped %.0f s — woke from sleep", now_wall - self._last_wall)
@@ -315,8 +327,10 @@ class Spoke:
                         self._track_noise_floor(frame)
                         if not self._muted and self._wake.push(frame):
                             self._wake_source = getattr(self._wake, "source", None) or "spoken"
+                            epoch = self._shortcut_epoch
                             await self._acknowledge(player, mic)
-                            self._enter_listening()
+                            if epoch == self._shortcut_epoch:
+                                self._enter_listening()
 
                     elif self._state is State.LISTENING:
                         if self._followup_expired():
@@ -415,6 +429,9 @@ class Spoke:
         await self._tts.warm_up()
 
     async def _shutdown(self) -> None:
+        if self._shortcuts is not None:
+            await self._shortcuts.close()
+            self._shortcuts = None
         closers = [
             self._stt.close(),
             self._tts.close(),
@@ -521,6 +538,8 @@ class Spoke:
         """One whole utterance to the hub. The console line here is the
         room's record; the hub keeps the transcript."""
         print(f"\n  you: {text}", flush=True)
+        self._shortcut_quiet = False
+        self._cancel_next_voice_turn = False
         self._interrupted = False
         self._spoke = False
         self._prev_kind = None
@@ -537,6 +556,10 @@ class Spoke:
 
     def _finish_turn(self, mic: MicStream) -> None:
         """The BUSY exit: drain, then the follow-up window or waiting."""
+        if self._shortcut_quiet or self._muted:
+            self._continue_listening = False
+            self._enter_waiting()
+            return
         if self._continue_listening:
             # Mid-thought: straight back to listening, no drain —
             # nothing was played, and the queue holds whatever was said
@@ -571,6 +594,7 @@ class Spoke:
             self._world.resend()
 
     def _on_disconnect(self) -> None:
+        self._cancel_next_voice_turn = False
         if self._hub_turn is not None or self._awaiting_hub:
             # The turn died with the socket; the loop finishes it.
             log.warning("hub dropped mid-turn")
@@ -587,6 +611,7 @@ class Spoke:
                 # no filler, no BUSY, no follow-up window afterwards.
                 self._hub_turn = frame["turn_id"]
                 self._hub_lane = "web"
+                self._shortcut_quiet = False
                 self._prev_kind = None
                 return
             if lane != "voice":
@@ -597,14 +622,25 @@ class Spoke:
             self._turn_deadline = time.monotonic() + self._config.hub.speak_timeout_s
             self._prev_kind = None
             self._state = State.BUSY
+            if self._cancel_next_voice_turn:
+                self._cancel_next_voice_turn = False
+                self._silenced_turn = self._hub_turn
+                self._link.send({"type": "turn.cancel", "turn_id": self._hub_turn,
+                                 "reason": "keyboard shortcut"})
+                return
+            self._shortcut_quiet = False
             if self._config.brain.ack_phrases:
                 self._ack_task = asyncio.create_task(self._ack_filler())
         elif kind == "turn.sentence":
             if frame["turn_id"] != self._hub_turn:
                 log.debug("sentence for a turn that is not ours — ignored")
                 return
+            if self._shortcut_quiet or frame["turn_id"] == self._silenced_turn:
+                self._link.send({"type": "turn.played", "turn_id": frame["turn_id"],
+                                 "n": int(frame.get("n") or 0), "completed": False})
+                return
             self._playing = asyncio.create_task(self._play_sentence(
-                frame["turn_id"], int(frame.get("n") or 0), frame["kind"], frame["text"]
+                frame["turn_id"], int(frame.get("n") or 0), frame["kind"], frame["text"], epoch=self._shortcut_epoch
             ))
         elif kind == "turn.end":
             if frame["turn_id"] == self._hub_turn:
@@ -613,8 +649,11 @@ class Spoke:
                 self._confirm = None
                 asyncio.create_task(self._ack_done())
         elif kind == "confirm.request":
+            if self._shortcut_quiet:
+                self._link.send({"type": "confirm.answer", "confirm_id": frame["confirm_id"], "text": "no"})
+                return
             asyncio.create_task(self._ask(
-                frame["confirm_id"], frame["text"], bool(frame.get("listen"))
+                frame["confirm_id"], frame["text"], bool(frame.get("listen")), epoch=self._shortcut_epoch
             ))
         elif kind == "confirm.cancel":
             if self._confirm is not None and self._confirm[0] == frame["confirm_id"]:
@@ -645,6 +684,7 @@ class Spoke:
     async def _play_sentence(self, turn_id: str, n: int, kind: str, text: str) -> None:
         """One sentence through the speakers, receipted."""
         assert self._player is not None
+        epoch = self._shortcut_epoch if epoch is None else epoch
         completed = True
         spoken_back = self._hub_lane == "web"
         if spoken_back:
@@ -653,12 +693,18 @@ class Spoke:
             self._delivering = True
         try:
             await self._ack_done()
+            if self._shortcut_quiet or turn_id == self._silenced_turn or epoch != self._shortcut_epoch:
+                completed = False
+                return
             if (
                 self._prev_kind == "thinking"
                 and kind == "reply"
                 and self._config.brain.thinking_chime
             ):
                 await self._chime()
+            if self._shortcut_quiet or turn_id == self._silenced_turn or epoch != self._shortcut_epoch:
+                completed = False
+                return
             self._prev_kind = kind
             self._indicator.set_state("reasoning" if kind == "thinking" and
                                       self._config.brain.speak_thinking else "speaking")
@@ -687,17 +733,20 @@ class Spoke:
 
     async def _ask(self, confirm_id: str, text: str, listen: bool) -> None:
         """Speak a confirm line; open the answer window when asked to."""
+        epoch = self._shortcut_epoch if epoch is None else epoch
         assert self._player is not None and self._mic is not None
         if self._playing is not None and not self._playing.done():
             with contextlib.suppress(Exception):
                 await self._playing
         await self._ack_done()
         self._confirm = None
+        if self._shortcut_quiet or epoch != self._shortcut_epoch:
+            return
         try:
             await self._player.play(self._tts.stream(text))
         except Exception:  # noqa: BLE001 - a gate that cannot ask still listens
             log.debug("could not speak the confirmation prompt", exc_info=True)
-        if not listen:
+        if not listen or self._shortcut_quiet or epoch != self._shortcut_epoch:
             return
         self._mic.drain()
         self._confirm_endpointer.reset()
@@ -713,16 +762,19 @@ class Spoke:
         utterance = self._confirm_endpointer.push(frame)
         if utterance is not None:
             self._confirm = None
-            asyncio.create_task(self._answer(confirm_id, utterance))
+            asyncio.create_task(self._answer(confirm_id, utterance, epoch=self._shortcut_epoch))
         elif time.monotonic() >= deadline and not self._confirm_endpointer.speaking:
             self._confirm = None
             self._indicator.set_state("thinking")
             self._link.send({"type": "confirm.answer", "confirm_id": confirm_id, "text": ""})
 
-    async def _answer(self, confirm_id: str, utterance: np.ndarray) -> None:
+    async def _answer(self, confirm_id: str, utterance: np.ndarray, *, epoch: int | None = None) -> None:
+        epoch = self._shortcut_epoch if epoch is None else epoch
         self._indicator.set_state("thinking")
         try:
             heard = (await self._stt.transcribe(utterance)).strip()
+            if self._shortcut_quiet or epoch != self._shortcut_epoch:
+                return
         except Exception:  # noqa: BLE001 - an untranscribable answer is no answer
             log.debug("could not transcribe the answer", exc_info=True)
             heard = ""
@@ -730,6 +782,7 @@ class Spoke:
 
     async def _deliver(self, event_id: str, text: str, meta: dict[str, Any]) -> None:
         """An unprompted line at idle: ring, speak, receipt."""
+        epoch = self._shortcut_epoch
         assert self._player is not None and self._mic is not None
         self._delivering = True
         ok = True
@@ -738,6 +791,8 @@ class Spoke:
             if meta.get("ring"):
                 with contextlib.suppress(Exception):
                     await self._player.play(_one(ring_pcm(self._tts.sample_rate)))
+            if epoch != self._shortcut_epoch:
+                return
             print(f"\n  ciel ({meta.get('kind') or meta.get('source') or 'nudge'}): {text}", flush=True)
             completed = await self._player.play(self._tts.stream(text))
             # Barge-in mid-nudge still counts as delivered; a dead device
@@ -757,6 +812,7 @@ class Spoke:
     async def _ring_locally(self, due: list) -> None:
         """A timer the hub could not ring: the ring, the announcement,
         the same words the hub would have used."""
+        epoch = self._shortcut_epoch
         assert self._player is not None and self._mic is not None
         if self._muted:
             # Rechecked at the moment of playback, not just at the poll:
@@ -770,6 +826,9 @@ class Spoke:
             for timer in due:
                 if self._muted:
                     break  # muted mid-ring: the rest wait for the unmute
+                if epoch != self._shortcut_epoch:
+                    self._timers.mark_rung(timer.id, time.time())
+                    continue  # Stop acknowledges this ring; it must not ring again.
                 text = self._timers.announcement(timer)
                 print(f"\n  ciel ({timer.kind}, local): {text}", flush=True)
                 self._timers.mark_rung(timer.id, time.time())
@@ -863,6 +922,52 @@ class Spoke:
 
     # ── mute, presence of speech, the room ───────────────────────────────────
 
+    async def _shortcut(self, action: str) -> None:
+        if action == "talk" and self._muted:
+            return
+        if action == "mute":
+            self._set_muted(not self._muted)
+            if not self._muted:
+                return
+        self._shortcut_epoch += 1
+        self._talk_requested = action == "talk"
+        self._shortcut_quiet = True
+        self._interrupted = True
+        self._pending_text = None
+        self._continue_listening = False
+        if self._player is not None:
+            self._player.stop()
+        for task in (self._prelude, self._ack_task):
+            if task is not None:
+                task.cancel()
+        prelude, self._prelude = self._prelude, None
+        if self._confirm is not None:
+            self._link.send({"type": "confirm.answer", "confirm_id": self._confirm[0], "text": "no"})
+            self._confirm = None
+        if self._hub_turn is not None:
+            self._silenced_turn = self._hub_turn
+            self._link.send({"type": "turn.cancel", "turn_id": self._hub_turn,
+                             "reason": "keyboard shortcut"})
+        elif self._awaiting_hub:
+            self._cancel_next_voice_turn = True
+        else:
+            self._enter_waiting()
+        if prelude is not None:
+            await asyncio.gather(prelude, return_exceptions=True)
+
+    def _take_shortcut_talk(self) -> bool:
+        if (not self._talk_requested or self._state is not State.WAITING
+                or self._delivering or self._ringing or self._hub_turn is not None
+                or self._awaiting_hub or (self._playing is not None and not self._playing.done())):
+            return False
+        self._talk_requested = False
+        if self._muted:
+            return False
+        self._mic.drain()
+        self._wake_source = "hotkey"
+        self._enter_listening()
+        return True
+
     def _set_muted(self, muted: bool, *, from_hub: bool = False) -> None:
         if muted == self._muted:
             return
@@ -938,6 +1043,7 @@ class Spoke:
     # ── state transitions ────────────────────────────────────────────────────
 
     def _enter_listening(self) -> None:
+        self._shortcut_quiet = False
         self._state = State.LISTENING
         self._endpointer.reset()
         timeout_ms = self._config.audio.wake_timeout_ms

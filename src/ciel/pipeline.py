@@ -55,6 +55,7 @@ from ciel.brain.agent import Brain
 from ciel.brain.prompt import REFLECTION_PROMPT, proactive_prompt
 from ciel.brain.tools import build_tool_server
 from ciel.brain.tools.memory import bind_context as bind_memory_context
+from ciel.shortcuts import GlobalShortcuts
 from ciel.config import SAMPLE_RATE, AudioConfig, Config
 from ciel.confirm import VoiceConfirmBroker
 from ciel.messages import MessagesClient, MessagesUnavailable
@@ -758,6 +759,11 @@ def rehydrate_schedule(
 class Pipeline:
     """Runs Ciel until stopped."""
 
+    _shortcuts: GlobalShortcuts | None = None
+    _talk_requested = False
+    _shortcut_quiet = False
+    _shortcut_epoch = 0
+
     _world: World | None = None
     """The world table (Phase Space, ``world.py``), or None when
     ``[world]`` is off. A class default rather than only an instance
@@ -1235,6 +1241,8 @@ class Pipeline:
             self._player = player
             async with microphone as mic, player:
                 self._mic = mic
+                self._shortcuts = GlobalShortcuts(self._config.shortcuts, self._shortcut)
+                await self._shortcuts.start()
                 self._confirm.bind(
                     player=player,
                     mic=mic,
@@ -1272,6 +1280,8 @@ class Pipeline:
                 # pulling frames, barge-in becomes impossible — there is
                 # nothing left listening for the user talking over Ciel.
                 async for frame in mic.frames():
+                    if self._take_shortcut_talk():
+                        continue
                     # Sleep detection first: one vDSO clock read per frame.
                     # Everything below runs against monotonic deadlines that
                     # paused with the process, so after a nap they are all
@@ -1338,8 +1348,10 @@ class Pipeline:
                                 # the ack.
                                 self._unattended_hastened = True
                                 await self._brain.interrupt()
+                            epoch = self._shortcut_epoch
                             await self._acknowledge(player, mic)
-                            self._enter_listening()
+                            if epoch == self._shortcut_epoch:
+                                self._enter_listening()
 
                     elif self._state is State.LISTENING:
                         if self._followup_expired():
@@ -1369,7 +1381,10 @@ class Pipeline:
                         if self._turn is not None and self._turn.done():
                             self._turn_crashed()  # surface any exception from the turn
                             self._turn = None
-                            if self._continue_listening:
+                            if self._shortcut_quiet or self._muted:
+                                self._continue_listening = False
+                                self._enter_waiting()
+                            elif self._continue_listening:
                                 # The utterance ended mid-thought; go straight
                                 # back to listening. No drain — nothing was
                                 # played, and the queue holds whatever was said
@@ -2376,6 +2391,40 @@ class Pipeline:
                 })
         return agents
 
+    async def _shortcut(self, action: str) -> None:
+        if action == "talk" and self._muted:
+            return
+        if action == "mute":
+            self._set_muted(not self._muted)
+            if not self._muted:
+                return
+        self._shortcut_epoch += 1
+        self._talk_requested = action == "talk"
+        self._shortcut_quiet = True
+        self._interrupted = True
+        self._pending_text = None
+        self._continue_listening = False
+        if self._player is not None:
+            self._player.stop()
+        self._confirm.cancel("keyboard shortcut")
+        turn, self._turn = self._turn, None
+        if turn is not None:
+            turn.cancel()
+        await self._brain.interrupt()
+        if turn is not None:
+            await asyncio.gather(turn, return_exceptions=True)
+        self._enter_waiting()
+
+    def _take_shortcut_talk(self) -> bool:
+        if not self._talk_requested or self._state is not State.WAITING:
+            return False
+        self._talk_requested = False
+        if self._muted:
+            return False
+        self._mic.drain()
+        self._enter_listening()
+        return True
+
     def _set_muted(self, muted: bool, *, from_spoke: bool = False) -> None:
         """Move the mute switch — from the GUI, the sentinel poll, or (on
         the hub) the spoke's report. The hub touches no sentinel and
@@ -3081,6 +3130,7 @@ class Pipeline:
         delivery per timer; a timer with no spoke to ring is one event
         row, not a lost loop.
         """
+        epoch = self._shortcut_epoch
         self._indicator.set_state("speaking")
         try:
             if self._role == "hub":
@@ -3106,6 +3156,8 @@ class Pipeline:
             assert player is not None and mic is not None and self._tts is not None
             await self._play_ring(player)
             for timer in fired:
+                if epoch != self._shortcut_epoch:
+                    break
                 text = announcement(timer)
                 if missed:
                     text = f"While I was off, a {timer.kind} went off. {text}"
@@ -3404,6 +3456,7 @@ class Pipeline:
     # ── state transitions ────────────────────────────────────────────────────
 
     def _enter_listening(self) -> None:
+        self._shortcut_quiet = False
         self._state = State.LISTENING
         self._endpointer.reset()
         # Even a wake-word start gets a deadline: a false wake with no speech
@@ -3678,6 +3731,9 @@ class Pipeline:
         await self._tts.warm_up()
 
     async def _shutdown(self) -> None:
+        if self._shortcuts is not None:
+            await self._shortcuts.close()
+            self._shortcuts = None
         closers = [
             self._brain.close(),
             self._indicator.close(),
