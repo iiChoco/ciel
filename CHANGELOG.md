@@ -2,6 +2,27 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — The keyboard is asked only where there is one
+
+**Why.** Every hub restart since 2026-09-06 logged a `PermissionError`
+traceback from asyncio: under systemd the process's stdin is `/dev/null`,
+which the selector cannot watch, and `connect_read_pipe` accepts the
+descriptor anyway and refuses it later, in a loop callback, past the try
+that was meant to catch a stdin that is not readable. Fourteen tracebacks
+in three days, none of them a fault, all of them noise in the journal.
+
+**What.**
+
+- *Look before attaching.* The typed lane looks at fd 0 first and attaches
+  only to a terminal, a pipe, or a socket; anything else is declined with one
+  info line and voice carries on. A service manager's `/dev/null` and a
+  closed terminal now read the same way, quietly.
+
+**Probes.** `probe_turns.py 78 → 80: a /dev/null stdin is declined before
+anything is attached with no callback traceback; a pipe is still a chatbox
+whose line is queued and whose EOF ends the reader quietly.` Rerun unchanged:
+probe_hub_arbiter.py 61; hub import clean; the spoke reloaded to ready.
+
 ## 2026-09-09 — The inbox is read as data, and a preview writes nothing
 
 **Why.** The foundation's four gates hold against a synthetic adapter and

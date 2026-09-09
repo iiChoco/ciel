@@ -17,7 +17,9 @@ from __future__ import annotations
 
 
 import asyncio
+import os
 import sys
+from collections import deque
 from dataclasses import replace
 from pathlib import Path
 
@@ -697,6 +699,36 @@ def probe_registry() -> None:
     )
 
 
+async def probe_keyboard() -> None:
+    print("\nthe keyboard, only where there is one")
+    loop = asyncio.get_running_loop()
+    complaints: list[str] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda l, ctx: complaints.append(str(ctx.get("message"))))
+    saved = sys.stdin
+    try:
+        p = make_pipeline(STREAM)
+        p._typed = deque()
+        p._wake = None
+        with open(os.devnull, "rb") as null:
+            sys.stdin = null
+            await p._read_stdin()
+            await asyncio.sleep(0.05)
+        check("a service manager's /dev/null stdin is declined before anything is attached, with no callback traceback",
+              not complaints and not p._typed)
+        read_end, write_end = os.pipe()
+        os.write(write_end, b"hello from the pipe\n\n")
+        os.close(write_end)
+        with os.fdopen(read_end, "rb") as piped:
+            sys.stdin = piped
+            await p._read_stdin()
+        check("a pipe is a chatbox: its line is queued as typed input and EOF ends the reader quietly",
+              [line for _, line in p._typed] == ["hello from the pipe"] and not complaints)
+    finally:
+        sys.stdin = saved
+        loop.set_exception_handler(previous)
+
+
 async def probe_speak_back() -> None:
     print("\nspeak back: typed replies spoken in the room")
     from ciel.pipeline import _SpokenTextSink, _TextSink
@@ -779,6 +811,7 @@ async def main() -> int:
     await probe_local_commands()
     await probe_failures()
     await probe_stream_death()
+    await probe_keyboard()
     await probe_speak_back()
     print(f"\nall {len(CHECKS)} checks passed")
     return 0

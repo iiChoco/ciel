@@ -44,6 +44,8 @@ import sys
 import time
 from collections import deque
 import contextlib
+import os
+import stat
 from contextlib import AsyncExitStack, aclosing
 from dataclasses import replace as dc_replace
 from pathlib import Path
@@ -2636,7 +2638,22 @@ class Pipeline:
         a closed terminal, probes piping their own stdin. Typed input is a
         convenience like the indicator: it must never be able to take the
         voice loop down with it.
+
+        The descriptor is looked at before anything is attached to it. A
+        service manager hands the process ``/dev/null`` for stdin, which
+        the selector cannot watch: ``connect_read_pipe`` accepts it and the
+        refusal arrives later, as a loop callback's traceback, past any
+        try. Only a terminal, a pipe, or a socket is a chatbox.
         """
+        try:
+            fd = sys.stdin.fileno()
+            mode = os.fstat(fd).st_mode
+        except (OSError, ValueError, AttributeError):
+            log.debug("stdin not readable — typed input disabled", exc_info=True)
+            return
+        if not (os.isatty(fd) or stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)):
+            log.info("stdin is not a terminal or a pipe — typed input disabled")
+            return
         loop = asyncio.get_running_loop()
         reader = asyncio.StreamReader()
         try:

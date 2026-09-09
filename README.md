@@ -233,7 +233,10 @@ not push-to-talk; holding a key does not repeat. Stop denies any pending
 confirmation and discards a held partial utterance. It cannot undo an action
 that has already happened. The existing Barn Door gate still checks captured
 speech. Both `ciel` and `ciel spoke` support the controls; the hub never watches
-a keyboard. The stdin Enter fallback remains separate.
+a keyboard. The stdin Enter fallback remains separate, and it exists only
+where there is a keyboard: the typed lane attaches to a terminal, a pipe,
+or a socket, and declines a service manager's `/dev/null` with one log
+line before anything is attached.
 
 Each binding accepts `ctrl`, `option`, `cmd`, and `shift`, joined with `+`,
 followed by a letter, digit, `space`, `escape`, `return`, or `tab`. Aliases
