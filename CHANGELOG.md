@@ -2,6 +2,24 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — The calendar's login is read the way its connector wrote it
+
+**Why.** The live check on the hub found the calendar login present and
+called it unauthorized: the shared Google client read the refresh token at
+the top of the token file, where the Gmail connector keeps it, and the
+calendar connector nests its tokens under an account label, as the
+calendar watcher already knew.
+
+**What.**
+
+- *One reader for both shapes.* The client takes the refresh token from
+  the top of the file or from the first nested entry that has one, for
+  readiness and for minting alike; a file with none is unavailable, not a
+  crash.
+
+**Probes.** `probe_email_calendar.py 89 → 92: a flat token file, a nested
+one, and one with no refresh token.` Rerun unchanged: probe_sections.py 78.
+
 ## 2026-09-09 — The inbox feature can be checked against the real accounts
 
 **Why.** Five milestones proven against fakes prove nothing about Google.

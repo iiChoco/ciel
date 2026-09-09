@@ -649,6 +649,21 @@ async def probe_add_event(root: Path) -> None:
     await f.close()
 
 
+def probe_logins(root: Path) -> None:
+    print('\nthe login files, whichever connector wrote them')
+    import json
+    from ciel.email_calendar import GoogleCalendar
+    keys = root / 'keys.json'
+    keys.write_text(json.dumps({'installed': {'client_id': 'id', 'client_secret': 'secret'}}))
+    flat, nested, empty = root / 'flat.json', root / 'nested.json', root / 'empty.json'
+    flat.write_text(json.dumps({'refresh_token': 'r1', 'access_token': 'a'}))
+    nested.write_text(json.dumps({'normal': {'refresh_token': 'r2', 'expiry_date': 1}}))
+    empty.write_text(json.dumps({'normal': {'access_token': 'only'}}))
+    check('the Gmail connector\'s flat token file is a login', GoogleCalendar(keys, flat).available())
+    check('the calendar connector\'s tokens nested under an account label are a login', GoogleCalendar(keys, nested).available())
+    check('a token file with no refresh token is not', not GoogleCalendar(keys, empty).available() and not GoogleCalendar(keys, root / 'missing.json').available())
+
+
 async def probe_watch(root: Path) -> None:
     print('\na page is queued before the cursor moves')
     inbox_messages = [mail(f'w{i}', 'Clinic Bookings <bookings@clinic.test>', f'Your appointment is confirmed {i}',
@@ -923,6 +938,7 @@ async def main() -> None:
     probe_interpretation()
     with tempfile.TemporaryDirectory(prefix='ciel-email-probe-') as tmp:
         root = Path(tmp)
+        probe_logins(root)
         await probe_preview(root)
         await probe_controller(root)
         await probe_add_event(root)

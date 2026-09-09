@@ -43,8 +43,25 @@ class GmailUnavailable(MailUnavailable):
     """The connector's tokens are missing, revoked, or Google refused."""
 
 
+def _refresh_token(saved: object) -> str | None:
+    """The refresh token in a connector's token file, whichever connector
+    wrote it: the Gmail connector keeps it at the top; the calendar
+    connector nests its tokens under an account label, so the first entry
+    that has one is taken and a layout change degrades to unavailable."""
+    if not isinstance(saved, dict):
+        return None
+    if isinstance(saved.get("refresh_token"), str) and saved["refresh_token"]:
+        return str(saved["refresh_token"])
+    for entry in saved.values():
+        if isinstance(entry, dict) and isinstance(entry.get("refresh_token"), str) and entry["refresh_token"]:
+            return str(entry["refresh_token"])
+    return None
+
+
 class GmailClient:
-    """The connector's login and the plumbing every Gmail capability shares."""
+    """The connector's login and the plumbing every Google capability
+    shares: the same OAuth client JSON and a saved refresh token, minted into
+    access tokens in memory, never written back."""
 
     def __init__(self, keys_file: Path, token_file: Path) -> None:
         self._keys_file = keys_file
@@ -62,7 +79,7 @@ class GmailClient:
             keys = json.loads(self._keys_file.read_text())["installed"]
         except (OSError, json.JSONDecodeError, KeyError, TypeError):
             return False
-        return bool(saved.get("refresh_token") and keys.get("client_id"))
+        return bool(_refresh_token(saved) and keys.get("client_id"))
 
     def own_address(self) -> str:
         """The signed-in account's address — the default "me"."""
@@ -108,7 +125,9 @@ class GmailClient:
                 return self._access_token
             try:
                 keys = json.loads(self._keys_file.read_text())["installed"]
-                refresh = json.loads(self._token_file.read_text())["refresh_token"]
+                refresh = _refresh_token(json.loads(self._token_file.read_text()))
+                if refresh is None:
+                    raise KeyError("refresh_token")
             except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
                 raise GmailUnavailable(
                     "the Gmail connector is not authorized — authorize "
