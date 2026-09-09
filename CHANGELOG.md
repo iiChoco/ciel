@@ -2,6 +2,25 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — "Act without asking" is heard as the grant it is
+
+**Why.** With the switch live on the hub, *"Ciel, act without asking"*
+got *"what would you like me to do?"* three times over. The catalog knew
+the phrase; the model did not: nothing in the granting section of its
+prompt or in `grant_capability`'s description said the words were a
+request to change a setting, so it read them as a manner for a task it
+had not been given.
+
+**What.**
+
+- *The prompt names the phrase.* The granting section says that "act
+  without asking", "stop asking me", "no more confirmations" alone is a
+  request to grant `act_without_asking`, and that "ask before acting
+  again" revokes it. The tool description says the same in a line.
+
+**Probes.** `probe_grants.py 36 → 37: the grants prompt section and the
+tool description both name the capability and say it is not a manner.`
+
 ## 2026-09-09 — Asking first is a switch
 
 **Why.** The owner wanted to let Ciel act on their Mac without answering

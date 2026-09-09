@@ -17,6 +17,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from ciel.config import ConfirmConfig, Config, GrantsConfig
+from ciel.brain.prompt import build_system_prompt
 from ciel.brain.tools import grants
 from ciel.brain.tools.grants import (
     CAPABILITIES,
@@ -158,6 +159,11 @@ async def tool_checks(tmp: Path) -> None:
     check("the brief question names the time",
           describe_grant({"name": "brief", "value": "07:45"})
           == "Set the morning brief to 07:45")
+
+    prompt = build_system_prompt(grants=True)
+    check("the model is told that acting without asking is a grant, not a manner",
+          "act_without_asking" in prompt and "not a manner" in prompt
+          and "act_without_asking" in grant_capability.description)
 
     for forbidden in ("owner_id", "token", "voice", "workspace", "auto_allow"):
         check(f"{forbidden!r} is not in the catalog", forbidden not in CAPABILITIES)

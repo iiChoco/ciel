@@ -1515,7 +1515,9 @@ capability switches — but only when you ask, and never quietly:
 - The catalog in `brain/tools/grants.py` is the boundary: files, shell,
   screen, iMessage read/send, Vigil, barge-in, the morning brief, Discord
   away texts, and acting without asking (`act_without_asking`, the one
-  switch whose grant turns a value *off*). What's *not* in it is the point — the pinned Discord
+  switch whose grant turns a value *off*; the model is told that *"act
+  without asking"* on its own is this grant, not a manner for a task it
+  has not been given). What's *not* in it is the point — the pinned Discord
   account and token, the voice gate, connector tool tiers, and the
   workspace path cannot be reached by any phrasing, from anywhere.
 - Unattended turns (reflection, Vigil) are denied both tools outright by
