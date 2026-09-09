@@ -41,11 +41,18 @@ FRAME_BYTES = FRAME_SAMPLES * SAMPLE_WIDTH  # 960
 class AudioConfig:
     """Microphone capture and utterance endpointing."""
 
-    backend: Literal["portaudio", "apple"] = "portaudio"
+    backend: Literal["portaudio", "apple", "webrtc"] = "portaudio"
     """Paired microphone and playback engine. Apple enables native echo
     cancellation on macOS 14+ using system default devices and a Swift helper.
     Opt in after checking the room; an Apple failure never falls back to raw
-    capture. PortAudio preserves explicit input/output device selection."""
+    capture. WebRTC uses a nonmuting Core Audio tap and AEC3 instead, with
+    system-audio capture permission. PortAudio preserves device selection."""
+
+    webrtc_capture_delay_ms: int = 40
+    """Microphone hold before AEC3, so a late hardware playback reference
+    precedes its echo. WebRTC backend only; multiples of 10 from 0 to 200.
+    Adds this much capture latency. The native aggregate keeps clocks aligned;
+    the hold covers device buffering, not drift. No speaker gain is changed."""
 
     apple_playback: Literal["portaudio", "engine"] = "portaudio"
     """Where Ciel's own voice plays when the backend is Apple. ``portaudio``

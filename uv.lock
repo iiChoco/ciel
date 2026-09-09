@@ -346,6 +346,7 @@ spoke = [
     { name = "pyobjc-framework-corelocation", marker = "sys_platform != 'linux'" },
     { name = "pyobjc-framework-eventkit", marker = "sys_platform != 'linux'" },
     { name = "pyobjc-framework-quartz", marker = "sys_platform != 'linux'" },
+    { name = "pywebrtc-audio", marker = "sys_platform != 'linux'" },
     { name = "sounddevice", marker = "sys_platform != 'linux'" },
     { name = "webrtcvad-wheels", marker = "sys_platform != 'linux'" },
 ]
@@ -376,6 +377,7 @@ spoke = [
     { name = "pyobjc-framework-corelocation", marker = "sys_platform == 'darwin'", specifier = ">=10.1" },
     { name = "pyobjc-framework-eventkit", marker = "sys_platform == 'darwin'", specifier = ">=10.1" },
     { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'", specifier = ">=10.1" },
+    { name = "pywebrtc-audio", marker = "sys_platform == 'darwin'", specifier = "==0.2.0" },
     { name = "sounddevice", marker = "sys_platform == 'darwin'", specifier = ">=0.5.1" },
     { name = "webrtcvad-wheels", marker = "sys_platform == 'darwin'", specifier = ">=2.0.14" },
 ]
@@ -1438,6 +1440,23 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/5b/42/55c32bb9b12693c092ad250a0e82edb5b31ddeda6eb772de5f308b3804ad/python_multipart-0.0.32.tar.gz", hash = "sha256:be54b7f3fa167bb83e4fcd936b887b708f4e57fe75911c02aebf53efaf8d938e", size = 46881, upload-time = "2026-06-04T16:18:58.647Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e1/04/e8135ebd1ad02c56ec633277529b2602ff99ff634be76cdba5744cf554fd/python_multipart-0.0.32-py3-none-any.whl", hash = "sha256:ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23", size = 30042, upload-time = "2026-06-04T16:18:57.319Z" },
+]
+
+[[package]]
+name = "pywebrtc-audio"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d8/b0/8d9e93083ac412cc758003d5e216d44f69b50619cdd0cfc7897e576eb90c/pywebrtc_audio-0.2.0.tar.gz", hash = "sha256:cdc47c063439b033bdd6110d2e1119fd6e36c6e007ed824bc369c9a5e3cb307a", size = 1748548, upload-time = "2026-09-03T19:03:15.662Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/74/a6e3a35e39199039ae9cc88e7728da1f5329b820c092ce51ced49fb842d2/pywebrtc_audio-0.2.0-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:2b3552930655219101c59c1295cdc29f2ab38b389c3c495d9f41773183880615", size = 403707, upload-time = "2026-09-03T19:02:44.771Z" },
+    { url = "https://files.pythonhosted.org/packages/33/01/6b48bbf13c765420aadf96667b433207e705179f67bc0dee6b8f87f93022/pywebrtc_audio-0.2.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:46134bf1a6d8d1fcdf90674e2787ec93435533a0f290f67b530040f8eabdb793", size = 367960, upload-time = "2026-09-03T19:02:46.215Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/cb/c3a0197971d132d8115a7ee88017183719e526ae302670acc1c3c2b88359/pywebrtc_audio-0.2.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:a9edfe0dc08ed3e5f856613786235e3ca5ac74f6dc14a6937da67244d19d1091", size = 403723, upload-time = "2026-09-03T19:02:55.641Z" },
+    { url = "https://files.pythonhosted.org/packages/b6/cd/ca9a2b1782e24ed009f21cc996eb1b77fc480d34f9958c29e3bc2b209091/pywebrtc_audio-0.2.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:22b31c256be3b8c7401bbeed5c483ba0f326b15a3e1640dc791ba40c49bc7e0d", size = 367981, upload-time = "2026-09-03T19:02:57.101Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/f0/b88b5e386754e5ad8e9282f9e8208528db0f70c111bf52fd4c245464918e/pywebrtc_audio-0.2.0-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:bb5cbdd15e053545b8785a014179922cabd3a5e94e1d6891e8a2ba81783770bf", size = 404079, upload-time = "2026-09-03T19:03:05.742Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/c1/9674ed4d5790eed71599bac650c01f6c3c76cf1134c2992a3d83b4e72b48/pywebrtc_audio-0.2.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:15918b67be57c7308aefa5e155d4e4d46f79fa1c16f41e9a07a46f41ffcac054", size = 368433, upload-time = "2026-09-03T19:03:06.997Z" },
 ]
 
 [[package]]

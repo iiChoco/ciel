@@ -191,7 +191,8 @@ max_chars = 16000
 save_timeout_s = 10.0       # keep the draft and offer retry if the hub does not receipt it
 
 [audio]
-backend = "portaudio"       # "apple": native echo cancellation, macOS 14+, system default devices
+backend = "portaudio"       # "webrtc": AEC3 without ducking (macOS 14.2+); "apple": native voice processing
+webrtc_capture_delay_ms = 40 # WebRTC only: 0–200, multiples of 10; reference timing allowance
 apple_playback = "portaudio" # where Ciel's voice plays under "apple"; "engine" lisps, kept for comparison
 apple_ducking = "min"       # "min", "mid", "max": other audio attenuation during voice activity
 apple_agc = false           # Apple automatic microphone gain; echo cancellation stays on
@@ -1772,6 +1773,81 @@ of dispatch and commit, entirely in temporary directories.
 
 ## Echo cancellation and barge-in
 
+For echo cancellation that leaves music volume alone, the Mac can use the
+**WebRTC backend**. Apple's voice-processing unit lowers other audio when it
+hears speech, even between Ciel turns. The WebRTC route instead captures a
+nonmuting copy of the default output and removes that echo from the microphone.
+Ciel's voice still plays through the ordinary PortAudio speaker. No Apple
+voice-processing unit opens, and no speaker gain or system volume is changed.
+
+```toml
+[audio]
+backend = "webrtc"
+webrtc_capture_delay_ms = 40
+```
+
+This route requires macOS 14.2 or later, the Xcode command-line tools, and the
+pinned `pywebrtc-audio` dependency in the spoke group. Run
+`uv sync --locked --all-extras` after updating the checkout. Grant **Microphone**
+and **System Audio Recording** permission if macOS asks. For the launchd
+spoke, its responsible `Ciel.app` launcher must also declare
+`NSAudioCaptureUsageDescription`. Update the sibling infrastructure checkout's
+launcher with `python3 scripts/render_launchagents.py` from that checkout and
+restart the spoke; its `services/launcher/Info.plist` owns this declaration.
+Allow Ciel in System Settings → Privacy & Security → Screen & System Audio
+Recording. Permission granted to a terminal or Codex does not grant the
+launchd app access. The signed helper is
+built atomically at `~/.ciel/bin/cielcapture` with the stable identity
+`ai.ciel.capture`; a failed rebuild preserves its last working binary.
+
+A zero-filled PortAudio stream keeps the output device clock running before
+the first greeting and while muted; it adds no audible signal. The private
+Core Audio aggregate puts the raw mic and stereo reference on one clock, enables tap drift compensation, and resamples the three channels
+together. WebRTC processes exact 10 ms blocks at 16 kHz; the rest of Ciel still
+receives the same 30 ms mono microphone frames. `webrtc_capture_delay_ms` holds
+capture by 40 ms by default so device buffering does not put the echo ahead of
+its reference. It accepts multiples of 10 from 0 to 200 and adds that amount
+to input latency. Neither queue drains nor Stop resets the adaptive filter.
+Mute retains protected capture, but that capture no longer ducks playback.
+Automatic gain control and separate noise suppression remain off in this route;
+AEC3 includes a microphone high-pass filter and residual echo suppression.
+
+Only system-default devices are supported: remove explicit `input_device` and
+`output_device` settings. The output must expose a stereo float stream, and
+the paired capture rate must be between 16 and 96 kHz. A route change, stopped
+reference, or malformed stream ends protected capture visibly; it never falls
+back to raw automatic listening. Launchd restarts the spoke for those failures.
+A timing gap, full capture ring, or busy callback lock instead drops the affected
+mic and reference together. At the next gap boundary, the resampler and echo
+processor reset and queued mic audio is cleared inside the same spoke process.
+Echo cancellation remains enabled while the filter learns again; the gap can
+interrupt a word, and echo rejection may briefly weaken during readaptation. The reference includes Ciel and other apps on that output,
+but not an independently playing TV or network speaker. Reference audio stays
+in bounded memory and is never saved or passed to transcription.
+
+On 2026-09-08, the initial controlled Mac-speaker comparison measured a +0.21 dB
+playback amplitude change with the tap and 18.5 dB raw-to-clean echo reduction.
+It also passed a cold start before any audible playback. After gap recovery
+was corrected, an expanded test passed with +0.38 dB playback change and
+16.9 dB echo reduction, including recovery from a deliberately paused helper.
+An earlier recovery run missed the volume tolerance (−2.88 dB); the report
+retains both results. These measurements describe those runs, not every room
+or voice.
+Synthetic checks preserve voiced speech above the echo and quiet speech without
+playback; a quiet voice under loud media can still be attenuated by AEC3. Check
+wake recognition, Barn Door, snaps/claps, and simultaneous speech in the room
+before enabling barge-in. Barge-in remains off by default. The repository-wide
+backend default stays `portaudio`; `webrtc` is an explicit Mac selection.
+
+`uv run --no-sync python scripts/probe_webrtc_audio.py` checks actual AEC3,
+framing, native pairing/resampling, builds, paired gap recovery, failure handling, and cleanup without
+opening a device. The explicit live comparison is
+`uv run --no-sync python reports/2026-09-08-nonducking-audio-live.py --live`;
+it briefly stops/restores the installed spoke, plays a quiet signal, pauses the
+capture helper to test recovery without a restart, and keeps
+measurements in memory. The investigation is
+`reports/2026-09-08-audio-ducking.md`.
+
 The Apple backend is **experimental**. A room trial reported lisp-like speech,
 and a controlled listen on 2026-09-07 found where it lives: one Piper sentence
 played three ways through the MacBook speakers, and only the play scheduled
@@ -2071,6 +2147,7 @@ blame:
 
 ```bash
 uv run scripts/probe_input.py         # the microphone's silence watch, no mic
+uv run --no-sync python scripts/probe_webrtc_audio.py # nonducking AEC3: pairing, speech retention, gap recovery, failures; no mic
 uv run --no-sync python scripts/probe_apple_audio.py # Apple audio: native build, framing, audible receipts, failures; no mic
 uv run --no-sync python scripts/probe_apple_audio.py --live # processed mic + short quiet tone; no recording
 uv run scripts/probe_audio.py vad     # endpointing, synthetic speech, no mic
@@ -2161,7 +2238,7 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `notes.py` | Private scratchpad, note identity, memory writer, hub receipts, and native window bridge |
 | `commands.py` | The no-brain fast path — mechanical requests matched locally |
 | `confirm.py` | Proof Obligation — the spoken/texted yes-or-no broker |
-| `audio/` | Paired PortAudio or Apple voice processing, capture, endpointing, playback, wake (the phrase and the gesture ear), speaker identity |
+| `audio/` | Paired PortAudio, Apple voice processing, or nonducking WebRTC capture, endpointing, playback, wake (the phrase and the gesture ear), speaker identity |
 | `stt/`, `tts/` | Engine protocols and implementations (plus the voice effect) |
 | `brain/` | Claude client, system prompt, sessions, guards, tools |
 | `memory/` | The durable file-backed store (Invariant) |

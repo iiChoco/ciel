@@ -24,6 +24,8 @@ dependencies = [
 spoke = [
     # Audio I/O
     "sounddevice>=0.5.1; sys_platform == 'darwin'",
+    # Echo cancellation on a nonmuting Core Audio reference, independent of voice processing.
+    "pywebrtc-audio==0.2.0; sys_platform == 'darwin'",
     # Endpointing: knowing when the user stopped talking
     "webrtcvad-wheels>=2.0.14; sys_platform == 'darwin'",
     # Speech-to-text, local. mlx-whisper is the default engine (Metal GPU);

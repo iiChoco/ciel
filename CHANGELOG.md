@@ -2,6 +2,54 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-08 — The room keeps its volume
+
+**Why.** The split pair fixed Ciel's lisp but left Apple's voice processing
+running between turns. Nearby speech could turn the Mac's music down even when
+Ciel never woke. `reports/2026-09-08-audio-ducking.md` traced that behavior to
+advanced ducking and showed why Stop and mute could not release it.
+
+**What.**
+
+- *The reference listens without touching the speaker.* An opt-in `webrtc`
+  backend uses a private, nonmuting Core Audio tap and the approved, pinned
+  `pywebrtc-audio` AEC3 dependency. Ciel retains the ordinary PortAudio speaker.
+  Apple's voice-processing unit and its ducking are absent from this route.
+- *One clock for what played and what returned.* A native aggregate synchronizes
+  the mic and stereo reference with drift compensation, resamples them together,
+  and detects lost frames. A configurable 40 ms capture hold covers late device
+  references. A zero-filled ordinary output stream starts the reference clock
+  even in an idle room. The adaptive filter survives turn boundaries and Stop; only
+  processed microphone frames leave the audio boundary.
+- *A missed callback does not restart the room.* Live use exposed a regression:
+  timing gaps and callback lock contention killed the helper, and launchd kept
+  relaunching the spoke. Paired drops now reset the resampler and echo filter,
+  clear delayed and queued mic audio, and resume in the same process. The ring
+  copies outside its lock while retaining ownership of the occupied slot.
+  Echo protection stays enabled; adaptation restarts and a word can be interrupted.
+- *A missing reference closes the room.* Startup, permissions, malformed frames,
+  stalls, helper death, and route changes fail visibly. Private builds are
+  atomic and retain the last working helper. The infrastructure launcher's
+  purpose string now includes system-audio capture: macOS checks the responsible
+  app as well as the helper. Startup timeouts name the permission to check.
+  Audio stays in memory. The existing
+  Apple and raw backends remain selectable; there is no silent fallback.
+- *The measurement has a boundary.* The live Mac comparison found +0.21 dB of
+  playback amplitude change and 18.5 dB echo reduction. Synthetic double talk
+  preserved voiced speech above the echo; whispered speech under loud media
+  and the owner's gestures still need room checks. Barge-in stays off.
+
+**Probes.** `probe_webrtc_audio.py 0 → 47`: actual AEC3, speech retention,
+paired resampling, framing, private builds, protocol failures, and cleanup.
+The recovery correction adds 7 checks (40 → 47), including forced native
+contention/overflow and clearing pre-gap audio without restarting capture.
+`probe_apple_audio.py 81 → 81` and `probe_input.py 9 → 9` passed. The explicit
+initial live comparison passed 4 checks. The expanded recovery comparison
+passed 6 on repeat (+0.38 dB playback change, 16.9 dB echo reduction); its first
+run failed the volume tolerance at −2.88 dB, retained in the report. Neither
+run retained recordings. `probe_hub_imports.py` passed 6 checks; the infrastructure launcher
+suite passed 9 tests.
+
 ## 2026-09-08 — A place to catch a thought
 
 **Why.** A passing idea needed a whole conversation to reach Ciel's memory.
