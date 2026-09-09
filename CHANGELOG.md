@@ -2,6 +2,44 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-08 — Nobody spoke, so nothing was heard
+
+**Why.** An afternoon of typing produced a run of turns nobody had spoken,
+answered in full. Three layers let each one through. The snap ear woke on
+impulses a fiftieth as loud as a snap — bright, solitary, and owned up to by
+no keystroke, the signature of a mouse button. The endpointer, whose
+webrtcvad calls a run of keys speech, handed the clatter to Whisper. And
+Whisper, which never says "nothing", invented a sentence; its own no-speech
+probability could not be asked, since on large-v3-turbo it reads 0.000 on
+pure silence. The stock-phrase filter caught none of it, because the
+sentences invented over a keyboard are not stock. The investigation and
+the calibration are in
+[reports/2026-09-08-sentences-nobody-said.md](reports/2026-09-08-sentences-nobody-said.md).
+
+**What.**
+
+- *A sentence needs a voice behind it.* Before Whisper is asked, Silero VAD
+  — the speech model openWakeWord already carries — scores the utterance
+  frame by frame, and its most confident 30 ms frame must reach
+  `speech_threshold` (0.5). Measured on synthesized speech and synthetic
+  rooms: silence, noise, clatter, and breath never peaked above 0.23; speech
+  peaked at 0.65 and up at every level down to a whisper. One frame is
+  enough, so "Yes." survives. The gate wraps the transcriber, not the turn,
+  so turns, held thoughts, and confirmation answers are gated alike on either
+  engine, and the runtime fallback to faster-whisper stays behind it. It
+  fails open without the model and says so. `stt/gate.py`.
+- *The keyboard's own word covers the mouse.* macOS reports the time since a
+  mouse button went down or up as readily as a key, so a snap or a clap
+  inside `keyboard_veto_ms` of either is rejected as that keystroke or that
+  click, and the log names which. A fixture that supplies one clock is never
+  answered by the Mac's other one.
+
+**Probes.** `probe_stt.py 21 → 33: the gate keeps silence and noise from the
+engine and speech untouched, the threshold edge, off at zero and on by
+default, warm-up and close pass through, fail-open without the model, and
+Silero's own word on silence and hiss. probe_gestures.py 134 → 138: the click
+veto, the more recent of key and click named, and a fixture's clock alone.`
+
 ## 2026-09-09 — The result reaches the owner
 
 **Why.** A task could finish, fail, or ask, and write its notice; nothing

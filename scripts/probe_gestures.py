@@ -25,8 +25,12 @@ answers when the API has no player or no login.
 With ``log_candidates`` on, every gated impulse becomes a log line with its
 four numbers and the cue a miss failed; off, the ear says nothing but gestures.
 The keyboard's own word: a snap or a clap inside ``keyboard_veto_ms`` of a key
-event is a keystroke and says so, the keyboard is asked before the model, and
-without Quartz the veto is inert.
+event is a keystroke and says so, one inside it of a mouse button is a click
+and says so, the more recent of the two is the one named, a fixture that
+supplies one clock is never answered by the Mac's other one, the keyboard is
+asked before the model, and without Quartz the veto is inert. Modifier-only
+presses and releases also veto hand sounds; event-age diagnostics follow the
+candidate logging switch and record no key identities.
 A snap is solitary: one after another gated impulse inside ``snap_quiet_ms`` is
 typing cadence, claps are not held to it, and zero switches it off.
 The veto half pins that a second opinion only says no: it is asked only about
@@ -514,9 +518,20 @@ def main() -> None:
     check('...and so is one 299 ms after', (ago.__setitem__(0, 0.299) or keys(np.zeros(8))) == 'a keystroke 299 ms ago')
     check('a snap 300 ms after the last key is not the keyboard\'s business', (ago.__setitem__(0, 0.3) or keys(np.zeros(8))) is None)
     check('nor one a minute after', (ago.__setitem__(0, 60.0) or keys(np.zeros(8))) is None)
-    with patch('ciel.audio.keys._quartz_since_key', lambda: None):
+    with patch('ciel.audio.keys._quartz_since_key', lambda: None), patch('ciel.audio.keys._quartz_since_click', lambda: None):
         inert = KeyboardVeto(300)
     check('without Quartz the veto is inert and says so', not inert.available and inert(np.zeros(8)) is None)
+    clicked = [0.04]
+    ago[0] = 5.0
+    desk = KeyboardVeto(300, since_key=lambda: ago[0], since_click=lambda: clicked[0])
+    check('a snap 40 ms after a mouse button is that click, and says so', desk(np.zeros(8)) == 'a click 40 ms ago')
+    ago[0] = 0.02
+    check('with a key and a click both inside the window, the more recent is named', desk(np.zeros(8)) == 'a keystroke 20 ms ago')
+    ago[0], clicked[0] = 5.0, 0.5
+    check('a click half a second old is not the desk\'s business', desk(np.zeros(8)) is None)
+    with patch('ciel.audio.keys._quartz_since_click', lambda: (lambda: 0.0)):
+        keys_only = KeyboardVeto(300, since_key=lambda: 5.0)
+    check('a fixture that supplies the keyboard is never answered by the Mac\'s mouse', keys_only.available and keys_only(np.zeros(8)) is None)
     ago[0] = 0.04
     rows = feed(recording([(1, 'snap'), (2, 'clap'), (2.2, 'clap')]), GestureDetector(veto=keys))
     check('with a key just pressed, a snap and both claps are keystrokes, and say so',
@@ -532,6 +547,39 @@ def main() -> None:
     check('no opinions at all is no veto', first_of(None, None) is None)
     built = build_wake_detector(WakeConfig(mode='hotkey', snap=True), replace(GestureConfig(), keyboard_veto_ms=0))
     check('keyboard_veto_ms = 0 builds an ear without the keyboard', built._members[1]._detector._veto is None)
+
+    from types import SimpleNamespace
+    q = SimpleNamespace(kCGEventSourceStateCombinedSessionState=0, kCGEventKeyDown=10,
+                        kCGEventKeyUp=11, kCGEventFlagsChanged=12,
+                        kCGEventLeftMouseDown=1, kCGEventLeftMouseUp=2,
+                        kCGEventRightMouseDown=3, kCGEventRightMouseUp=4,
+                        kCGEventOtherMouseDown=25, kCGEventOtherMouseUp=26)
+    ages = {10: 5.0, 11: 5.0, 12: .04}
+    queried: list[int] = []
+    def event_age(state: int, kind: int) -> float:
+        queried.append(kind)
+        return ages.get(kind, 5.0)
+    q.CGEventSourceSecondsSinceLastEventType = event_age
+    with patch.dict(sys.modules, {'Quartz': q}):
+        modifiers = KeyboardVeto(300)
+        check('a modifier-only press is a keystroke even with no ordinary key nearby', modifiers(np.zeros(8)) == 'a keystroke 40 ms ago')
+        check('the Mac query includes modifier changes and excludes pointer motion', 12 in queried and 5 not in queried)
+        rows = feed(recording([(1, 'snap'), (2, 'clap'), (2.2, 'clap')]), GestureDetector(veto=modifiers))
+        check('modifier clicks cannot wake or complete a clap action', gestures(rows) == [])
+        ages[12] = .02
+        check('a modifier release refreshes the veto', modifiers(np.zeros(8)) == 'a keystroke 20 ms ago')
+        ages[12] = .3
+        check('a modifier outside the window does not suppress a deliberate snap', gestures(feed(recording([(1, 'snap')]), GestureDetector(veto=modifiers))) == ['snap'])
+        ages[10], ages[12] = .01, .04
+        check('the latest ordinary or modifier event supplies the keystroke age', modifiers(np.zeros(8)) == 'a keystroke 10 ms ago')
+        key_log = logging.getLogger('ciel.audio.keys')
+        key_log.addHandler(catch); key_log.setLevel(logging.INFO); catch.lines.clear()
+        modifiers(np.zeros(8))
+        check('input timing diagnostics are silent by default', not catch.lines)
+        diagnostic = build_wake_detector(WakeConfig(mode='hotkey', snap=True), replace(GestureConfig(), log_candidates=True))
+        diagnostic._members[1]._detector._veto(np.zeros(8))
+        check('candidate logging includes event ages and the veto window', any('a keystroke 10 ms ago' in line and 'veto window 300 ms' in line for line in catch.lines))
+        key_log.removeHandler(catch)
 
     # ── a second opinion that only says no ───────────────────────────────────
 

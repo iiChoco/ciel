@@ -31,8 +31,11 @@ Say **"hey jarvis"**, then talk.
 
 - **Hears you** — `openWakeWord` for the wake phrase (a finger snap or two
   claps can stand in for it — see [Snapping and clapping](#snapping-and-clapping)),
-  WebRTC VAD for knowing when you've stopped talking, `mlx-whisper` (Metal GPU)
-  for transcription with `faster-whisper` as the CPU fallback. All on-device.
+  WebRTC VAD for knowing when you've stopped talking, Silero VAD for whether
+  anyone spoke at all before Whisper is asked (see
+  [When the room hears sentences nobody said](#when-the-room-hears-sentences-nobody-said)),
+  `mlx-whisper` (Metal GPU) for transcription with `faster-whisper` as the CPU
+  fallback. All on-device.
 - **Thinks** — Claude Opus 5 via the Claude Agent SDK, with web search — and a
   deep-thought escalation agent for the questions that deserve more than a
   conversational answer. Mechanical requests ("ten minute timer") never reach
@@ -155,6 +158,7 @@ engine = "mlx-whisper"       # Metal GPU; "faster-whisper" is the CPU fallback
 mlx_model = "mlx-community/whisper-small.en-mlx"
 # model/compute_type/device apply to faster-whisper only
 initial_prompt = "A spoken conversation with an assistant named Ciel."
+speech_threshold = 0.5       # Silero must hear speech in one frame before Whisper is asked; 0 off
 
 [tts]
 engine = "native"            # Apple's Premium voices, streamed; "piper" and "say" below it
@@ -1875,6 +1879,36 @@ the microphone (System Settings › Privacy & Security › Microphone). A stall,
 where frames stop arriving altogether, is reported separately and ends the
 capture so the process can be restarted.
 
+## When the room hears sentences nobody said
+
+Whisper answers every question with a sentence. Handed a quiet room or a run
+of keystrokes after a false wake, it does not say "nothing"; it says "Thank
+you." in the voice it uses for real speech, and the sentence is answered as
+a turn — and the follow-up window that opens after the answer catches the
+next run of keys, so one false wake becomes a conversation with the
+keyboard. Its own confidence cannot be asked: with large-v3-turbo the
+no-speech probability it reports is 0.000 on pure silence. So before
+Whisper is asked at all, Silero VAD — the speech model openWakeWord already
+carries — scores the utterance frame by frame, and its most confident 30 ms
+frame must reach `speech_threshold` (0.5). One frame is enough, so "Yes."
+survives. Measured 2026-09-08 on synthesized speech and synthetic rooms:
+silence, room noise, keyboard clatter, and breath never reached 0.23, while
+speech reached 0.65 and up at every level down to a whisper. A gated
+utterance leaves one line in the spoke's log — `no speech in 1.40s of audio
+(speech peaked at 0.08) — not transcribed` — and nothing else happens: no
+turn, no follow-up window. The gate wraps the transcriber rather than the
+turn, so a confirmation answer is gated the same way: a keyboard cannot say
+yes. `speech_threshold = 0` switches it off; without openWakeWord it fails
+open and says so at startup. `stt/gate.py`, beside the stock-phrase filter
+in `stt/hallucinations.py`.
+
+The false wakes are the other half, and the snap ear is the usual source:
+an impulse a fiftieth as loud as a snap at the desk, bright as a mouse
+button, and solitary, which no model was trained to name and no keystroke
+had owned up to. The keyboard's own word now covers the mouse (below), and
+the gate above means a false wake that nobody speaks after costs a log
+line and nothing more.
+
 ## Snapping and clapping
 
 A finger snap, or two claps, can address Ciel the way the phrase does: the
@@ -1937,14 +1971,21 @@ one room's snaps from its claps is not a promise about another room.
 
 **The keyboard's own word.** A mechanical key is a snap by shape and by
 loudness, and a lone key in a quiet second does not sound like typing to
-any model. But the sound of a key is made by a key, and macOS reports to
-any process in the session how long ago a key went down or up — timestamps
-only, never which key, and no permission dialog. A snap or a clap inside
-`keyboard_veto_ms` (300) of a key event is rejected as that keystroke, and
-the log says so: `sounds like a keystroke 41 ms ago`. The keyboard is asked
-before the model, since its answer is certain and costs nothing. A snap made
-while typing is lost, which every gate below was already going to cost. Off
-the Mac the veto is inert; 0 switches it off. `audio/keys.py`.
+any model; a mouse button is quieter, brighter, always solitary, and sounds
+like nothing any model was trained to name. But the sound of a key is made
+by a key, and macOS reports to any process in the session how long ago a
+key went down, up, or changed modifier state, and how long ago a mouse
+button did — timestamps only,
+never which key or where, and no permission dialog. A snap or a clap inside
+`keyboard_veto_ms` (300) of either is rejected as that keystroke or that
+click, and the log says which: `sounds like a keystroke 41 ms ago`, `sounds
+like a click 12 ms ago`. The keyboard is asked before the model, since its
+answer is certain and costs nothing. A snap made while typing is lost, which
+every gate below was already going to cost. Off the Mac the veto is inert; 0
+switches it off. Shift, Command, Option, Control, and other modifier/status
+keys report a separate flag-change event; those presses and releases are
+included. Volume and brightness keys are not guaranteed to report these
+event types. `audio/keys.py`.
 
 **A snap is solitary.** A keystroke arrives in a run and a snap does not,
 so a would-be snap that follows any other gated impulse inside
@@ -1971,7 +2012,9 @@ The spoke can narrate the same thing itself: with `log_candidates = true` in
 `[gestures]`, every impulse the ear gates becomes a line in the spoke's log —
 `ear: rejected (peak 0.03, width 2.1 ms, tilt 0.40, fall 21 dB) — snap: tilt;
 clap: peak` — beside the `wake: snap` and `gesture: double clap` lines it
-acts on. Follow it live with `tail -F ~/.ciel/log/ciel-spoke.err.log`; switch
+acts on. Candidates that reach the keyboard veto also show the elapsed key
+and click times and the veto window, including when the window has expired.
+No key identities are read. Follow it live with `tail -F ~/.ciel/log/ciel-spoke.err.log`; switch
 it off once the boundaries are set, since typing produces a few lines a minute.
 
 ## Development probes
@@ -2013,7 +2056,7 @@ uv run scripts/probe_discord.py --send hi  # send one DM and exit
 uv run scripts/probe_web.py           # the GUI lane: queue, origin gate, mute relay, roster
 uv run scripts/probe_web.py --live    # serve the real page and echo, no mic or model
 uv run scripts/probe_grants.py        # capability granting: catalog + surgery
-uv run scripts/probe_stt.py           # transcript filters: hallucinations, loops
+uv run scripts/probe_stt.py           # the speech gate; transcript filters: hallucinations, loops
 uv run --no-sync python scripts/probe_spotify.py  # Spotify: PKCE, refresh, API shapes, gates
 uv run scripts/probe_oura.py          # the ring: summaries, the nudge, tokens
 uv run scripts/probe_oura.py --authorize  # connect the ring (one browser approval)

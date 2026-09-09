@@ -392,7 +392,7 @@ def build_wake_detector(config, gestures=None, models_dir: "Path | None" = None,
     if gestures.keyboard_veto_ms > 0:
         from ciel.audio.keys import KeyboardVeto
 
-        keys = KeyboardVeto(gestures.keyboard_veto_ms)
+        keys = KeyboardVeto(gestures.keyboard_veto_ms, log_candidates=gestures.log_candidates)
         if not keys.available:
             keys = None
     model = None

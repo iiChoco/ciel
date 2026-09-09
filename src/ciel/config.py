@@ -339,9 +339,11 @@ class GestureConfig:
 
     keyboard_veto_ms: int = 300
     """The keyboard's own word: a snap or a clap that lands this soon
-    after a key went down or up on this Mac is a keystroke, whatever it
-    sounded like. macOS reports the time since the last key event to any
-    process in the session — timestamps only, never which key, and no
+    after a key went down, up, or changed modifier state on this Mac is
+    a keystroke, whatever it sounded like — and one this soon after a mouse button is that click,
+    which is as quiet and as bright as a snap across the room. macOS
+    reports the time since the last key or button event to any process in
+    the session — timestamps only, never which key or where, and no
     permission dialog. See ``audio/keys.py``. 0 switches it off; off the
     Mac it is inert."""
 
@@ -356,7 +358,8 @@ class GestureConfig:
     """Log every impulse the ear gates, not only the gestures it fires —
     each with its four numbers and, for a miss, the cue it failed — so
     the spoke's own log shows what the room sounded like while you tune.
-    A few lines per minute of typing; off once the boundaries are set."""
+    Keyboard-veto candidates also log event ages and the veto window,
+    never the key or click identity. A few lines per minute of typing; off once the boundaries are set."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,6 +511,19 @@ class STTConfig:
     Phrase it as a *description*, not as leading dialogue. Whisper treats this
     as preceding context, so a prompt ending in "Ciel," makes the decoder read
     a real leading "Ciel," in the audio as already-transcribed and drop it."""
+
+    speech_threshold: float = 0.5
+    """Before Whisper is asked, Silero VAD (the speech model openWakeWord
+    already carries) scores the utterance frame by frame, and its most
+    confident 30 ms frame must reach this for a transcription to happen at
+    all. Exists because Whisper never says "nothing": handed keyboard
+    clatter or a quiet room after a false wake it invents a sentence, and
+    its own no-speech probability cannot be asked — on large-v3-turbo it
+    reads 0.000 on pure silence. Measured 2026-09-08 on synthesized speech
+    and synthetic rooms: silence, room noise, clatter, and breath never
+    peaked above 0.23; speech peaked at 0.65 and up at every level down to
+    a whisper. 0 switches the gate off; without openWakeWord it fails open
+    and says so. See ``stt/gate.py``."""
 
 
 @dataclass(frozen=True, slots=True)

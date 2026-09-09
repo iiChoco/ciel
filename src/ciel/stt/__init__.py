@@ -11,18 +11,23 @@ import logging
 
 from ciel.config import STTConfig
 from ciel.stt.base import SpeechToText
+from ciel.stt.gate import gate_stt
 
 log = logging.getLogger(__name__)
 
 
 def build_stt(config: STTConfig) -> SpeechToText:
-    """Instantiate the configured transcription engine.
+    """Instantiate the configured transcription engine, behind the speech gate.
 
     The only place an engine is *chosen* from config — swapping them is a
     config value, which is the whole point of the protocol. (The pipeline's
     ``_warm_up_stt`` names ``WhisperSTT`` once more, on the runtime fallback
-    path.)
+    path, and puts it behind the same gate.)
     """
+    return gate_stt(_build_engine(config), config)
+
+
+def _build_engine(config: STTConfig) -> SpeechToText:
     if config.engine == "mlx-whisper":
         # Probed with find_spec, not imported — MlxWhisperSTT loads
         # mlx_whisper lazily, so constructing it succeeds even when the
@@ -41,4 +46,4 @@ def build_stt(config: STTConfig) -> SpeechToText:
     return WhisperSTT(config)
 
 
-__all__ = ["SpeechToText", "build_stt"]
+__all__ = ["SpeechToText", "build_stt", "gate_stt"]

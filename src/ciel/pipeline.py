@@ -3793,19 +3793,21 @@ class Pipeline:
         hard dependency that works everywhere. Runs before the confirm broker
         binds its engines, so the replacement is what gets bound.
         """
+        from ciel.stt import gate_stt
         from ciel.stt.local_whisper import WhisperSTT
 
         assert self._stt is not None
+        engine = getattr(self._stt, "engine", self._stt)
         try:
             await self._stt.warm_up()
             return
         except Exception as exc:  # noqa: BLE001 - any failure means fall back
-            if isinstance(self._stt, WhisperSTT):
+            if isinstance(engine, WhisperSTT):
                 raise  # already the engine of last resort; nothing to fall to
             log.warning("%s failed to start (%s) — falling back to faster-whisper",
-                        type(self._stt).__name__, exc)
+                        type(engine).__name__, exc)
 
-        self._stt = WhisperSTT(self._config.stt)
+        self._stt = gate_stt(WhisperSTT(self._config.stt), self._config.stt)
         await self._stt.warm_up()
 
     async def _warm_up_tts(self) -> None:
