@@ -46,7 +46,7 @@ from ciel.journal import ActionJournal
 from ciel.task_context import TaskBinding
 from ciel.task_controls import TaskController
 from ciel.task_runner import TaskRunner
-from ciel.tasks import Origin, TaskConflict, TaskStore
+from ciel.tasks import DerivedOrigin, HumanOrigin, Origin, Scope, TaskConflict, TaskStore
 
 CHECKS: list[str] = []
 OWNER = 'fixture-owner'
@@ -684,6 +684,76 @@ async def probe_dismissal(root: Path) -> None:
     await f.close()
 
 
+async def probe_automatic(root: Path) -> None:
+    print('\nautomatic means the same, without the question')
+    turn = HumanOrigin(OWNER, 'activation-turn', 'web', ingress_ids=('web:1',))
+    base = time.time()  # the controller's controls read the wall clock, so this scenario lives on it
+    ready = [mail(f'a{i}', 'Clinic Bookings <bookings@clinic.test>', f'Your appointment is confirmed {i}',
+                  'Your visit is confirmed for Tuesday, September 15, 2026 from 2:00 PM to 3:00 PM at 500 Main St.') for i in range(1, 4)]
+    stranger = mail('s1', 'Someone <someone@else.test>', 'Your appointment is confirmed 9', 'Confirmed for Tuesday, September 15, 2026 from 2:00 PM to 3:00 PM.')
+    backend = ScriptedBackend({f'Your appointment is confirmed {i}': CONFIRMED_ANSWER for i in (1, 2, 3, 9)})
+    config = replace(ADD_CONFIG, poll_s=60.0, max_creates_per_day=2)
+    plain = Fixture(root, 'nosetup', [], backend=backend, config=CONFIG)
+    check('without a calendar to add to, no grant is offered', plain.adapter.setup is None)
+    f = Fixture(root, 'auto', [], backend=backend, config=config, calendar=FakeCalendar())
+    setup = f.adapter.setup
+    check('with one, the setup names the operations, the calendar and mailbox, the senders, the caution, and the day\'s and the grant\'s limits',
+          setup is not None and setup.namespace == NAMESPACE.name and ('calendar.create', 'add an event') in setup.operations
+          and ('calendar:primary', 'Calendar primary') in setup.targets and ('approved senders', 'bookings@clinic.test') in setup.bindings
+          and any('not proof' in value for _, value in setup.bindings) and setup.limits.max_per_window == 2 and setup.limits.window_s == 86400.0)
+    store = await f.open()
+    draft = await store.save_grant_draft(OWNER, setup.host, setup.namespace, setup.outcome, Scope(tuple(o for o, _ in setup.operations), tuple(t for t, _ in setup.targets)),
+                                         setup.limits, setup.bindings, now=base)
+    grant, mandate = await store.activate_grant(turn, draft.id, draft.revision, draft.digest, 'chart:fixture', now=base)
+    await f.adapter.activated(store, turn, grant, mandate)
+    watch_record = (await store.records(OWNER, NAMESPACE.name, (f'watch:{mandate.id}',)))[0].payload
+    watch = await store.get(OWNER, watch_record['task_id'])
+    check('activation starts the watch as the approving turn, under the mandate, and remembers it by mandate',
+          watch.next_step.operation == 'inbox.poll' and dict(watch.next_step.arguments)['mandate'] == mandate.id
+          and isinstance(watch.origin, HumanOrigin) and watch.origin.request_id == turn.request_id)
+    await f.run(watch.id, now=base)
+    f.inbox.arrive(ready[0])
+    f.inbox.arrive(stranger)
+    await f.run(watch.id, now=base + 61)
+    tasks = await store.list(OWNER)
+    children = [t for t in tasks if isinstance(t.origin, DerivedOrigin)]
+    check('a ready candidate from an approved sender is derived as an add task under the grant; a stranger\'s is recorded for review, not derived',
+          len(children) == 1 and children[0].origin.parent_mandate_id == mandate.id and children[0].origin.grant_id == grant.id
+          and children[0].origin.event_key == 'candidate:a1:0:calendar.create'
+          and next(r.payload['decision'] for r in await store.records(OWNER, NAMESPACE.name) if r.key == 'candidate:s1:0') == 'review')
+    child = children[0]
+    check('in the same round the child checks, sends under the grant with no question asked, reads back, and is done; one event on the calendar',
+          child.status == 'done' and f.calendar.inserts == 1 and (await store.owner_view(OWNER, child.id))['question'] is None
+          and any('derived 1 of 1' in r.detail for r in f.runner.reports))
+    f.inbox.arrive(ready[0])
+    await f.run(watch.id, now=base + 130)
+    check('the same message arriving again derives nothing twice', len([t for t in await store.list(OWNER) if isinstance(t.origin, DerivedOrigin)]) == 1
+          and f.inbox.fetched.count('a1') == 1)
+    f.inbox.arrive(ready[1])
+    f.inbox.arrive(ready[2])
+    await f.run(watch.id, now=base + 200)
+    children = [t for t in await store.list(OWNER) if isinstance(t.origin, DerivedOrigin)]
+    check('the day\'s allowance holds: a third ready candidate is refused by the store and the watch goes on',
+          len(children) == 2 and (await store.get(OWNER, watch.id)).status == 'queued' and (await store.mandates(OWNER))[0].children == 2)
+    controller = TaskController(replace(f.tasks, enabled=True), namespaces=(NAMESPACE,), setups=(setup,))
+    controller.bind_feature(NAMESPACE, f.adapter.operations, mandate_changed=f.adapter.mandate_changed, activated=f.adapter.activated)
+    await f.close()
+    await controller.start()
+    f.store = controller.store
+    assert f.store is not None
+    binding = TaskBinding(Origin(OWNER, 'chart-turn', 'web', ingress_ids=('web:2',)), 1, 1)
+    await controller.apply(binding, 'mandate_pause', {'mandate_id': mandate.id})
+    check('pausing the mandate pauses the watch', (await f.store.get(OWNER, watch.id)).status == 'paused')
+    f.inbox.arrive(mail('a4', 'Clinic Bookings <bookings@clinic.test>', 'Your appointment is confirmed 1', 'Confirmed for Tuesday, September 15, 2026 from 2:00 PM to 3:00 PM.'))
+    check('a paused watch reads nothing', await f.run(watch.id, now=base + 300) == [] and f.inbox.fetched.count('a4') == 0)
+    await controller.apply(binding, 'mandate_resume', {'mandate_id': mandate.id})
+    check('resuming the mandate queues the watch again', (await f.store.get(OWNER, watch.id)).status == 'queued')
+    await controller.apply(binding, 'grant_revoke', {'grant_id': grant.id})
+    check('revoking the grant ends the watch', (await f.store.get(OWNER, watch.id)).status == 'cancelled')
+    f.store = None
+    await controller.close()
+
+
 async def main() -> None:
     probe_normalization()
     probe_interpretation()
@@ -694,6 +764,7 @@ async def main() -> None:
         await probe_add_event(root)
         await probe_watch(root)
         await probe_dismissal(root)
+        await probe_automatic(root)
     print(f'\nall {len(CHECKS)} checks passed')
 
 

@@ -57,7 +57,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, P
 from ciel.brain.extract import ExtractionBackend, ExtractionError, ExtractionLimits, Lease, extract_json
 from ciel.config import TasksConfig
 from ciel.proactive.events import EventQueue, ProactiveEvent
-from ciel.tasks import (Attempt, Notice, DerivedOrigin, Evidence, FeatureRecord, GrantSetup, Intent, Namespace, NoAuthority, RecordSet, Step,
+from ciel.tasks import (Attempt, Notice, Specification, DerivedOrigin, Evidence, FeatureRecord, GrantSetup, Intent, Namespace, NoAuthority, RecordSet, Step,
                         Task, TaskConflict, TaskLimit, TaskStore, TaskStoreError, WaitReason)
 
 if TYPE_CHECKING:
@@ -79,6 +79,19 @@ class Preparation:
 
 
 @dataclass(frozen=True, slots=True)
+class Derivation:
+    """Work a read proposes under a standing mandate: the store admits it
+    only inside the mandate's grant, deduplicated on its event and source
+    revision. The adapter names it; the runner asks; the store decides."""
+
+    mandate_id: str
+    event_key: str
+    source_revision: str
+    specification: Specification
+    step: Step
+
+
+@dataclass(frozen=True, slots=True)
 class Outcome:
     """What one read found and what should happen next."""
 
@@ -95,6 +108,8 @@ class Outcome:
     """A target and the head revision the read actually saw."""
     records: RecordSet | None = None
     """The adapter's own records, committed with the transition."""
+    derive: tuple[Derivation, ...] = ()
+    """Children to derive once the outcome is committed; refusals are logged, never fatal."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,7 +363,24 @@ class TaskRunner:
         except Exception:  # noqa: BLE001 - the adapter's failure is logged without its payload
             log.warning('adapter read failed for task %s', task.id, exc_info=True)
             return await self._abandon(store, task, attempt, 'the read failed', now)
-        return await self._settle(store, task, attempt, outcome, now)
+        report = await self._settle(store, task, attempt, outcome, now)
+        if outcome.derive and report.result in ('checkpointed', 'waiting', 'done') and namespace is not None:
+            derived = await self._derive(store, namespace.name, outcome.derive, now)
+            report = StepReport(report.task_id, report.result, f'{report.detail}; derived {derived} of {len(outcome.derive)}')
+        return report
+
+    async def _derive(self, store: TaskStore, namespace: str, derivations: tuple[Derivation, ...], now: float) -> int:
+        """Ask the store for each child the read proposed. The store holds the
+        grant, the dedupe, and the allowances; here a refusal is one warning."""
+        count = 0
+        for item in derivations:
+            try:
+                await store.derive_task(self._config.owner, item.mandate_id, None, namespace, item.event_key, item.source_revision,
+                                        item.specification, item.step, now=self._after(now))
+                count += 1
+            except (TaskConflict, TaskLimit, ValueError, TaskStoreError) as exc:
+                log.warning('a derived task was refused: %s', exc)
+        return count
 
     async def _dispatch(self, store: TaskStore, task: Task, adapter: WritingAdapter, records: tuple[FeatureRecord, ...], now: float) -> StepReport:
         """One mutation: plan, journal, authorize, send once, verify by a read."""

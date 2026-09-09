@@ -2,6 +2,47 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — Automatic means the same, without the question
+
+**Why.** A candidate could be added by hand, one approval each. The plan's
+fourth milestone is the standing grant: the owner approves a bounded scope
+once in Chart, and confirmed commitments from approved senders land on the
+calendar as they arrive, through exactly the path a per-action add takes,
+minus the question.
+
+**What.**
+
+- *The feature offers its grant.* With a destination calendar configured
+  the adapter carries a `GrantSetup`: the operations, the calendar and
+  mailbox as targets, the approved senders and the caution that a matching
+  address proves nothing, and limits from `max_creates_per_day` and
+  `grant_lifetime_s`, each capped by `[tasks]`.
+- *Activation starts the watch.* The controller lets a feature act when a
+  grant for its namespace is activated and when one of its mandates moves;
+  the inbox's first move is the watch task, created as the turn that
+  approved and remembered by mandate. Pausing the mandate pauses it,
+  resuming resumes it, revoking the grant ends it.
+- *A read may propose children.* `Outcome.derive` carries derivations; the
+  runner asks the store for each after the outcome is committed and logs a
+  refusal rather than failing the step. The watch proposes an add task for
+  every ready candidate, keyed by candidate and operation with the
+  message's digest as its source revision, so a replay derives nothing
+  twice and the store's allowances hold.
+- *No question under a grant.* The derived child's authority is the grant
+  at its activated revision; the dispatch that a per-action add would ask
+  about is sent as it is, read back, and completed the same way.
+
+**Probes.** `probe_email_calendar.py 66 → 77: no setup without a calendar,
+the setup's fields and limits, the watch started at activation as the
+approving turn under the mandate, a ready candidate derived and finished in
+the same round with one event and no question, a stranger's candidate kept
+for review, the same message deriving nothing twice, the day's allowance
+refusing a third, and pause, resume, and revoke following the mandate.`
+Rerun unchanged: probe_task_runner.py 25, probe_task_dispatch.py 37,
+probe_task_authority.py 93, probe_task_wire.py 28, probe_task_tools.py 24,
+probe_turns.py 88, probe_hub_arbiter.py 61, probe_hub_imports.py 6; hub
+import clean; the spoke reloaded to ready.
+
 ## 2026-09-09 — A page is queued before the cursor moves
 
 **Why.** A preview reads a window once; watching an inbox for a standing

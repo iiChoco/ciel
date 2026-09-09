@@ -39,6 +39,18 @@ page, so a crash replays a page and never skips one. Gmail forgets history
 after a while; then the watch lists the window since its anchor once,
 bounded, records what it did not have, and takes a fresh anchor, saying so.
 
+**Automatic means: the same, without the question.** The adapter offers a
+grant setup when a destination calendar is configured: the operations it
+would be granted, the calendar and mailbox as targets, the approved senders
+as what it acts on, and the day's and the grant's limits. The owner's yes in
+Chart activates the grant and its mandate, and the feature's first move
+under it is the watch. Each ready candidate the watch extracts is proposed
+as a derived add task; the store admits it only inside the grant, once per
+message, within the allowances, and the runner dispatches it under the
+grant's authority with no question, sending exactly what a per-action add
+would have sent. A candidate that needs review is recorded and not derived.
+Pausing the mandate pauses the watch; revoking the grant ends it.
+
 **An event is added once, under a name only Ciel would choose.** Adding a
 candidate is a second finite task the owner asks for: it checks the
 calendars for the event already there, plans one insertion under an event
@@ -72,9 +84,9 @@ import urllib.parse
 
 from ciel.config import EmailCalendarConfig
 from ciel.gmail import GmailClient
-from ciel.task_runner import MutationResult, Outcome, Plan, PreconditionFailed, Preparation, Reconciliation, StepContext
-from ciel.tasks import (Criterion, Evidence, FeatureRecord, Intent, Namespace, RecordSet, RecordWrite, Scope, Specification, Step, Task,
-                        TaskLimit)
+from ciel.task_runner import Derivation, MutationResult, Outcome, Plan, PreconditionFailed, Preparation, Reconciliation, StepContext
+from ciel.tasks import (Criterion, Evidence, FeatureRecord, GrantLimits, GrantSetup, HumanOrigin, Intent, Mandate, Namespace, RecordSet,
+                        RecordWrite, Scope, Specification, StandingGrant, Step, Task, TaskConflict, TaskLimit)
 
 log = logging.getLogger(__name__)
 
@@ -547,6 +559,9 @@ def _validate_record(payload: dict[str, Any]) -> None:
     elif kind == 'cursor':
         if not isinstance(payload.get('history_id'), str) or not isinstance(payload.get('anchored'), str):
             raise ValueError('cursor')
+    elif kind == 'watch':
+        if not isinstance(payload.get('task_id'), str) or not isinstance(payload.get('mandate_id'), str):
+            raise ValueError('watch')
     elif kind == 'event':
         for name in ('candidate', 'calendar', 'event_id', 'digest', 'status'):
             if not isinstance(payload.get(name), str):
@@ -649,11 +664,30 @@ class EmailCalendarAdapter:
     """No standing grant is offered yet: the calendar writer is a later milestone."""
 
     def __init__(self, config: EmailCalendarConfig, source: InboxSource, *, calendar: CalendarSource | None = None,
-                 clock: Any = time.time) -> None:
+                 host: str = 'local', clock: Any = time.time) -> None:
         self._config = config
         self._source = source
         self._calendar = calendar
+        self._host = host
         self._clock = clock
+        self.setup = self._setup() if calendar is not None and config.destination_calendar.strip() else None
+        """What the Chart form offers: nothing without a calendar to add to."""
+
+    def _setup(self) -> GrantSetup:
+        calendar = self._config.destination_calendar.strip()
+        senders = ', '.join(s.strip() for s in self._config.allowed_senders if s.strip()) or 'no approved senders: automatic mode adds nothing until some are enrolled'
+        return GrantSetup(
+            NAMESPACE_NAME, 'Events from email',
+            'Confirmed appointments and bookings from approved senders land on the calendar',
+            self._host,
+            (('calendar.create', 'add an event'), ('calendar.check', 'check the calendars first'), ('calendar.verify', 'read an event back'),
+             ('inbox.poll', 'watch the inbox'), ('inbox.extract', 'interpret a message')),
+            ((f'calendar:{calendar}', f'Calendar {calendar}'), (f'mailbox:{self.identity_for_scope()}', f'Mailbox {self.identity_for_scope()}')),
+            (('mailbox', self.identity_for_scope()), ('approved senders', senders),
+             ('caution', 'a matching sender address is not proof a message is genuine; a forged confirmation inside this scope would be added')),
+            GrantLimits(max_children=max(1, int(self._config.max_creates_per_day * self._config.grant_lifetime_s // 86400)), window_s=86400.0,
+                        max_per_window=self._config.max_creates_per_day, lifetime_s=self._config.grant_lifetime_s),
+        )
 
     def identity_for_scope(self) -> str:
         """The mailbox a preview's scope names: the configured identity, or
@@ -666,6 +700,30 @@ class EmailCalendarAdapter:
             return self._source.identity() if self._source.available() else 'unknown'
         except Exception:  # noqa: BLE001 - the identity is a name in a scope, not a precondition
             return 'unknown'
+
+    async def activated(self, store: Any, origin: HumanOrigin, grant: StandingGrant, mandate: Mandate) -> None:
+        """The feature's first move under a new mandate: the watch, as the
+        attended owner turn that approved, remembered by mandate so the
+        mandate's controls can find it."""
+        spec, step = watch_request(self._config, self.identity_for_scope(), mandate.id)
+        task = await store.create(origin, spec, step, now=self._clock())
+        await store.write_records(origin.owner, RecordSet(NAMESPACE_NAME, (RecordWrite(f'watch:{mandate.id}', {'kind': 'watch', 'task_id': task.id, 'mandate_id': mandate.id}, None),)))
+
+    async def mandate_changed(self, store: Any, owner: str, mandate: Mandate) -> None:
+        """The watch follows its mandate: paused with it, resumed with it, ended with it."""
+        records = await store.records(owner, NAMESPACE_NAME, (f'watch:{mandate.id}',))
+        if not records:
+            return
+        task = await store.get(owner, str(records[0].payload['task_id']))
+        try:
+            if mandate.status == 'paused' and task.status not in ('paused', 'done', 'failed', 'cancelled'):
+                await store.pause(owner, task.id, task.revision)
+            elif mandate.status == 'active' and task.status == 'paused':
+                await store.resume(owner, task.id, task.revision)
+            elif mandate.status in ('revoked', 'expired') and task.status not in ('done', 'failed', 'cancelled'):
+                await store.cancel(owner, task.id, task.revision)
+        except TaskConflict:
+            log.info('the watch for mandate %s was already where its mandate put it', mandate.id)
 
     def prepare(self, task: Task, records: tuple[FeatureRecord, ...]) -> Preparation:
         if task.next_step.operation in CALENDAR_OPERATIONS:
@@ -919,11 +977,25 @@ class EmailCalendarAdapter:
         status = 'candidate' if any(c.decision == 'ready' for c in candidates) else (
             'review' if any(c.decision == 'review' for c in candidates) else 'ignored')
         writes.append(RecordWrite(record.key, {**base, 'status': status, 'reason': candidates[0].reason}, record.revision))
+        derivations: list[Derivation] = []
+        mandate_id = dict(ctx.task.next_step.arguments).get('mandate', '')
         for index, candidate in enumerate(candidates):
             if candidate.decision == 'ignored' and not candidate.start:
                 continue
-            writes.append(RecordWrite(f'candidate:{message_id}:{index}', {'kind': 'candidate', **asdict(candidate)}, None))
-        return self._progress(ctx, target, writes)
+            key = f'candidate:{message_id}:{index}'
+            payload = {'kind': 'candidate', **asdict(candidate)}
+            writes.append(RecordWrite(key, payload, None))
+            if mandate_id and candidate.decision == 'ready' and self._config.destination_calendar.strip():
+                # Under a mandate, a ready candidate is proposed as a child;
+                # the store admits it inside the grant, once per message.
+                try:
+                    spec, step = add_request(self._config, key, ctx.records + (FeatureRecord(NAMESPACE_NAME, key, 1, payload),))
+                except ValueError:
+                    continue
+                derivations.append(Derivation(mandate_id, f'{key}:calendar.create', message.digest, spec, step))
+        outcome = self._progress(ctx, target, writes)
+        return Outcome(evidence=outcome.evidence, next_step=outcome.next_step, delay_s=outcome.delay_s, records=outcome.records,
+                       derive=tuple(derivations))
 
     def _progress(self, ctx: StepContext, target: str, writes: list[RecordWrite]) -> Outcome:
         return Outcome(evidence=(Evidence(_criterion(ctx), target, 'in progress', 'inbox', ctx.now),),

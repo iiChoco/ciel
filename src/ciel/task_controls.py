@@ -63,6 +63,10 @@ class TaskController:
         self._requests: dict[str, Callable[[dict[str, Any]], Any]] = {}
         """Finite tasks a feature lets an owner turn ask for, by operation name;
         a builder returns the specification and first step, or an awaitable of them."""
+        self._activated: dict[str, Callable[..., Any]] = {}
+        """What a feature does when a grant for its namespace is activated, by namespace."""
+        self._mandate_changed: dict[str, Callable[..., Any]] = {}
+        """What a feature does when one of its mandates is paused, resumed, or ended."""
         self._controls: dict[str, Callable[[TaskStore, str, dict[str, Any]], Any]] = {}
         """A feature's own owner controls over its records, by operation name;
         each takes the store, the owner, and the arguments, and answers a dict."""
@@ -121,7 +125,8 @@ class TaskController:
     def bind_feature(self, namespace: Namespace, operations: frozenset[str], *,
                      requests: dict[str, Callable[[dict[str, Any]], Any]] | None = None,
                      controls: dict[str, Callable[[TaskStore, str, dict[str, Any]], Any]] | None = None,
-                     summary: Callable[[Task, tuple[FeatureRecord, ...]], str] | None = None) -> None:
+                     summary: Callable[[Task, tuple[FeatureRecord, ...]], str] | None = None,
+                     activated: Callable[..., Any] | None = None, mandate_changed: Callable[..., Any] | None = None) -> None:
         """A registered feature's own doors: the finite tasks an owner turn may
         ask for (each builds a specification from the owner's arguments, in
         application code) and the words it gives a task's records."""
@@ -131,6 +136,10 @@ class TaskController:
             self._requests[operation] = build
         for operation, control in (controls or {}).items():
             self._controls[operation] = control
+        if activated is not None:
+            self._activated[namespace.name] = activated
+        if mandate_changed is not None:
+            self._mandate_changed[namespace.name] = mandate_changed
         if summary is not None:
             self._summaries[namespace.name] = (frozenset(operations), summary)
 
@@ -156,6 +165,17 @@ class TaskController:
                     except Exception:  # noqa: BLE001 - a feature's words are optional; the record is not
                         log.warning('a feature could not describe its task', exc_info=True)
         return view
+
+    async def _follow_mandate(self, store: TaskStore, owner: str, mandates: tuple[Mandate, ...]) -> None:
+        """A mandate moved; the feature that runs under it follows."""
+        for mandate in mandates:
+            hook = self._mandate_changed.get(mandate.namespace)
+            if hook is None:
+                continue
+            try:
+                await hook(store, owner, mandate)
+            except Exception:  # noqa: BLE001 - the control committed; the feature's follow-through is logged
+                log.warning('a feature could not follow its mandate', exc_info=True)
 
     def _setup(self, namespace: Any) -> GrantSetup:
         for setup in self.setups:
@@ -222,6 +242,16 @@ class TaskController:
         grant, mandate = await store.activate_grant(
             binding.origin, draft.id, revision, digest, approval_ref, fence=binding.fence,
             record=lambda m: self._record('grant_activate', m, note=f'Approved through the broker as {approval_ref}; no execution dispatched.'))
+        started = self._activated.get(mandate.namespace)
+        if started is not None:
+            # The feature's own first move under its new mandate: for the
+            # inbox, the watch. It runs after the activation committed, as
+            # the attended owner turn that approved, and its failure leaves
+            # the grant standing and says so.
+            try:
+                await started(store, binding.origin, grant, mandate)
+            except Exception:  # noqa: BLE001 - the grant stands; the feature's start is its own affair
+                log.warning('a feature could not start under its new mandate', exc_info=True)
         return {'approved': True, 'grant': asdict(grant), 'mandate': asdict(mandate)}
 
     def _record(self, operation: str, task: Task | Mandate | StandingGrant, note: str = 'Explicit private owner control; no execution dispatched.') -> None:
@@ -295,6 +325,7 @@ class TaskController:
                 raise ValueError('A mandate ID is required.')
             mandate = await store.mandate_control(binding.origin.owner, mandate_id, operation.removeprefix('mandate_'), revision=revision,
                                                   fence=binding.fence, record=lambda m: self._record(operation, m))
+            await self._follow_mandate(store, binding.origin.owner, (mandate,))
             return {'mandate': asdict(mandate)}
         elif operation in ('notices_mute', 'notices_unmute'):
             enabled = await store.set_notify(binding.origin.owner, operation == 'notices_unmute', fence=binding.fence)
@@ -311,6 +342,7 @@ class TaskController:
                 raise ValueError('A grant ID is required.')
             grant = await store.revoke_grant(binding.origin.owner, grant_id, revision=revision,
                                              fence=binding.fence, record=lambda g: self._record(operation, g))
+            await self._follow_mandate(store, binding.origin.owner, tuple(m for m in await store.mandates(binding.origin.owner) if m.grant_id == grant.id))
             return {'grant': asdict(grant)}
         else:
             task_id = args.get('task_id')

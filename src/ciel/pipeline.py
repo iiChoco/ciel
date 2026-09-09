@@ -999,7 +999,7 @@ class Pipeline:
                         if config.email_calendar.destination_calendar.strip() else None)
             feature_adapters.append(EmailCalendarAdapter(
                 config.email_calendar, GmailInbox(GmailReader(config.sections.gmail_oauth_keys, config.sections.gmail_token_file)),
-                calendar=calendar))
+                calendar=calendar, host=self._role))
         if config.tasks.enabled and config.tasks.runner:
             self._task_runner = TaskRunner(
                 config.tasks,
@@ -1034,7 +1034,8 @@ class Pipeline:
                 self._task_controller.bind_feature(adapter.namespace, adapter.operations,
                                                    requests={'inbox_preview': ask_preview, 'inbox_add': ask_add},
                                                    controls={'inbox_dismiss': dismiss_candidate},
-                                                   summary=adapter.summarize)
+                                                   summary=adapter.summarize,
+                                                   activated=adapter.activated, mandate_changed=adapter.mandate_changed)
         # What the store owes the owner rides Vigil's queue; the notifier
         # exists even where the runner does not, since a hub with no runner
         # still owes the notices it holds.
@@ -1419,6 +1420,9 @@ class Pipeline:
                     if self._task_notifier is not None:
                         self._task_notifier.poll(now_wall)
 
+                    if self._notes is not None and self._notes.dictation.feed(frame):
+                        continue
+
                     # The turn-slot arbitration: one frozen snapshot, one
                     # pure pick (the ladder lives in ciel.schedule — the
                     # order and its reasons are that module's docstring).
@@ -1426,9 +1430,6 @@ class Pipeline:
                     # consumed until its block claims it.
                     source = pick_next(self._loop_snapshot())
                     if await self._enact(source, frame):
-                        continue
-
-                    if self._notes is not None and self._notes.dictation.feed(frame):
                         continue
 
                     if self._state is State.WAITING:

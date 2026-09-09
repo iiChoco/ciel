@@ -1182,9 +1182,11 @@ is the first application of
 [independent action](design/2026-09-08-independent-action-plan.md): the inbox
 read as a source of dated commitments, previewed first and, later, added to a
 calendar under a scope the owner approves in Chart. Its first milestone, the
-preview, landed on 2026-09-09 in `email_calendar.py`, and the calendar writer
-followed the same day: one previewed candidate can be added under the owner's
-approval of that exact event. No standing grant is offered yet.
+preview, landed on 2026-09-09 in `email_calendar.py`, and the calendar writer,
+the inbox watch, and the standing grant followed the same day: one previewed
+candidate can be added under the owner's approval of that exact event, and,
+under a grant approved in Chart, confirmed commitments from approved senders
+are added as they arrive, with no question asked.
 
 **A preview is an ordinary finite task, and it writes nothing.** With
 `[email_calendar].enabled = true` beside a running task runner, a private
@@ -1242,6 +1244,24 @@ what it did not have, and anchors again, counting the resync on its record.
 record that outlives replay, so the same message never puts it forward or
 adds it again, and a second preview of the window reads it no more.
 
+**Automatic means the same, without the question.** With a destination
+calendar configured, the feature offers a grant setup to Chart's *Standing
+grants* form: the operations it would be granted, the calendar and the
+mailbox as targets, the approved senders as what it acts on with the caution
+that a matching address is not proof a message is genuine, and the day's
+`max_creates_per_day` and the grant's `grant_lifetime_s` as its limits, each
+capped by `[tasks]`. The owner's yes activates the grant and its mandate, and
+the feature's first move under it is the watch, as the turn that approved.
+Each ready candidate the watch extracts is proposed as a derived add task;
+the store admits it only inside the grant, once per message, within the
+allowances, and the runner dispatches it under the grant's authority with no
+question, sending exactly what a per-action add would. A candidate that
+needs review is recorded and not derived; the owner adds it by hand or
+dismisses it. Pausing the mandate pauses the watch, resuming it resumes the
+watch, and revoking the grant ends it. An empty sender list makes automatic
+mode add nothing, which is the point: the list is built from what preview
+shows, and enrolling a sender is a new draft and a fresh approval.
+
 **What runs out is said.** A window larger than the task's model calls
 leaves the rest recorded as unread with the reason; a runtime with no
 extraction backend records the same; a mailbox that is not connected is a
@@ -1263,15 +1283,18 @@ destination_calendar = ""    # the Google calendar id events are added to; empty
 check_calendars = []         # calendars also searched for an event already present
 poll_s = 300.0               # between a watch's looks at the inbox's history
 max_messages_per_poll = 25   # messages one page of history may queue
+max_creates_per_day = 10     # what a standing grant asks for; [tasks].max_grant_per_window caps it
+grant_lifetime_s = 2592000.0 # thirty days; [tasks].max_grant_lifetime_s caps it
 ```
 
 The reader borrows `[sections].gmail_oauth_keys` and `gmail_token_file`,
 read-only, exactly as the section alarm's sender does; the writer borrows
 `[proactive].google_oauth_keys` and `google_token_file` the same way. Both
-must be authorized on the execution host. Nothing here grants anything
-standing yet: the grant setup that lets the Chart form activate automatic
-additions and start the watch under a mandate, and proposals for reschedules
-and cancellations, are the plan's later milestones.
+must be authorized on the execution host. Proposals for reschedules and
+cancellations against an event already added are the plan's last milestone.
+Nothing is enabled by these words: automatic additions need the runner, the
+feature, a destination calendar, both logins on the execution host, and a
+grant the owner approved in Chart.
 
 ## A spot in a section (the signup site)
 

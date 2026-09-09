@@ -2225,6 +2225,14 @@ class EmailCalendarConfig:
     max_messages_per_poll: int = 25
     """Messages one page of history may queue; more wait for the next page."""
 
+    max_creates_per_day: int = 10
+    """Events a standing grant may add in a day; the grant asks for this
+    number at approval and ``[tasks].max_grant_per_window`` caps it."""
+
+    grant_lifetime_s: float = 30 * 86400.0
+    """How long a standing grant for this feature runs before it expires;
+    capped by ``[tasks].max_grant_lifetime_s``."""
+
 
 @dataclass(frozen=True, slots=True)
 class TasksConfig:
