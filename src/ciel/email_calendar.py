@@ -31,6 +31,14 @@ under the task's own model-call allowance, records what it found in the
 feature's namespace, and completes with the roster. No calendar is touched
 by it.
 
+**A page is queued before the cursor moves.** A watch reads the mailbox's
+history from the anchor it took at its start, never before it, one page a
+step: the messages a page names are recorded as queued and the page token
+saved in the same write, and the history id advances only with the last
+page, so a crash replays a page and never skips one. Gmail forgets history
+after a while; then the watch lists the window since its anchor once,
+bounded, records what it did not have, and takes a fresh anchor, saying so.
+
 **An event is added once, under a name only Ciel would choose.** Adding a
 candidate is a second finite task the owner asks for: it checks the
 calendars for the event already there, plans one insertion under an event
@@ -71,7 +79,7 @@ from ciel.tasks import (Criterion, Evidence, FeatureRecord, Intent, Namespace, R
 log = logging.getLogger(__name__)
 
 NAMESPACE_NAME = 'email_calendar'
-OPERATIONS = frozenset({'inbox.read', 'inbox.extract', 'calendar.check', 'calendar.create', 'calendar.verify'})
+OPERATIONS = frozenset({'inbox.read', 'inbox.poll', 'inbox.extract', 'calendar.check', 'calendar.create', 'calendar.verify'})
 CALENDAR_OPERATIONS = frozenset({'calendar.check', 'calendar.create', 'calendar.verify'})
 _DATE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _WHEN = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$')
@@ -127,12 +135,27 @@ class RawMessage:
     received_at: float
 
 
+@dataclass(frozen=True, slots=True)
+class Changes:
+    """One page of what arrived since a history id."""
+
+    ids: tuple[str, ...]
+    next_page: str | None
+    history_id: str
+    """What the listing is current to; the cursor takes it with the last page."""
+    expired: bool
+    """The source no longer remembers back to the id asked for."""
+
+
 class InboxSource(Protocol):
-    """One mailbox, read-only: who it is, what arrived, and one message's bytes."""
+    """One mailbox, read-only: who it is, what arrived, what changed since a
+    point in its history, and one message's bytes."""
 
     def available(self) -> bool: ...
     def identity(self) -> str: ...
     def list_messages(self, since: str, until: str, limit: int) -> list[str]: ...
+    def anchor(self) -> str: ...
+    def changes(self, history_id: str, page_token: str | None, limit: int) -> Changes: ...
     def fetch(self, message_id: str) -> RawMessage: ...
 
 
@@ -153,6 +176,13 @@ class GmailInbox:
         if until:
             query += f' before:{until.replace("-", "/")}'
         return list(self._reader.list_messages(query, limit))
+
+    def anchor(self) -> str:
+        return str(self._reader.history_anchor())
+
+    def changes(self, history_id: str, page_token: str | None, limit: int) -> Changes:
+        ids, next_page, current, expired = self._reader.history(history_id, page_token, limit)
+        return Changes(tuple(ids), next_page, current, expired)
 
     def fetch(self, message_id: str) -> RawMessage:
         data, meta = self._reader.fetch_raw(message_id)
@@ -509,9 +539,14 @@ def _validate_record(payload: dict[str, Any]) -> None:
         for name in ('message_id', 'title', 'decision', 'reason', 'category', 'commitment'):
             if not isinstance(payload.get(name), str):
                 raise ValueError(name)
+        if payload['decision'] not in ('ready', 'review', 'ignored', 'dismissed'):
+            raise ValueError('decision')
     elif kind == 'preview':
         if not isinstance(payload.get('task_id'), str) or not isinstance(payload.get('counts'), dict):
             raise ValueError('preview')
+    elif kind == 'cursor':
+        if not isinstance(payload.get('history_id'), str) or not isinstance(payload.get('anchored'), str):
+            raise ValueError('cursor')
     elif kind == 'event':
         for name in ('candidate', 'calendar', 'event_id', 'digest', 'status'):
             if not isinstance(payload.get(name), str):
@@ -523,6 +558,16 @@ def _validate_record(payload: dict[str, Any]) -> None:
 
 
 NAMESPACE = Namespace(NAMESPACE_NAME, 1, _validate_record)
+
+
+def watch_request(config: EmailCalendarConfig, identity: str, mandate_id: str = '') -> tuple[Specification, Step]:
+    """The task that keeps watching a mailbox: read the history from an
+    anchor, page by page, extract what arrives, and go round again after
+    ``poll_s``. Read operations only; it ends when its mandate does."""
+    target = f'mailbox:{identity}'
+    spec = Specification('The inbox is watched for commitments', Scope(('inbox.poll', 'inbox.extract'), (target,)),
+                         (Criterion('watch', target, 'ended'),))
+    return spec, Step('read', 'inbox.poll', target, (('mandate', mandate_id),))
 
 
 def preview_request(config: EmailCalendarConfig, identity: str, since: str, until: str = '', limit: int | None = None) -> tuple[Specification, Step]:
@@ -555,12 +600,33 @@ def add_request(config: EmailCalendarConfig, candidate_key: str, records: tuple[
     candidate = record.payload
     if candidate.get('decision') == 'ignored':
         raise ValueError('That candidate was not a commitment; nothing to add.')
+    if candidate.get('decision') == 'dismissed':
+        raise ValueError('You dismissed that candidate; preview again if you want it back.')
     if not candidate.get('start') or not candidate.get('end') or not candidate.get('timezone') or candidate.get('unresolved'):
         raise ValueError('The candidate is unresolved: ' + (', '.join(candidate.get('unresolved') or []) or 'no time') + '. Settle it first.')
     target = f'calendar:{config.destination_calendar.strip()}'
     spec = Specification(f'"{candidate.get("title") or "Event"}" is on the calendar', Scope(tuple(sorted(CALENDAR_OPERATIONS)), (target,)),
                          (Criterion('placed', target, 'on the calendar'),))
     return spec, Step('read', 'calendar.check', target, (('candidate', candidate_key),))
+
+
+async def dismiss(store: Any, owner: str, candidate_key: str) -> dict[str, Any]:
+    """The owner's no to a candidate: a tombstone on its record that outlives
+    replay, so the same message never puts it forward again."""
+    records = await store.records(owner, NAMESPACE_NAME, (candidate_key,))
+    if not records or records[0].payload.get('kind') != 'candidate':
+        raise ValueError('No such candidate; use a candidate key from a preview.')
+    record = records[0]
+    if record.payload.get('decision') == 'dismissed':
+        return {'candidate': candidate_key, 'decision': 'dismissed'}
+    payload = {**record.payload, 'decision': 'dismissed', 'reason': 'dismissed by the owner'}
+    await store.write_records(owner, RecordSet(NAMESPACE_NAME, (RecordWrite(candidate_key, payload, record.revision),)))
+    return {'candidate': candidate_key, 'decision': 'dismissed'}
+
+
+def _criterion(ctx: StepContext) -> str:
+    """The one criterion an inbox task completes on: the preview's or the watch's."""
+    return ctx.task.specification.criteria[0].id
 
 
 # ── the adapter ──────────────────────────────────────────────────────────────
@@ -615,6 +681,8 @@ class EmailCalendarAdapter:
         target = step.target
         if step.operation == 'inbox.read':
             return self._list(ctx, target)
+        if step.operation == 'inbox.poll':
+            return self._poll(ctx, target)
         if step.operation == 'calendar.check':
             return self._check(ctx, target)
         if step.operation == 'calendar.verify':
@@ -751,6 +819,49 @@ class EmailCalendarAdapter:
         records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'added', existing, ctx.task.id, str(current.get('etag') or ''), note),))
         return Outcome(evidence=(Evidence('placed', target, 'on the calendar', 'calendar', ctx.now),), records=records)
 
+    def _poll(self, ctx: StepContext, target: str) -> Outcome:
+        """One page of history, queued before the cursor moves."""
+        key = f'cursor:{target}'
+        cursor = next((r for r in ctx.records if r.key == key), None)
+        stamp = datetime.fromtimestamp(ctx.now).strftime('%Y-%m-%d')
+        if cursor is None:
+            anchor = self._source.anchor()
+            write = RecordWrite(key, {'kind': 'cursor', 'history_id': anchor, 'page_token': None, 'anchored': stamp, 'resyncs': 0, 'task_id': ctx.task.id}, 0)
+            return Outcome(evidence=(Evidence(_criterion(ctx), target, 'active', 'inbox', ctx.now),),
+                           next_step=ctx.task.next_step, delay_s=self._config.poll_s, records=RecordSet(NAMESPACE_NAME, (write,)))
+        state = dict(cursor.payload)
+        changes = self._source.changes(str(state['history_id']), state.get('page_token') or None, self._config.max_messages_per_poll)
+        writes: list[RecordWrite] = []
+        known = {r.key for r in ctx.records}
+        if changes.expired:
+            # The source forgot back to the cursor: list the window since the
+            # anchor once, take what is new, and anchor again. Bounded by the
+            # page limit; a backlog larger than that is visible in the record.
+            ids = self._source.list_messages(str(state['anchored']), '', self._config.max_messages_per_poll)
+            state.update(history_id=self._source.anchor(), page_token=None, anchored=stamp, resyncs=int(state.get('resyncs', 0)) + 1)
+        else:
+            ids = list(changes.ids)
+            state['page_token'] = changes.next_page
+            if changes.next_page is None:
+                state['history_id'] = changes.history_id
+        for message_id in ids:
+            mkey = f'message:{message_id}'
+            if mkey in known:
+                continue  # a replayed page records nothing twice
+            writes.append(RecordWrite(mkey, {'kind': 'message', 'message_id': message_id, 'status': 'queued', 'sender': '', 'subject': '',
+                                             'digest': '', 'task_id': ctx.task.id, 'reason': ''}, 0))
+        writes.append(RecordWrite(key, state, cursor.revision))
+        queued = bool(writes[:-1]) or any(r.payload.get('status') == 'queued' and r.payload.get('task_id') == ctx.task.id
+                                          for r in ctx.records if r.payload.get('kind') == 'message')
+        if state.get('page_token'):
+            next_step, delay = ctx.task.next_step, 0.0
+        elif queued:
+            next_step, delay = Step('read', 'inbox.extract', target, ctx.task.next_step.arguments), 0.0
+        else:
+            next_step, delay = ctx.task.next_step, self._config.poll_s
+        return Outcome(evidence=(Evidence(_criterion(ctx), target, 'active', 'inbox', ctx.now),), next_step=next_step, delay_s=delay,
+                       records=RecordSet(NAMESPACE_NAME, tuple(writes)))
+
     def _list(self, ctx: StepContext, target: str) -> Outcome:
         arguments = dict(ctx.task.next_step.arguments)
         limit = int(arguments.get('limit') or self._config.max_messages_per_preview)
@@ -767,7 +878,7 @@ class EmailCalendarAdapter:
         records = RecordSet(NAMESPACE_NAME, tuple(writes)) if writes else None
         if not queued:
             return self._finish(ctx, target, records)
-        return Outcome(evidence=(Evidence('preview', target, 'in progress', 'inbox', ctx.now),),
+        return Outcome(evidence=(Evidence(_criterion(ctx), target, 'in progress', 'inbox', ctx.now),),
                        next_step=Step('read', 'inbox.extract', target, ctx.task.next_step.arguments), delay_s=0.0, records=records)
 
     async def _extract(self, ctx: StepContext, target: str) -> Outcome:
@@ -815,10 +926,15 @@ class EmailCalendarAdapter:
         return self._progress(ctx, target, writes)
 
     def _progress(self, ctx: StepContext, target: str, writes: list[RecordWrite]) -> Outcome:
-        return Outcome(evidence=(Evidence('preview', target, 'in progress', 'inbox', ctx.now),),
+        return Outcome(evidence=(Evidence(_criterion(ctx), target, 'in progress', 'inbox', ctx.now),),
                        next_step=ctx.task.next_step, delay_s=0.0, records=RecordSet(NAMESPACE_NAME, tuple(writes)))
 
     def _finish(self, ctx: StepContext, target: str, records: RecordSet | None) -> Outcome:
+        if 'inbox.poll' in ctx.task.specification.scope.operations:
+            # A watch never finishes on its own: the queue is empty, so it
+            # looks at the history again after the poll interval.
+            return Outcome(evidence=(Evidence(_criterion(ctx), target, 'active', 'inbox', ctx.now),),
+                           next_step=Step('read', 'inbox.poll', target, ctx.task.next_step.arguments), delay_s=self._config.poll_s, records=records)
         counts: dict[str, int] = {}
         pending = {w.key: w.payload for w in (records.writes if records else ())}
         for r in ctx.records:
@@ -830,7 +946,7 @@ class EmailCalendarAdapter:
                 counts[str(payload['status'])] = counts.get(str(payload['status']), 0) + 1
         summary = RecordWrite(f'preview:{ctx.task.id}', {'kind': 'preview', 'task_id': ctx.task.id, 'counts': counts, 'mailbox': target}, None)
         writes = tuple(records.writes) + (summary,) if records else (summary,)
-        return Outcome(evidence=(Evidence('preview', target, 'complete', 'inbox', ctx.now),), records=RecordSet(NAMESPACE_NAME, writes))
+        return Outcome(evidence=(Evidence(_criterion(ctx), target, 'complete', 'inbox', ctx.now),), records=RecordSet(NAMESPACE_NAME, writes))
 
     @staticmethod
     def summarize(task: Task, records: tuple[FeatureRecord, ...]) -> str:
@@ -876,4 +992,5 @@ class EmailCalendarAdapter:
 
 __all__ = ['CANDIDATE_SCHEMA', 'Candidate', 'EmailCalendarAdapter', 'EXTRACTION_PROMPT', 'GmailInbox', 'InboxSource', 'NAMESPACE',
            'CalendarConflict', 'CalendarSource', 'CalendarUnavailable', 'GoogleCalendar', 'Normalized', 'RawMessage', 'add_request',
-           'calendar_body', 'event_id_for', 'extraction_payload', 'interpret', 'normalize', 'preview_request']
+           'Changes', 'calendar_body', 'dismiss', 'event_id_for', 'extraction_payload', 'interpret', 'normalize', 'preview_request',
+           'watch_request']

@@ -1028,8 +1028,12 @@ class Pipeline:
                         raise ValueError('Tasks are unavailable.')
                     records = await store.records(config.tasks.owner, adapter.namespace.name)
                     return add_request(config.email_calendar, str(args.get('candidate') or ''), records)
+                async def dismiss_candidate(store: Any, owner: str, args: dict[str, Any]) -> Any:
+                    from ciel.email_calendar import dismiss
+                    return await dismiss(store, owner, str(args.get('candidate') or ''))
                 self._task_controller.bind_feature(adapter.namespace, adapter.operations,
                                                    requests={'inbox_preview': ask_preview, 'inbox_add': ask_add},
+                                                   controls={'inbox_dismiss': dismiss_candidate},
                                                    summary=adapter.summarize)
         # What the store owes the owner rides Vigil's queue; the notifier
         # exists even where the runner does not, since a hub with no runner
@@ -1334,7 +1338,9 @@ class Pipeline:
             self._player = player
             async with microphone as mic, player:
                 self._mic = mic
-                self._notes = NoteWindow(self._config.notes, self._save_note)
+                self._notes = NoteWindow(self._config.notes, self._save_note,
+                                         transcribe=lambda pcm: self._stt.transcribe(pcm),
+                                         can_dictate=lambda: not self._muted and self._state is State.WAITING and not self._confirm.active)
                 self._shortcuts = GlobalShortcuts(self._config.shortcuts, self._shortcut, self._config.notes)
                 await self._shortcuts.start()
                 self._confirm.bind(
@@ -1420,6 +1426,9 @@ class Pipeline:
                     # consumed until its block claims it.
                     source = pick_next(self._loop_snapshot())
                     if await self._enact(source, frame):
+                        continue
+
+                    if self._notes is not None and self._notes.dictation.feed(frame):
                         continue
 
                     if self._state is State.WAITING:

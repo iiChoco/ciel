@@ -123,5 +123,11 @@ async def add_event_from_mail(args: dict[str, Any]) -> dict[str, Any]:
     return await _call('inbox_add', args)
 
 
+@tool('dismiss_candidate', 'Dismiss one previewed candidate at the owner\'s explicit request: it is never put forward or added again, even when the same message is read again. Use the candidate key from inspect_task on the preview.',
+      {'type': 'object', 'properties': {'candidate': {'type': 'string'}}, 'required': ['candidate'], 'additionalProperties': False})
+async def dismiss_candidate(args: dict[str, Any]) -> dict[str, Any]:
+    return await _call('inbox_dismiss', args)
+
+
 TASK_TOOLS = [create_task, list_tasks, inspect_task, pause_task, resume_task, answer_task, cancel_task, pause_mandate, resume_mandate, revoke_grant,
-              mute_task_notices, unmute_task_notices, preview_inbox, add_event_from_mail]
+              mute_task_notices, unmute_task_notices, preview_inbox, add_event_from_mail, dismiss_candidate]

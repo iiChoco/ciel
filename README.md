@@ -1229,6 +1229,19 @@ or not, never resent blind; an id that exists but holds another event is an
 unknown the owner is asked about; an event the owner edited afterwards is
 theirs, placed and noted as edited, never overwritten.
 
+**A page is queued before the cursor moves.** A watch, the task behind a
+standing mandate, reads the mailbox's history from the anchor it took at its
+start and never before it, one page a step: the messages a page names are
+recorded as queued and the page token saved in the same write, and the
+history id advances only with the last page, so a crash replays a page and
+never skips one. Then the queue is extracted and the watch goes round again
+after `poll_s`. When Gmail has forgotten back to the cursor, the watch lists
+the window since its anchor once, bounded by `max_messages_per_poll`, takes
+what it did not have, and anchors again, counting the resync on its record.
+`dismiss_candidate` is the owner's no to a candidate: a tombstone on its
+record that outlives replay, so the same message never puts it forward or
+adds it again, and a second preview of the window reads it no more.
+
 **What runs out is said.** A window larger than the task's model calls
 leaves the rest recorded as unread with the reason; a runtime with no
 extraction backend records the same; a mailbox that is not connected is a
@@ -1248,15 +1261,17 @@ max_body_chars = 32000       # of one message's text, to the extraction call
 max_extractions_per_day = 100
 destination_calendar = ""    # the Google calendar id events are added to; empty means preview only
 check_calendars = []         # calendars also searched for an event already present
+poll_s = 300.0               # between a watch's looks at the inbox's history
+max_messages_per_poll = 25   # messages one page of history may queue
 ```
 
 The reader borrows `[sections].gmail_oauth_keys` and `gmail_token_file`,
 read-only, exactly as the section alarm's sender does; the writer borrows
 `[proactive].google_oauth_keys` and `google_token_file` the same way. Both
 must be authorized on the execution host. Nothing here grants anything
-standing: the grant setup that lets the Chart form activate automatic
-additions, inbox checkpoints that survive a restart, and proposals for
-reschedules and cancellations are the plan's later milestones.
+standing yet: the grant setup that lets the Chart form activate automatic
+additions and start the watch under a mandate, and proposals for reschedules
+and cancellations, are the plan's later milestones.
 
 ## A spot in a section (the signup site)
 

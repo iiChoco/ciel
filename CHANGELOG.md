@@ -2,6 +2,45 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — A page is queued before the cursor moves
+
+**Why.** A preview reads a window once; watching an inbox for a standing
+mandate means reading its history without ever losing a page or reading one
+twice, across crashes and across Gmail forgetting its past. And an owner who
+says no to a candidate must be able to count on never seeing it again.
+
+**What.**
+
+- *History, one page a step.* The Gmail reader takes the mailbox's history
+  anchor and lists messages added since an id, a page at a time, with the
+  404 of a forgotten history returned as expired rather than raised. The
+  adapter's `inbox.poll` records a page's messages as queued and the page
+  token in the same write-set, moves the history id only with the last
+  page, extracts what it queued, and goes round again after `poll_s`. A
+  replayed page records nothing twice; a first poll anchors and reads
+  nothing before it.
+- *Forgetting is handled once.* An expired history lists the window since
+  the anchor, bounded by `max_messages_per_poll`, takes what is new, and
+  anchors again with the resync counted on the cursor record.
+- *A watch is a task.* `watch_request` builds it: read operations only,
+  ending only with its mandate; the grant setup that starts one is the next
+  milestone. A watch's evidence names its own criterion, as a preview's does.
+- *A dismissal is a tombstone.* The controller gains feature controls over
+  a feature's own records, journaled; `dismiss_candidate` marks a candidate
+  dismissed, `add_event_from_mail` refuses it, and a second preview of the
+  same window does not read the message again.
+
+**Probes.** `probe_email_calendar.py 54 → 66: the watch's shape, the anchor
+with nothing before it, three arrivals as two pages with the token saved
+before the id moves, extraction and the next round after the interval, a
+crash between pages leaving the token and the id, a restart resuming from
+the page with nothing twice, the resync when the source forgets, and a
+dismissal that refuses an add, answers twice the same, and stands after a
+restart and a second preview.` Rerun unchanged: probe_task_authority.py 93,
+probe_task_tools.py 24, probe_task_wire.py 28, probe_turns.py 88,
+probe_hub_imports.py 6, probe_sections.py 78; hub import clean; the spoke
+reloaded to ready.
+
 ## 2026-09-09 — An event is added once, under a name only Ciel would choose
 
 **Why.** The preview could say what the inbox held and nothing could act on

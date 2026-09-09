@@ -182,6 +182,39 @@ class GmailReader(GmailClient):
         listing = self._request("GET", f"{_API}/messages?{params}")
         return [str(item["id"]) for item in (listing.get("messages") or []) if isinstance(item, dict) and item.get("id")]
 
+    def history_anchor(self) -> str:
+        """The mailbox's current history id: where watching starts, so that
+        nothing before activation is ever read."""
+        profile = self._request("GET", f"{_API}/profile")
+        anchor = profile.get("historyId")
+        if not isinstance(anchor, (str, int)) or not str(anchor):
+            raise GmailUnavailable("the Gmail profile has no history id")
+        return str(anchor)
+
+    def history(self, start_history_id: str, page_token: str | None, limit: int) -> tuple[list[str], str | None, str, bool]:
+        """One page of messages added since a history id: (ids, next page
+        token, the history id the listing is current to, expired). Gmail
+        forgets history after a while and answers 404; that is the expired
+        case, and the caller resynchronizes its window rather than guess."""
+        if type(limit) is not int or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        params = {"startHistoryId": start_history_id, "historyTypes": "messageAdded", "labelId": "INBOX", "maxResults": str(min(limit, 500))}
+        if page_token:
+            params["pageToken"] = page_token
+        try:
+            listing = self._request("GET", f"{_API}/history?{urllib.parse.urlencode(params)}")
+        except GmailUnavailable as exc:
+            if "answered 404" in str(exc):
+                return [], None, start_history_id, True
+            raise
+        ids: list[str] = []
+        for record in listing.get("history") or []:
+            for added in (record.get("messagesAdded") or []) if isinstance(record, dict) else []:
+                message = added.get("message") if isinstance(added, dict) else None
+                if isinstance(message, dict) and message.get("id") and str(message["id"]) not in ids:
+                    ids.append(str(message["id"]))
+        return ids, listing.get("nextPageToken") or None, str(listing.get("historyId") or start_history_id), False
+
     def fetch_raw(self, message_id: str) -> tuple[bytes, dict]:
         """One message's raw bytes and Gmail's metadata (thread, labels, internalDate)."""
         encoded = urllib.parse.quote(message_id, safe="")

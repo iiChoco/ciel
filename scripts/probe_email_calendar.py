@@ -39,8 +39,9 @@ from typing import Any, AsyncIterator
 
 from ciel.brain.extract import ExtractionLimits
 from ciel.config import EmailCalendarConfig, JournalConfig, TasksConfig
-from ciel.email_calendar import (CANDIDATE_SCHEMA, CalendarConflict, CalendarUnavailable, EmailCalendarAdapter, NAMESPACE, RawMessage,
-                                 add_request, calendar_body, event_id_for, extraction_payload, interpret, normalize, preview_request)
+from ciel.email_calendar import (CANDIDATE_SCHEMA, CalendarConflict, CalendarUnavailable, Changes, EmailCalendarAdapter, NAMESPACE, RawMessage,
+                                 add_request, calendar_body, dismiss, event_id_for, extraction_payload, interpret, normalize, preview_request,
+                                 watch_request)
 from ciel.journal import ActionJournal
 from ciel.task_context import TaskBinding
 from ciel.task_controls import TaskController
@@ -96,11 +97,42 @@ HOSTILE = mail('m4', 'Clinic Bookings <bookings@clinic.test>', 'Re: schedule',
 
 
 class FakeInbox:
+    """A mailbox with a history: every arrival bumps the history id, a page
+    of changes holds two, and ``forget()`` is Gmail forgetting the past."""
+
     def __init__(self, messages: list[RawMessage], *, connected: bool = True) -> None:
         self.messages = {m.id: m for m in messages}
         self.connected = connected
         self.listed: list[tuple[str, str, int]] = []
         self.fetched: list[str] = []
+        self.history: list[tuple[int, str]] = []
+        """(history id, message id) per arrival since the fixture began watching."""
+        self.head = 100
+        self.forgotten_before = 0
+        self.pages: list[tuple[str, str | None]] = []
+
+    def arrive(self, message: RawMessage) -> None:
+        self.messages[message.id] = message
+        self.head += 1
+        self.history.append((self.head, message.id))
+
+    def forget(self) -> None:
+        self.head += 1
+        self.forgotten_before = self.head  # everything before now, the cursor's id included, is gone
+
+    def anchor(self) -> str:
+        return str(self.head)
+
+    def changes(self, history_id: str, page_token: str | None, limit: int) -> Changes:
+        self.pages.append((history_id, page_token))
+        since = int(history_id)
+        if since < self.forgotten_before:
+            return Changes((), None, history_id, True)
+        newer = [m for h, m in self.history if h > since]
+        start = int(page_token or 0)
+        page = newer[start:start + 2]
+        next_page = str(start + 2) if start + 2 < len(newer) else None
+        return Changes(tuple(page), next_page, str(self.head) if next_page is None else history_id, False)
 
     def available(self) -> bool:
         return self.connected
@@ -576,6 +608,82 @@ async def probe_add_event(root: Path) -> None:
     await f.close()
 
 
+async def probe_watch(root: Path) -> None:
+    print('\na page is queued before the cursor moves')
+    inbox_messages = [mail(f'w{i}', 'Clinic Bookings <bookings@clinic.test>', f'Your appointment is confirmed {i}',
+                           'Your visit is confirmed for Tuesday, September 15, 2026 from 2:00 PM to 3:00 PM at 500 Main St.') for i in range(1, 8)]
+    backend = ScriptedBackend({f'Your appointment is confirmed {i}': CONFIRMED_ANSWER for i in range(1, 8)})
+    f = Fixture(root, 'watch', [], backend=backend, config=replace(ADD_CONFIG, poll_s=60.0))
+    store = await f.open()
+    spec, step = watch_request(f.config, 'me@example.test')
+    task = await store.create(Origin(OWNER, 'watch-1', 'voice'), spec, step, now=1000)
+    check('a watch is read-only, ends only with its mandate, and starts at the history\'s head',
+          spec.scope.operations == ('inbox.poll', 'inbox.extract') and spec.criteria[0].expected == 'ended' and step.operation == 'inbox.poll')
+    results = await f.run(task.id)
+    cursor = next(r.payload for r in await store.records(OWNER, NAMESPACE.name) if r.key.startswith('cursor:'))
+    check('the first poll takes an anchor and reads nothing before it', results == ['checkpointed'] and cursor['history_id'] == '100'
+          and not f.inbox.pages and (await store.get(OWNER, task.id)).eligible_at == 1060)
+    for message in inbox_messages[:3]:
+        f.inbox.arrive(message)
+    results = await f.run(task.id, now=1061)
+    records = await store.records(OWNER, NAMESPACE.name)
+    cursor = next(r.payload for r in records if r.key.startswith('cursor:'))
+    queued = sorted(r.payload['message_id'] for r in records if r.payload.get('kind') == 'message')
+    check('three arrivals come as a page of two and a page of one, each queued with its page token before the id moves',
+          results[:2] == ['checkpointed', 'checkpointed'] and queued == ['w1', 'w2', 'w3'] and f.inbox.pages[:2] == [('100', None), ('100', '2')]
+          and cursor['history_id'] == '103' and cursor['page_token'] is None)
+    check('then the queue is extracted and the watch goes round again after the poll interval',
+          results[-1] == 'checkpointed' and (await store.get(OWNER, task.id)).next_step.operation == 'inbox.poll'
+          and (await store.get(OWNER, task.id)).eligible_at >= 1061 + 60 and len(backend.payloads) == 3
+          and sum(1 for r in await store.records(OWNER, NAMESPACE.name) if r.payload.get('kind') == 'candidate') == 3)
+    for message in inbox_messages[3:6]:
+        f.inbox.arrive(message)
+    results = await f.run(task.id, limit=1, now=1200)
+    cursor = next(r.payload for r in await store.records(OWNER, NAMESPACE.name) if r.key.startswith('cursor:'))
+    check('a crash after the first of two pages leaves the page token saved and the id where it was', cursor['page_token'] == '2' and cursor['history_id'] == '103')
+    await f.close()
+    store = await f.open()
+    results = await f.run(task.id, now=1201)
+    records = await store.records(OWNER, NAMESPACE.name)
+    queued = sorted(r.payload['message_id'] for r in records if r.payload.get('kind') == 'message')
+    check('after a restart the watch resumes from the saved page and records nothing twice',
+          queued == ['w1', 'w2', 'w3', 'w4', 'w5', 'w6'] and f.inbox.pages[-1] == ('103', '2') and len(backend.payloads) == 6
+          and next(r.payload for r in records if r.key.startswith('cursor:'))['history_id'] == '106')
+    f.inbox.forget()
+    f.inbox.arrive(inbox_messages[6])
+    results = await f.run(task.id, now=1400)
+    records = await store.records(OWNER, NAMESPACE.name)
+    cursor = next(r.payload for r in records if r.key.startswith('cursor:'))
+    queued = sorted(r.payload['message_id'] for r in records if r.payload.get('kind') == 'message')
+    check('when the source forgets, the watch lists its window once, takes what is new, and anchors again, on the record',
+          f.inbox.listed and f.inbox.listed[-1][0] == cursor['anchored'] and cursor['resyncs'] == 1 and cursor['history_id'] == str(f.inbox.head)
+          and 'w7' in queued and len(queued) == 7)
+    await f.close()
+
+
+async def probe_dismissal(root: Path) -> None:
+    print('\na dismissal outlives replay')
+    calendar = FakeCalendar()
+    f = Fixture(root, 'dismiss', [CONFIRMATION], backend=ScriptedBackend({'Your appointment is confirmed': CONFIRMED_ANSWER}), config=ADD_CONFIG, calendar=calendar)
+    store = await f.open()
+    key = await previewed(f)
+    result = await dismiss(store, OWNER, key)
+    check('the owner dismisses a candidate and its record says so', result == {'candidate': key, 'decision': 'dismissed'}
+          and next(r.payload for r in await store.records(OWNER, NAMESPACE.name) if r.key == key)['decision'] == 'dismissed')
+    records = await store.records(OWNER, NAMESPACE.name)
+    await refused('a dismissed candidate cannot be added', _raise(lambda: add_request(ADD_CONFIG, key, records)), ValueError)
+    await refused('dismissing what is not on record is refused', dismiss(store, OWNER, 'candidate:nothing'), ValueError)
+    check('dismissing twice is the same answer', (await dismiss(store, OWNER, key))['decision'] == 'dismissed')
+    await f.close()
+    store = await f.open()
+    again = await f.preview('preview-2')
+    await f.run(again.id)
+    records = await store.records(OWNER, NAMESPACE.name)
+    check('after a restart and a second preview of the same window, the dismissal stands and the message is not read again',
+          next(r.payload for r in records if r.key == key)['decision'] == 'dismissed' and f.inbox.fetched.count('m1') == 1)
+    await f.close()
+
+
 async def main() -> None:
     probe_normalization()
     probe_interpretation()
@@ -584,6 +692,8 @@ async def main() -> None:
         await probe_preview(root)
         await probe_controller(root)
         await probe_add_event(root)
+        await probe_watch(root)
+        await probe_dismissal(root)
     print(f'\nall {len(CHECKS)} checks passed')
 
 

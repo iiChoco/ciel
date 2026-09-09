@@ -63,6 +63,9 @@ class TaskController:
         self._requests: dict[str, Callable[[dict[str, Any]], Any]] = {}
         """Finite tasks a feature lets an owner turn ask for, by operation name;
         a builder returns the specification and first step, or an awaitable of them."""
+        self._controls: dict[str, Callable[[TaskStore, str, dict[str, Any]], Any]] = {}
+        """A feature's own owner controls over its records, by operation name;
+        each takes the store, the owner, and the arguments, and answers a dict."""
         self._summaries: dict[str, tuple[frozenset[str], Callable[[Task, tuple[FeatureRecord, ...]], str]]] = {}
         """How a feature describes a task's records to the owner: by namespace,
         the operations that mark a task as its own and the words."""
@@ -117,6 +120,7 @@ class TaskController:
 
     def bind_feature(self, namespace: Namespace, operations: frozenset[str], *,
                      requests: dict[str, Callable[[dict[str, Any]], Any]] | None = None,
+                     controls: dict[str, Callable[[TaskStore, str, dict[str, Any]], Any]] | None = None,
                      summary: Callable[[Task, tuple[FeatureRecord, ...]], str] | None = None) -> None:
         """A registered feature's own doors: the finite tasks an owner turn may
         ask for (each builds a specification from the owner's arguments, in
@@ -125,6 +129,8 @@ class TaskController:
             raise TaskConflict('only a registered adapter binds a feature')
         for operation, build in (requests or {}).items():
             self._requests[operation] = build
+        for operation, control in (controls or {}).items():
+            self._controls[operation] = control
         if summary is not None:
             self._summaries[namespace.name] = (frozenset(operations), summary)
 
@@ -257,6 +263,15 @@ class TaskController:
                                  tuple(Criterion(c, target, 'success') for c in checks))
             task = await store.create(binding.origin, spec, Step('read', 'github.pr_checks', target),
                                       resource_wait=True, fence=binding.fence, record=lambda t: self._record(operation, t))
+        elif operation in self._controls:
+            result = await self._controls[operation](store, binding.origin.owner, args)
+            if self.journal is not None:
+                try:
+                    self.journal.record(tool=f'task_{operation}', args={k: v for k, v in args.items() if isinstance(v, (str, int))},
+                                        response=str(result)[:200], note='Explicit private owner control over a feature\'s records; no execution dispatched.')
+                except Exception:
+                    log.warning('could not journal a feature control', exc_info=True)
+            return dict(result)
         elif operation in self._requests:
             try:
                 built = self._requests[operation](args)

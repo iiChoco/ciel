@@ -223,13 +223,22 @@ class NotesConfig:
     """Maximum gap between two distinct backslash presses."""
 
     dir: Path = field(default_factory=lambda: Path.home() / ".ciel" / "notes")
-    """Owner-only local draft storage, retained across dismissal and restart."""
+    """Owner-only draft recovery and confirmed recent notes; dismissal deletes the draft."""
 
     max_chars: int = 16000
     """Maximum note length, checked by both the window and the memory writer."""
 
     save_timeout_s: float = 10.0
     """How long to await a hub receipt before offering a retry of the same note."""
+
+    history_limit: int = 100
+    """Maximum confirmed notes kept in this Mac's recent-note history."""
+
+    undo_discard_s: float = 5.0
+    """Seconds to offer an in-memory undo after discarding an unsaved draft; zero disables it."""
+
+    dictation_max_s: float = 60.0
+    """Maximum microphone capture per manual dictation, using the running speech engine."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -2209,6 +2218,12 @@ class EmailCalendarConfig:
     """Calendars searched for an event already present before one is added,
     beside the destination; an unreadable one makes the check unreliable
     and the adapter says so rather than adding."""
+
+    poll_s: float = 300.0
+    """How long a watch waits between looks at the inbox's history."""
+
+    max_messages_per_poll: int = 25
+    """Messages one page of history may queue; more wait for the next page."""
 
 
 @dataclass(frozen=True, slots=True)
