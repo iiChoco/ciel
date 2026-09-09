@@ -2,6 +2,29 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — The inbox feature can be checked against the real accounts
+
+**Why.** Five milestones proven against fakes prove nothing about Google.
+The plan's live acceptance needs a run that is safe to repeat: read-only
+mail, one synthetic event, no invitation to anyone.
+
+**What.**
+
+- *A live mode on the probe.* `probe_email_calendar.py --live` reads the
+  mailbox's history anchor, the changes since it, the window since a date,
+  and one message, reporting counts and a sender's domain and nothing of
+  the mail. On the destination calendar it inserts one synthetic event under
+  its own id with Ciel's ownership, reads it back, proves a second insert is
+  a conflict, finds it in a window, changes it at its version, proves a
+  stale version is refused for a change and for a removal, removes it at its
+  version, and reads it back as gone, cleaning up after a failed check. With
+  no destination configured it lists the calendars by id so one can be
+  chosen.
+
+**Probes.** `probe_email_calendar.py 89 (scripted, unchanged); --live 6 on
+this Mac for the mail half, the calendar half pending a destination.`
+No runtime behaviour changed.
+
 ## 2026-09-09 — A change is a proposal until the owner says so
 
 **Why.** An event added from one message is later moved or cancelled by

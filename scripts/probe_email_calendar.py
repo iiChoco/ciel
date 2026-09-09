@@ -24,6 +24,16 @@ instructions reaches the model as quoted data and cannot cite what is not
 there.
 
     uv run --no-sync python scripts/probe_email_calendar.py
+    uv run --no-sync python scripts/probe_email_calendar.py --live --since 2026-09-01
+
+``--live`` is the separate acceptance the plan asks for, against the real
+accounts on this host: it reads the mailbox's history anchor and lists the
+window read-only, reporting counts and nothing of the mail; then, on the
+configured destination calendar, it inserts one synthetic event under an
+id of its own, reads it back, changes it at its version, proves a stale
+version is refused, removes it at its version, and reads it back as gone.
+It sends no mail, invites nobody, and touches no other event. Its state is
+the calendar's for the minute it runs; nothing is written under ~/.ciel.
 """
 from __future__ import annotations
 
@@ -31,6 +41,7 @@ import asyncio
 import sys
 import tempfile
 import time
+from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from email.message import EmailMessage
@@ -922,5 +933,97 @@ async def main() -> None:
     print(f'\nall {len(CHECKS)} checks passed')
 
 
+def live(since: str) -> None:
+    """The real accounts, one synthetic event, read-only mail: what the fakes cannot prove."""
+    import secrets
+    from ciel.config import load_config
+    from ciel.email_calendar import GmailInbox, GoogleCalendar
+    from ciel.gmail import GmailReader
+    config = load_config()
+    feature = config.email_calendar
+    reader = GmailReader(config.sections.gmail_oauth_keys, config.sections.gmail_token_file)
+    inbox = GmailInbox(reader)
+    check('the Gmail connector is authorized on this host', inbox.available())
+    identity = inbox.identity()
+    check('the mailbox answers with an address', '@' in identity)
+    anchor = inbox.anchor()
+    check('the mailbox has a history anchor', anchor.isdigit())
+    ids = inbox.list_messages(since, '', 5)
+    check(f'the window since {since} lists (bounded to five, ids only: {len(ids)} found)', isinstance(ids, list))
+    changes = inbox.changes(anchor, None, 5)
+    check('history since the anchor is readable and not expired', not changes.expired and changes.history_id.isdigit())
+    if ids:
+        message = normalize(inbox.fetch(ids[0]), feature.max_body_chars)
+        check('one message fetches and normalizes (reporting only its sender\'s domain and text length: '
+              f'{message.sender.rsplit("@", 1)[-1]}, {len(message.text)} chars)', bool(message.digest))
+    destination = feature.destination_calendar.strip()
+    calendar = GoogleCalendar(config.proactive.google_oauth_keys, config.proactive.google_token_file)
+    if not calendar.available():
+        print('  --   the Google Calendar login is not on this host; run --live where the calendar watcher runs (the hub) for the calendar half')
+        return
+    check('the Google Calendar login is authorized on this host', True)
+    if not destination:
+        # The choice is the owner's; the ids are what config wants, so show them.
+        listing = calendar._request('GET', 'https://www.googleapis.com/calendar/v3/users/me/calendarList').get('items') or []
+        print('  --   no [email_calendar].destination_calendar; the calendar half is skipped. Your calendars, id then name:')
+        for item in listing:
+            print(f"         {item.get('id')}  —  {item.get('summary')}{'  (primary)' if item.get('primary') else ''}")
+        print('       set destination_calendar to a test calendar\'s id and run again')
+        return
+    event_id = 'cieltest' + secrets.token_hex(8)
+    check('an id nobody chose reads back as absent', calendar.get(destination, event_id) is None)
+    tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+    zone = feature.timezone or 'UTC'
+    candidate = {'title': 'Ciel live check (safe to delete)', 'start': f'{tomorrow}T09:00', 'end': f'{tomorrow}T09:30', 'timezone': zone,
+                 'location': 'nowhere', 'sender': 'probe', 'message_id': event_id}
+    body = calendar_body(candidate, event_id, f'candidate:{event_id}:0')
+    created = calendar.insert(destination, body)
+    try:
+        check('one synthetic event inserts under its own id with Ciel\'s ownership', created.get('id') == event_id and bool(created.get('etag')))
+        read = calendar.get(destination, event_id)
+        etag = str((read or {}).get('etag') or '')
+        check('it reads back as Ciel\'s, at a version', read is not None and bool(etag) and (read.get('extendedProperties') or {}).get('private', {}).get('ciel_digest'))
+        try:
+            calendar.insert(destination, body)
+            check('inserting the same id again is a conflict, not a second event', False)
+        except CalendarConflict:
+            check('inserting the same id again is a conflict, not a second event', True)
+        window = calendar.find(destination, f'{tomorrow}T00:00:00Z', f'{tomorrow}T23:59:59Z')
+        check('the window search finds it', any(e.get('id') == event_id for e in window))
+        changed = calendar.update(destination, event_id, {'location': 'somewhere'}, etag)
+        new_etag = str(changed.get('etag') or '')
+        check('a change at its version is taken and moves the version', changed.get('location') == 'somewhere' and new_etag and new_etag != etag)
+        try:
+            calendar.update(destination, event_id, {'location': 'elsewhere'}, etag)
+            check('a change at a stale version is refused', False)
+        except CalendarMoved:
+            check('a change at a stale version is refused', True)
+        try:
+            calendar.delete(destination, event_id, etag)
+            check('a removal at a stale version is refused', False)
+        except CalendarMoved:
+            check('a removal at a stale version is refused', True)
+        calendar.delete(destination, event_id, new_etag)
+        after = calendar.get(destination, event_id)
+        check('a removal at its version takes, and the id reads back as gone or cancelled', after is None or after.get('status') == 'cancelled')
+    finally:
+        leftover = calendar.get(destination, event_id)
+        if leftover is not None and leftover.get('status') != 'cancelled':
+            try:
+                calendar.delete(destination, event_id, str(leftover.get('etag') or ''))
+                print('  --   cleanup: the synthetic event was removed after a failed check')
+            except Exception as exc:  # noqa: BLE001 - say so; the id is printed for a manual removal
+                print(f'  --   cleanup failed ({exc}); remove event {event_id} from {destination} by hand')
+
+
 if __name__ == '__main__':
-    asyncio.run(main())
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--live', action='store_true', help='the real accounts on this host: read-only mail, one synthetic calendar event')
+    parser.add_argument('--since', default=(datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'), help='YYYY-MM-DD, for --live')
+    args = parser.parse_args()
+    if args.live:
+        live(args.since)
+        print(f'\nall {len(CHECKS)} live checks passed')
+    else:
+        asyncio.run(main())

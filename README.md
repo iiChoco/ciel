@@ -1312,8 +1312,14 @@ The reader borrows `[sections].gmail_oauth_keys` and `gmail_token_file`,
 read-only, exactly as the section alarm's sender does; the writer borrows
 `[proactive].google_oauth_keys` and `google_token_file` the same way. Both
 must be authorized on the execution host. The plan's five milestones are
-built against fakes; the live run against a test calendar with synthetic
-mail is separate acceptance and has not been done. Nothing is enabled by
+built against fakes; `probe_email_calendar.py --live` is the separate
+acceptance against the real accounts on this host: it reads the mailbox's
+anchor and window read-only, reporting counts and nothing of the mail, and
+on the destination calendar inserts one synthetic event under its own id,
+reads it back, changes and removes it at its version, proves a stale
+version is refused, and reads it back as gone; with no destination set it
+lists your calendars by id instead. It sends no mail and touches no other
+event. The watch under a grant against real mail has not been run. Nothing is enabled by
 these words: automatic additions need the runner, the feature, a destination
 calendar, both logins on the execution host, and a grant the owner approved
 in Chart.
@@ -2363,6 +2369,7 @@ uv run --no-sync python scripts/probe_task_authority.py # drafts, grants, mandat
 uv run --no-sync python scripts/probe_task_dispatch.py  # a mutation sent once: intent, authority, reconciliation, the owner's word, process kills; a fake remote
 uv run --no-sync python scripts/probe_task_notices.py # what is owed, the notifier and Vigil, receipts, the notice switch, the v6→v7 lift
 uv run --no-sync python scripts/probe_email_calendar.py # the inbox as data: normalization, the model held to the message, a preview through the runner, the owner's door
+uv run --no-sync python scripts/probe_email_calendar.py --live  # the real accounts on this host: read-only mail, one synthetic calendar event it removes
 uv run --no-sync python scripts/probe_task_tools.py  # real SDK dispatcher, turn authority, cancellation, drain debt
 uv run --no-sync python scripts/probe_task_wire.py   # two private Chart sockets, controls, conflicts, reconnect, a draft and its private approval
 uv run --no-sync python scripts/probe_task_wire.py --live  # synthetic task states in Chart; temporary storage
