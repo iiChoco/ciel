@@ -107,6 +107,8 @@ CATALOG: dict[str, FrameSpec] = {
         required={"text": "str"},
         optional={"seq": "int", "lane": "str", "say_id": "str", "request_id": "str", "owner_input": "bool"},
     ),
+    "note.save": FrameSpec("c2h", required={"note_id": "str", "text": "str"}),
+    "note.result": FrameSpec("h2c", required={"note_id": "str", "ok": "bool"}, optional={"error": "str"}),
     "task.request": FrameSpec("c2h", required={"request_id": "str", "operation": "str"},
                               optional={"task_id": "str", "revision": "int", "question_id": "str", "answer": "str",
                                         "draft_id": "str", "digest": "str", "namespace": "str", "operations": "list", "targets": "list",

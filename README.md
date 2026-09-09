@@ -180,6 +180,16 @@ talk = "ctrl+option+space"
 stop = "ctrl+option+escape"
 mute = "ctrl+option+m"
 
+[notes]
+enabled = true              # floating Mac scratchpad; uses the same Input Monitoring permission
+shortcut = "cmd+backslash"   # empty disables the chord
+# Both gestures are on so you can try them; the pair also types into the current app.
+double_backslash = true
+double_tap_ms = 350
+dir = "~/.ciel/notes"        # private draft; completed notes go to memory.dir on the brain
+max_chars = 16000
+save_timeout_s = 10.0       # keep the draft and offer retry if the hub does not receipt it
+
 [audio]
 backend = "portaudio"       # "apple": native echo cancellation, macOS 14+, system default devices
 apple_playback = "portaudio" # where Ciel's voice plays under "apple"; "engine" lisps, kept for comparison
@@ -202,12 +212,13 @@ its own process. Allow the Python running Ciel in the system prompt or in
 System Settings → Privacy & Security → Input Monitoring. A launchd spoke
 uses its Python, not the terminal's permission. If macOS still withholds access
 after the request, restart Ciel after granting it. An existing grant needs no
-new prompt; disabled or invalid shortcuts never request permission.
+new prompt. With both voice shortcuts and notes disabled, no listener requests
+permission; invalid active bindings also prevent it from starting.
 
 The request runs on the keyboard listener's thread, leaving voice available
 while macOS handles it. The listener reports `global shortcuts ready` when it
 can open the tap, or a warning if permission remains unavailable. Shortcuts
-are off by default.
+for Talk, Stop, and Mute are off by default; [quick notes](#quick-notes) are on.
 
 | Default | Action |
 |---|---|
@@ -1349,6 +1360,42 @@ Three mechanisms, deliberately separate:
 Only the one-line summaries go into the prompt each turn. Full contents load on
 demand, which is what keeps memory affordable as it grows.
 
+### Quick notes
+
+An idea does not have to become a conversation to be remembered. On the Mac,
+**Command–backslash** or **two backslashes within 350 ms** opens a floating
+Instrument window with the cursor ready. Both gestures are enabled under
+`[notes]`, independently of the voice shortcuts; they use the same macOS
+Input Monitoring permission described [above](#keyboard-shortcuts). This is a
+passive listener: the backslash pair also reaches the app you were typing in.
+Set `double_backslash = false` to keep only the command chord, or set
+`shortcut = ""` to keep only the pair. Bindings name physical ANSI positions.
+
+**Enter** adds a line. **Shift–Enter** or the Save button puts the note into
+Invariant as a reference, preserving its wording and paragraphs without a
+model call. A green receipt appears before the window tucks away and returns
+focus. **Escape** or × hides the window with the draft intact. Tab reaches Save
+and the hide button. Ask Ciel later, for example, “Find my note about the moon
+garden”; notes use the ordinary memory index and `recall` keyword search.
+
+The draft lives in `notes.dir/draft.json`, owner-only, and reopens after a
+restart. In split mode the hub writes `memory.dir/note-<id>.md`; local mode
+writes the same format locally. The note and its human-readable index are
+owner-only, and note text is quoted as data when it enters the brain's prompt.
+Nothing is broadcast to another Chart or entered as a conversation. Two notes
+with the same opening remain distinct. Retrying after a lost receipt uses the
+same id and cannot create another copy of that note.
+
+An offline brain, a disabled memory store, a full disk, or a hub without note
+support leaves the draft and an error beside the editor. Reopen it and press
+Shift–Enter to retry after the problem is resolved; drafts are not submitted
+automatically. Both halves need this version for split-mode saving. `[notes]
+enabled = false` disables capture; `[memory] enabled = false` on the brain
+also prevents saving. `max_chars` bounds the note in the editor and writer,
+and `save_timeout_s` bounds the wait for a hub receipt. The spoke keeps its
+local draft until that receipt, so a reload or failed save cannot silently
+throw an idea away.
+
 ## Independent action (planned)
 
 The [independent-action plan](design/2026-09-08-independent-action-plan.md)
@@ -2044,7 +2091,9 @@ uv run --no-sync python scripts/probe_task_wire.py --live  # synthetic task stat
 uv run --no-sync python scripts/probe_turns.py       # lane contract, trusted ingress, public/private clients
 uv run --no-sync python scripts/probe_hub_imports.py # Linux imports and temporary task-store lifecycle
 uv run --no-sync python scripts/probe_shellguard.py  # confirmation and mutating command options
-uv run --no-sync python scripts/probe_shortcuts.py   # global Mac controls: chords, lifecycle, interruption, mute, both voice paths
+uv run --no-sync python scripts/probe_shortcuts.py   # global Mac controls, note chord and backslash pair, lifecycle, interruption, mute
+uv run --no-sync python scripts/probe_notes.py       # private drafts, memory, retry receipts, both voice paths; temporary state only
+uv run --no-sync python scripts/probe_note_window.py # macOS native editor: focus, newlines, save, retry, Escape, narrow layout
 uv run --no-sync python scripts/probe_speaker.py     # Barn Door: diagnostic policy, private readings, both voice paths
 uv run --no-sync python scripts/probe_files.py       # file/search boundaries and session credentials
 uv run --no-sync python scripts/probe_tool_rpc.py    # Mac snapshots, undo, and process cancellation
@@ -2108,7 +2157,8 @@ as soon as the first complete thought exists rather than after the whole answer.
 |---|---|
 | `pipeline.py` | The loop and the state machine |
 | `config.py` | Every swappable choice, in one place |
-| `shortcuts.py` | Global Mac Talk, Stop, and Mute controls, with a passive keyboard listener |
+| `shortcuts.py` | Global Mac Talk, Stop, Mute, and quick-note controls, with a passive keyboard listener |
+| `notes.py` | Private scratchpad, note identity, memory writer, hub receipts, and native window bridge |
 | `commands.py` | The no-brain fast path — mechanical requests matched locally |
 | `confirm.py` | Proof Obligation — the spoken/texted yes-or-no broker |
 | `audio/` | Paired PortAudio or Apple voice processing, capture, endpointing, playback, wake (the phrase and the gesture ear), speaker identity |
@@ -2133,4 +2183,4 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `oura.py` | The Oura client — sleep, readiness, activity; read-only |
 | `location.py` | Where the user is — Find My's cache, the Mac's Wi-Fi, named places |
 | `world.py` | Phase Space — the one table of what is true right now, with ages; opens every turn |
-| `ui/` | The status pill (`hud.py` is its own process) and the indicator tee that feeds every view |
+| `ui/` | The status pill and quick-note window (`hud.py` and `notes.py` run as child processes), plus the indicator tee |

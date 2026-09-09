@@ -28,7 +28,9 @@ from collections import deque
 from typing import TYPE_CHECKING, Any, Callable
 
 from ciel import wire
-from ciel.config import HubConfig, WebConfig
+from ciel.memory.store import MemoryStore
+from ciel.notes import save_note
+from ciel.config import HubConfig, NotesConfig, WebConfig
 from ciel.remote.web import Admission, WebLink
 
 if TYPE_CHECKING:
@@ -53,6 +55,8 @@ class HubServer(WebLink):
         interview: "InterviewApp | None" = None,
     ) -> None:
         super().__init__(config, hub, interview)
+        self._note_store: MemoryStore | None = None
+        self._notes_config = NotesConfig()
         self._spoke: Any = None
         """The seated spoke's socket, or None."""
         self._voice: deque[Ingress] = deque()
@@ -95,6 +99,9 @@ class HubServer(WebLink):
         """The spoke's mute switch moved (its sentinel, its own poll)."""
         self.on_spoke_change: Callable[[bool], None] | None = None
         """A spoke took the seat (True) or left it (False)."""
+
+    def bind_notes(self, store: MemoryStore | None, config: NotesConfig) -> None:
+        self._note_store, self._notes_config = store, config
 
     # ── the seat ─────────────────────────────────────────────────────────────
 
@@ -271,6 +278,9 @@ class HubServer(WebLink):
         self.stir.set()
         kind = frame["type"]
         try:
+            if kind == "note.save":
+                self._send_to(ws, save_note(self._note_store, self._notes_config, frame["note_id"], frame["text"]))
+                return
             if kind == "task.request":
                 log.warning("task command from the spoke seat refused")
                 return

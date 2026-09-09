@@ -49,6 +49,7 @@ from ciel.audio.vad import Endpointer
 from ciel.audio.wake import WakeDetector, build_wake_detector, wake_phrases
 from ciel.commands import match as match_command
 from ciel.shortcuts import GlobalShortcuts
+from ciel.notes import NoteRelay, NoteWindow
 from ciel.config import SAMPLE_RATE, Config
 from ciel.pipeline import _SLEEP_GAP_S, build_tts, trails_off
 from ciel.reload import SourceWatcher, default_roots
@@ -100,6 +101,8 @@ class Spoke:
     """Runs the room until stopped."""
 
     _shortcuts: GlobalShortcuts | None = None
+    _notes: NoteWindow | None = None
+    _note_relay: NoteRelay | None = None
     _talk_requested = False
     _cancel_next_voice_turn = False
     _silenced_turn: str | None = None
@@ -266,7 +269,8 @@ class Spoke:
             self._player = player
             async with microphone as mic, player:
                 self._mic = mic
-                self._shortcuts = GlobalShortcuts(self._config.shortcuts, self._shortcut)
+                self._notes = NoteWindow(self._config.notes, self._save_note)
+                self._shortcuts = GlobalShortcuts(self._config.shortcuts, self._shortcut, self._config.notes)
                 await self._shortcuts.start()
                 greeting = random.choice(self._config.wake.greeting_phrases)
                 await player.play(self._tts.stream(greeting))
@@ -431,6 +435,9 @@ class Spoke:
         await self._tts.warm_up()
 
     async def _shutdown(self) -> None:
+        if self._notes is not None:
+            await self._notes.close()
+            self._notes = None
         if self._shortcuts is not None:
             await self._shortcuts.close()
             self._shortcuts = None
@@ -606,6 +613,10 @@ class Spoke:
 
     def _on_frame(self, frame: dict[str, Any]) -> None:
         kind = frame["type"]
+        if kind == "note.result":
+            if self._note_relay is not None:
+                self._note_relay.receive(frame)
+            return
         if kind == "turn.begin":
             lane = frame.get("lane")
             if lane == "web":
@@ -924,7 +935,16 @@ class Spoke:
 
     # ── mute, presence of speech, the room ───────────────────────────────────
 
+    async def _save_note(self, note_id: str, text: str) -> dict[str, Any]:
+        if self._note_relay is None:
+            self._note_relay = NoteRelay(self._link.send, self._config.notes.save_timeout_s)
+        return await self._note_relay.save(note_id, text)
+
     async def _shortcut(self, action: str) -> None:
+        if action == "note":
+            if self._notes is not None:
+                await self._notes.show()
+            return
         if action == "talk" and self._muted:
             return
         if action == "mute":

@@ -2,6 +2,43 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-08 — A place to catch a thought
+
+**Why.** A passing idea needed a whole conversation to reach Ciel's memory.
+By the time there was room to say it, the thought could be gone.
+
+**What.**
+
+- *A blank page at a key.* Command–backslash and a quick backslash pair open
+  a native floating Instrument window. Enter makes a paragraph; Shift–Enter
+  saves; Escape tucks the draft away. Both gestures are configurable under
+  `[notes]`, independent of the voice controls, using the same passive Mac
+  listener and its Input Monitoring permission. The pair still reaches the
+  foreground app. The hub starts no keyboard listener.
+- *The receipt belongs to memory.* A note enters Invariant as a reference,
+  with its wording and note provenance preserved, without a model turn.
+  The split spoke sends a private `note.save` and waits for `note.result`;
+  the local process uses the same writer. Only the seated spoke can use
+  this path, and nothing enters the conversation queue or the broadcast ring.
+- *A draft survives the interruption.* Owner-only drafts reopen after Escape
+  or restart. A failed save keeps the text and offers retry; a stable id
+  absorbs a lost receipt, while a second note with the same opening gets
+  its own file. The note and human index are owner-only, and memory recall
+  and prompt summaries quote notes as data, never instructions to execute.
+
+**Probes.** `probe_notes.py 34 (new): draft recovery and permissions, wording,
+provenance, idempotency, bounds, disk failure, quoted recall, offline and timed
+out saves, private seated-spoke routing, and local/spoke integration.
+probe_note_window.py 19 (new): native focus, Enter, one Shift–Enter save,
+in-flight editing, retry identity, visible errors and success, Escape,
+restart, Tab focus, a 400-point window, and native process start/reuse/exit. probe_shortcuts.py 55 → 66:
+command chord, timed pair, repeats, intervening keys, independent settings,
+conflicts, and configuration. probe_wire.py 75 → 76: note frames round-trip
+and stay out of the replay ring.` Existing spoke (56), hub arbiter (61),
+hub imports (6), turns (78), Vigil (173), and Closure (56) probes also pass.
+Native renders reviewed at 620 and 400 points, including draft, error,
+saving, and saved states. No new dependency or hub deployment.
+
 ## 2026-09-08 — Nobody spoke, so nothing was heard
 
 **Why.** An afternoon of typing produced a run of turns nobody had spoken,

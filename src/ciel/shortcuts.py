@@ -1,7 +1,8 @@
-"""Three keys give the room a control that does not depend on hearing.
+"""The keyboard gives the room controls and a place to catch a thought.
 
 **The keyboard does not become a transcript.** A passive Mac event tap
-matches physical key codes and modifiers to three configured actions. It
+matches physical key codes and modifiers to configured actions. A short
+backslash pair can open the note window too; only its timestamp is kept. It
 never reads characters, stores key events, or consumes another app's input.
 Only action names cross to asyncio; holding a key fires once.
 
@@ -20,10 +21,11 @@ import asyncio
 import logging
 import sys
 import threading
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from ciel.config import ShortcutsConfig
+from ciel.config import NotesConfig, ShortcutsConfig
 
 log = logging.getLogger(__name__)
 _MODIFIERS = {"shift": 1 << 17, "ctrl": 1 << 18, "option": 1 << 19, "cmd": 1 << 20}
@@ -36,6 +38,7 @@ _KEYS = {
     "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22,
     "5": 23, "9": 25, "7": 26, "8": 28, "0": 29, "o": 31, "u": 32,
     "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
+    "backslash": 42, "\\": 42,
     "space": 49, "escape": 53, "return": 36, "tab": 48,
 }
 
@@ -49,7 +52,7 @@ class Chord:
 def parse_chord(value: str) -> Chord:
     parts = [_ALIASES.get(p.strip().lower(), p.strip().lower()) for p in value.split("+")]
     if len(parts) < 2 or parts[-1] not in _KEYS:
-        raise ValueError("use modifiers plus a letter, digit, space, escape, return, or tab")
+        raise ValueError("use modifiers plus a letter, digit, backslash, space, escape, return, or tab")
     mods = parts[:-1]
     if any(m not in _MODIFIERS for m in mods) or len(set(mods)) != len(mods):
         raise ValueError("modifiers are ctrl, option, cmd, and shift, each at most once")
@@ -59,11 +62,20 @@ def parse_chord(value: str) -> Chord:
 
 
 class Matcher:
-    def __init__(self, config: ShortcutsConfig) -> None:
-        self.bindings = {parse_chord(getattr(config, action)): action
-                         for action in ("talk", "stop", "mute")}
-        if len(self.bindings) != 3:
-            raise ValueError("talk, stop, and mute must use different shortcuts")
+    def __init__(self, config: ShortcutsConfig, notes: NotesConfig | None = None) -> None:
+        self.bindings: dict[Chord, str] = {}
+        if config.enabled or notes is None:
+            self.bindings = {parse_chord(getattr(config, action)): action
+                             for action in ("talk", "stop", "mute")}
+            if len(self.bindings) != 3:
+                raise ValueError("talk, stop, and mute must use different shortcuts")
+        self._notes = notes
+        self._last_backslash: float | None = None
+        if notes is not None and notes.enabled and notes.shortcut:
+            chord = parse_chord(notes.shortcut)
+            if chord in self.bindings:
+                raise ValueError("the note shortcut must differ from the voice controls")
+            self.bindings[chord] = "note"
         self._held: set[int] = set()
 
     def feed(self, key: int, flags: int, *, down: bool, repeat: bool = False) -> str | None:
@@ -71,6 +83,19 @@ class Matcher:
             self._held.discard(key)
             return None
         chord = Chord(key, flags & _MASK)
+        notes = self._notes
+        if notes is not None and notes.enabled and notes.double_backslash:
+            if key == 42 and chord.modifiers == 0:
+                if repeat or key in self._held:
+                    return None
+                self._held.add(key)
+                now = time.monotonic()
+                previous, self._last_backslash = self._last_backslash, now
+                if previous is not None and 0 <= now - previous <= notes.double_tap_ms / 1000:
+                    self._last_backslash = None
+                    return "note"
+                return None
+            self._last_backslash = None
         action = self.bindings.get(chord)
         if action is None or repeat or key in self._held:
             return None
@@ -79,11 +104,13 @@ class Matcher:
 
     def reset(self) -> None:
         self._held.clear()
+        self._last_backslash = None
 
 
 class GlobalShortcuts:
-    def __init__(self, config: ShortcutsConfig, handle: Callable[[str], Awaitable[None]]) -> None:
+    def __init__(self, config: ShortcutsConfig, handle: Callable[[str], Awaitable[None]], notes: NotesConfig | None = None) -> None:
         self._config = config
+        self._notes = notes
         self._handle = handle
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -91,13 +118,14 @@ class GlobalShortcuts:
         self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=16)
 
     async def start(self) -> None:
-        if not self._config.enabled or self._thread is not None:
+        enabled = self._config.enabled or (self._notes is not None and self._notes.enabled)
+        if not enabled or self._thread is not None:
             return
         if sys.platform != "darwin":
             log.warning("global shortcuts require macOS")
             return
         try:
-            matcher = Matcher(self._config)
+            matcher = Matcher(self._config, self._notes)
             import Quartz
         except (ImportError, ValueError) as exc:
             log.warning("global shortcuts unavailable: %s", exc)

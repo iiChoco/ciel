@@ -47,7 +47,7 @@ import contextlib
 from contextlib import AsyncExitStack, aclosing
 from dataclasses import replace as dc_replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -56,6 +56,7 @@ from ciel.brain.prompt import REFLECTION_PROMPT, proactive_prompt
 from ciel.brain.tools import build_tool_server
 from ciel.brain.tools.memory import bind_context as bind_memory_context
 from ciel.shortcuts import GlobalShortcuts
+from ciel.notes import NoteWindow, save_note
 from ciel.config import SAMPLE_RATE, AudioConfig, Config
 from ciel.confirm import VoiceConfirmBroker
 from ciel.messages import MessagesClient, MessagesUnavailable
@@ -772,6 +773,7 @@ class Pipeline:
 
     _shortcuts: GlobalShortcuts | None = None
     _task_notifier: TaskNotifier | None = None
+    _notes: NoteWindow | None = None
     _talk_requested = False
     _shortcut_quiet = False
     _shortcut_epoch = 0
@@ -883,6 +885,8 @@ class Pipeline:
             self._journal,
             self._timers,
         ) = build_tool_server(config, self._remote, self._world)
+        if hub:
+            self._web_link.bind_notes(self._memory, config.notes)
         if self._memory is not None and self._memory.all():
             log.info("loaded %d memories", len(self._memory.all()))
 
@@ -1297,7 +1301,8 @@ class Pipeline:
             self._player = player
             async with microphone as mic, player:
                 self._mic = mic
-                self._shortcuts = GlobalShortcuts(self._config.shortcuts, self._shortcut)
+                self._notes = NoteWindow(self._config.notes, self._save_note)
+                self._shortcuts = GlobalShortcuts(self._config.shortcuts, self._shortcut, self._config.notes)
                 await self._shortcuts.start()
                 self._confirm.bind(
                     player=player,
@@ -2478,7 +2483,14 @@ class Pipeline:
                 })
         return agents
 
+    async def _save_note(self, note_id: str, text: str) -> dict[str, Any]:
+        return await asyncio.to_thread(save_note, self._memory, self._config.notes, note_id, text)
+
     async def _shortcut(self, action: str) -> None:
+        if action == "note":
+            if self._notes is not None:
+                await self._notes.show()
+            return
         if action == "talk" and self._muted:
             return
         if action == "mute":
@@ -3830,6 +3842,9 @@ class Pipeline:
         await self._tts.warm_up()
 
     async def _shutdown(self) -> None:
+        if self._notes is not None:
+            await self._notes.close()
+            self._notes = None
         if self._shortcuts is not None:
             await self._shortcuts.close()
             self._shortcuts = None

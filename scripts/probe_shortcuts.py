@@ -1,7 +1,8 @@
 """The keyboard controls the room without becoming a second microphone.
 
 Physical chords match exactly, aliases agree, repeats fire once, and invalid
-bindings fail closed. A fake Mac tap pins passive event delivery, permission
+bindings fail closed. Note chords and timed backslash pairs are independent of
+voice controls, ignore repeats, and break on intervening typing. A fake Mac tap pins passive event delivery, permission
 requests, denial and request failures, thread handoff, and shutdown without
 monitoring the real keyboard. Disabled or invalid shortcuts never prompt;
 already granted permission is reused and a new grant opens the listener.
@@ -20,7 +21,7 @@ from pathlib import Path
 from dataclasses import replace
 from unittest.mock import patch
 
-from ciel.config import ShortcutsConfig, load_config
+from ciel.config import NotesConfig, ShortcutsConfig, load_config
 from ciel.schedule import State
 from ciel.shortcuts import GlobalShortcuts, Matcher, parse_chord
 from probe_spoke import make_spoke, FakeEndpointer, FakeWake, FakeMic, FakePlayer
@@ -67,6 +68,47 @@ def probe_matching() -> None:
     with patch.dict('os.environ', {'CIEL_SHORTCUTS_ENABLED': 'true', 'CIEL_SHORTCUTS_TALK': 'cmd+option+t'}):
         cfg = load_config().shortcuts
     check("shortcuts use the ordinary configuration loader", cfg.enabled and cfg.talk == 'cmd+option+t')
+
+
+def probe_notes() -> None:
+    notes = NotesConfig()
+    m = Matcher(ShortcutsConfig(), notes)
+    chord = parse_chord(notes.shortcut)
+    check("Command backslash opens a note with voice controls disabled", m.feed(42, chord.modifiers, down=True) == 'note')
+    check("holding the note chord opens only one window", m.feed(42, chord.modifiers, down=True, repeat=True) is None)
+    m.reset()
+    with patch('ciel.shortcuts.time.monotonic', side_effect=[1.0, 1.2]):
+        first = m.feed(42, 0, down=True)
+        held = m.feed(42, 0, down=True, repeat=True)
+        m.feed(42, 0, down=False)
+        second = m.feed(42, 0, down=True)
+    check("two distinct backslashes open one note", first is None and held is None and second == 'note')
+    m.reset()
+    with patch('ciel.shortcuts.time.monotonic', side_effect=[1.0, 2.0]):
+        m.feed(42, 0, down=True); m.feed(42, 0, down=False)
+        check("a slow pair remains ordinary typing", m.feed(42, 0, down=True) is None)
+    m.reset()
+    with patch('ciel.shortcuts.time.monotonic', side_effect=[1.0, 1.1]):
+        m.feed(42, 0, down=True); m.feed(42, 0, down=False)
+        m.feed(0, 0, down=True)
+        check("a letter between backslashes breaks the gesture", m.feed(42, 0, down=True) is None)
+    m.reset()
+    check("shifted backslash is never the note gesture", m.feed(42, 1 << 17, down=True) is None)
+    m = Matcher(ShortcutsConfig(), replace(notes, double_backslash=False))
+    check("the pair can be disabled independently", m.feed(42, 0, down=True) is None and m.feed(42, chord.modifiers, down=True) == 'note')
+    m = Matcher(ShortcutsConfig(), replace(notes, enabled=False))
+    check("disabled notes have no keyboard action", not m.bindings and m.feed(42, 0, down=True) is None)
+    m = Matcher(replace(ShortcutsConfig(), talk='invalid'), notes)
+    check("an unused voice binding cannot disable notes", m.feed(42, chord.modifiers, down=True) == 'note')
+    try:
+        Matcher(replace(ShortcutsConfig(), enabled=True), replace(notes, shortcut='ctrl+option+m'))
+    except ValueError:
+        check("note and voice actions cannot share a chord", True)
+    else:
+        check("note and voice actions cannot share a chord", False)
+    with patch.dict('os.environ', {'CIEL_NOTES_SHORTCUT': 'cmd+option+n', 'CIEL_NOTES_DOUBLE_BACKSLASH': 'false'}):
+        cfg = load_config().notes
+    check("note choices use the ordinary config loader", cfg.shortcut == 'cmd+option+n' and not cfg.double_backslash)
 
 
 async def probe_controls() -> None:
@@ -311,6 +353,7 @@ async def probe_listener() -> None:
 async def main() -> None:
     with tempfile.TemporaryDirectory() as home, patch.object(Path, "home", return_value=Path(home)), patch("tempfile.tempdir", home):
         probe_matching()
+        probe_notes()
         await probe_controls()
         await probe_listener()
     print(f"\nall {len(CHECKS)} checks passed")

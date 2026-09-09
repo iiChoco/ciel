@@ -61,6 +61,8 @@ def refused(raw: str, direction: wire.Direction) -> bool:
 SAMPLES: dict[str, dict] = {
     "hello": {"v": 1, "role": "chart", "token": "t", "client_id": "c",
               "caps": ["acks"], "resume": {"epoch": "e", "seq": 3}},
+    'note.save': {'note_id': 'a' * 32, 'text': 'A thought'},
+    'note.result': {'note_id': 'a' * 32, 'ok': True},
     'task.request': {'request_id': 'r', 'operation': 'list'},
     'task.result': {'request_id': 'r', 'ok': True, 'data': {}},
     'task.changed': {},
@@ -97,6 +99,7 @@ SAMPLES: dict[str, dict] = {
 
 
 def probe_codec() -> None:
+    check('note text and receipts never enter the replay ring', not {'note.save', 'note.result'} & wire.BROADCAST_TYPES)
     check('task payloads and invalidation never enter the replay ring', not {'task.result', 'task.changed'} & wire.BROADCAST_TYPES)
     check('Chart controls need the revision they rendered', refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'pause', 'task_id': 't'}), 'c2h'))
     check('task request identities are bounded', refused(json.dumps({'type': 'task.request', 'request_id': 'r' * 257, 'operation': 'list'}), 'c2h'))

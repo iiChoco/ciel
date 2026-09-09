@@ -200,6 +200,32 @@ class ShortcutsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class NotesConfig:
+    """A private Mac scratchpad, saved into Invariant without a model turn."""
+
+    enabled: bool = True
+    """Enable the floating note window and its Input Monitoring listener on the Mac."""
+
+    shortcut: str = "cmd+backslash"
+    """The modifier chord that opens the note window; empty disables this chord."""
+
+    double_backslash: bool = True
+    """Also open on two unmodified backslashes; the passive listener leaves them in the current app."""
+
+    double_tap_ms: int = 350
+    """Maximum gap between two distinct backslash presses."""
+
+    dir: Path = field(default_factory=lambda: Path.home() / ".ciel" / "notes")
+    """Owner-only local draft storage, retained across dismissal and restart."""
+
+    max_chars: int = 16000
+    """Maximum note length, checked by both the window and the memory writer."""
+
+    save_timeout_s: float = 10.0
+    """How long to await a hub receipt before offering a retry of the same note."""
+
+
+@dataclass(frozen=True, slots=True)
 class WakeConfig:
     """How Ciel decides it's being addressed."""
 
@@ -2211,6 +2237,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
     shortcuts: ShortcutsConfig = field(default_factory=ShortcutsConfig)
+    notes: NotesConfig = field(default_factory=NotesConfig)
     gestures: GestureConfig = field(default_factory=GestureConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     stt: STTConfig = field(default_factory=STTConfig)
@@ -2265,6 +2292,7 @@ _SECTIONS = {
     "audio": AudioConfig,
     "wake": WakeConfig,
     "shortcuts": ShortcutsConfig,
+    "notes": NotesConfig,
     "gestures": GestureConfig,
     "voice": VoiceConfig,
     "stt": STTConfig,
