@@ -987,10 +987,19 @@ class Pipeline:
         # and never builds a Pipeline. Its adapters' namespaces are registered
         # with the store before it opens, through the controller.
         self._task_runner: TaskRunner | None = None
+        feature_adapters: list[Any] = []
+        if config.tasks.enabled and config.tasks.runner and config.email_calendar.enabled:
+            # The inbox feature's adapter, over the connector's login on this
+            # host; a login on another machine authorizes nothing here.
+            from ciel.email_calendar import EmailCalendarAdapter, GmailInbox
+            from ciel.gmail import GmailReader
+            feature_adapters.append(EmailCalendarAdapter(
+                config.email_calendar, GmailInbox(GmailReader(config.sections.gmail_oauth_keys, config.sections.gmail_token_file))))
         if config.tasks.enabled and config.tasks.runner:
             self._task_runner = TaskRunner(
                 config.tasks,
                 lambda: self._task_controller.store,
+                feature_adapters,
                 lease=self._brain.lease,
                 backend=AgentSdkExtractor(config.tasks.extraction_model or config.brain.model),
                 journal=self._journal,
@@ -1001,6 +1010,14 @@ class Pipeline:
             setups=self._task_runner.setups if self._task_runner is not None else (),
         )
         self._task_controller.bind_approval(self._approve_grant)
+        for adapter in feature_adapters:
+            from ciel.email_calendar import EmailCalendarAdapter, preview_request
+            if isinstance(adapter, EmailCalendarAdapter):
+                def ask_preview(args: dict[str, Any], _adapter: EmailCalendarAdapter = adapter) -> Any:
+                    limit = args.get('max_messages')
+                    return preview_request(config.email_calendar, _adapter.identity_for_scope(), str(args.get('since') or ''),
+                                           str(args.get('until') or ''), limit if isinstance(limit, int) else None)
+                self._task_controller.bind_feature(adapter.namespace, adapter.operations, requests={'inbox_preview': ask_preview}, summary=adapter.summarize)
         # What the store owes the owner rides Vigil's queue; the notifier
         # exists even where the runner does not, since a hub with no runner
         # still owes the notices it holds.

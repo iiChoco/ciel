@@ -8,11 +8,13 @@ Google Calendar watcher gets its calendar: read the connector's refresh
 token, mint access tokens in memory, never write back — two writers of
 one token file is how refresh races start.
 
-One capability, deliberately narrow: send a plain-text message. The
-recipient defaults to the signed-in account itself ("email me"), read
-from the Gmail profile and cached; any other address is pinned in config
-by the user, never chosen at send time. Synchronous urllib, so callers
-thread it.
+Two capabilities, each deliberately narrow. The sender sends a plain-text
+message: the recipient defaults to the signed-in account itself ("email
+me"), read from the Gmail profile and cached; any other address is pinned
+in config by the user, never chosen at send time. The reader lists and
+fetches messages for the inbox feature, bounded, raw, and read-only: it
+changes no label and marks nothing read. Both share the login and the
+plumbing; neither writes a token. Synchronous urllib, so callers thread it.
 """
 
 from __future__ import annotations
@@ -41,8 +43,8 @@ class GmailUnavailable(MailUnavailable):
     """The connector's tokens are missing, revoked, or Google refused."""
 
 
-class GmailSender:
-    """Sends as whoever authorized the Gmail connector."""
+class GmailClient:
+    """The connector's login and the plumbing every Gmail capability shares."""
 
     def __init__(self, keys_file: Path, token_file: Path) -> None:
         self._keys_file = keys_file
@@ -71,23 +73,6 @@ class GmailSender:
                 raise GmailUnavailable("the Gmail profile has no address")
             self._own_address = address
         return self._own_address
-
-    def send(self, to: str, subject: str, body: str, sender: str = "") -> str:
-        """Send one plain-text message; returns Gmail's message id.
-
-        ``sender`` sets the From header — a "send mail as" alias the account
-        has verified (an unverified one is silently rewritten by Gmail to
-        the account's own address, so a typo degrades, never fails).
-        Empty leaves Gmail to stamp the primary address."""
-        message = EmailMessage()
-        message["To"] = to or self.own_address()
-        if sender:
-            message["From"] = sender
-        message["Subject"] = subject
-        message.set_content(body)
-        raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
-        sent = self._request("POST", f"{_API}/messages/send", {"raw": raw})
-        return str(sent.get("id", ""))
 
     # ── plumbing ─────────────────────────────────────────────────────────────
 
@@ -138,16 +123,74 @@ class GmailSender:
             request = urllib.request.Request(
                 keys.get("token_uri", "https://oauth2.googleapis.com/token"),
                 data=body,
+                method="POST",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
             try:
                 with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_S) as response:
-                    granted = json.loads(response.read().decode("utf-8"))
+                    minted = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")[:200]
+                raise GmailUnavailable(
+                    f"Google refused the refresh token ({exc.code}: {detail}) — "
+                    "re-authorize the Gmail connector"
+                ) from exc
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-                raise GmailUnavailable(f"Gmail token refresh failed ({exc})") from exc
-            self._access_token = granted["access_token"]
-            self._token_expiry = time.time() + float(granted.get("expires_in", 3600))
-            return self._access_token
+                raise GmailUnavailable(f"could not reach Google ({exc})") from exc
+            token = minted.get("access_token")
+            if not isinstance(token, str) or not token:
+                raise GmailUnavailable("Google returned no access token")
+            self._access_token = token
+            self._token_expiry = time.time() + float(minted.get("expires_in", 3600))
+            return token
 
+
+class GmailSender(GmailClient):
+    """Sends as whoever authorized the Gmail connector."""
+
+    def send(self, to: str, subject: str, body: str, sender: str = "") -> str:
+        """Send one plain-text message; returns Gmail's message id.
+
+        ``sender`` sets the From header — a "send mail as" alias the account
+        has verified (an unverified one is silently rewritten by Gmail to
+        the account's own address, so a typo degrades, never fails).
+        Empty leaves Gmail to stamp the primary address."""
+        message = EmailMessage()
+        message["To"] = to or self.own_address()
+        if sender:
+            message["From"] = sender
+        message["Subject"] = subject
+        message.set_content(body)
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+        sent = self._request("POST", f"{_API}/messages/send", {"raw": raw})
+        return str(sent.get("id", ""))
+
+
+class GmailReader(GmailClient):
+    """Lists and fetches messages for the inbox feature, read-only.
+
+    Raw RFC 822 bytes, so the feature parses mail with the standard library
+    and nothing here interprets a body. Bounded by the caller: one query, one
+    page, no label changes, nothing marked read.
+    """
+
+    def list_messages(self, query: str, limit: int) -> list[str]:
+        """Message ids matching a Gmail search query, newest first, at most ``limit``."""
+        if type(limit) is not int or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        params = urllib.parse.urlencode({"q": query, "maxResults": str(min(limit, 500))})
+        listing = self._request("GET", f"{_API}/messages?{params}")
+        return [str(item["id"]) for item in (listing.get("messages") or []) if isinstance(item, dict) and item.get("id")]
+
+    def fetch_raw(self, message_id: str) -> tuple[bytes, dict]:
+        """One message's raw bytes and Gmail's metadata (thread, labels, internalDate)."""
+        encoded = urllib.parse.quote(message_id, safe="")
+        payload = self._request("GET", f"{_API}/messages/{encoded}?format=raw")
+        raw = payload.get("raw")
+        if not isinstance(raw, str) or not raw:
+            raise GmailUnavailable("Gmail returned a message without its raw body")
+        data = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+        meta = {key: payload.get(key) for key in ("threadId", "labelIds", "internalDate", "historyId")}
+        return data, meta
 
 __all__ = ["GmailSender", "GmailUnavailable"]

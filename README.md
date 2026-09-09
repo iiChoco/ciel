@@ -1149,22 +1149,65 @@ refused recipient is a failed send.
 The section watcher's alarm borrows this relay and address when it has
 none of its own, so one token serves both.
 
-## Events from email (planned)
+## Events from email
 
 The [email-to-calendar feature plan](design/2026-09-08-email-calendar-plan.md)
 is the first application of
-[independent action](design/2026-09-08-independent-action-plan.md).
-It supplies inbox reading, event interpretation, duplicate checks, and calendar
-operations to the shared task runtime. Confirmed appointments and bookings can
-be added under a create-only standing permission; unclear invitations,
-reschedules, and cancellations ask the owner. Preview comes first. This remains
-a plan: inbox access and calendar authority are not enabled by these words.
+[independent action](design/2026-09-08-independent-action-plan.md): the inbox
+read as a source of dated commitments, previewed first and, later, added to a
+calendar under a scope the owner approves in Chart. Its first milestone, the
+preview, landed on 2026-09-09 in `email_calendar.py`; no calendar is touched,
+no standing grant is offered yet, and the calendar writer is the next milestone.
 
-The proposed Chart setup selects accounts and calendar scope on the execution
-host, then presents one broker-backed approval. Automatic mode uses an explicit
-sender list with a disclosed authenticity limitation; preview and per-event
-approval remain available. A locally remembered deletion prevents re-import
-even after the provider stops returning the deleted event.
+**A preview is an ordinary finite task, and it writes nothing.** With
+`[email_calendar].enabled = true` beside a running task runner, a private
+owner turn can ask, through `preview_inbox`, for the inbox since a date. The
+task lists a bounded window of mail through the Gmail connector's login on
+the execution host (a login on the Mac authorizes nothing on the hub),
+records each message once, and takes them one at a time: bulk mail, marked by
+a list-unsubscribe header or a bulk precedence, is a promotion without a
+model call; anything else goes to the isolated extraction call with a fixed
+prompt that says the message is untrusted data, and spends one of the task's
+own model calls. The result arrives as a notice, and `inspect_task` or Chart
+shows the roster in the messages' own words, quoted.
+
+**The model is held to the message.** Every excerpt it cites must be in the
+message word for word; every time must parse as a wall time in the zone the
+message names, or the owner's `timezone`, or it stays unresolved; a wall time
+daylight-saving time skipped or repeated, an end before its start, and a
+missing end are unresolved and named. Then policy, never confidence, decides:
+a confirmed commitment with nothing unresolved from an address on
+`allowed_senders` is *ready*; an invitation, an unresolved field, a citation
+that is not in the text, or a sender not on the list is *review*; a
+promotion is *ignored*. Two events in one message are two candidates. A
+sender match filters scope and certifies nothing: a display name, a matching
+address, or a header the message carries about itself is not proof it is
+genuine, and the ready reason says so.
+
+**What runs out is said.** A window larger than the task's model calls
+leaves the rest recorded as unread with the reason; a runtime with no
+extraction backend records the same; a mailbox that is not connected is a
+resource wait that names the fix. A second preview of the same window
+records no message twice. Everything the feature keeps lives in its own
+namespace in the task store, owner-only, revisioned, and bounded, and a
+public lane can neither ask for a preview nor read one.
+
+```toml
+[email_calendar]
+enabled = false              # register the inbox adapter with the task runner
+mailbox = ""                 # the identity expected; empty accepts the connector's account
+timezone = ""                # the owner's IANA zone for messages that name none; empty keeps them unresolved
+allowed_senders = []         # exact addresses whose confirmed commitments are ready without review
+max_messages_per_preview = 25
+max_body_chars = 32000       # of one message's text, to the extraction call
+max_extractions_per_day = 100
+```
+
+The reader borrows `[sections].gmail_oauth_keys` and `gmail_token_file`,
+read-only, exactly as the section alarm's sender does. Nothing here grants
+anything: the standing grant, duplicate checks against the chosen calendars,
+the guarded create with read-back and reconciliation, and proposals for
+reschedules and cancellations are the plan's later milestones.
 
 ## A spot in a section (the signup site)
 
@@ -2162,6 +2205,7 @@ uv run --no-sync python scripts/probe_extraction.py  # the isolated call: bounds
 uv run --no-sync python scripts/probe_task_authority.py # drafts, grants, mandates, derived work, the form's draft and the broker's yes, the v3 and v4 lifts
 uv run --no-sync python scripts/probe_task_dispatch.py  # a mutation sent once: intent, authority, reconciliation, the owner's word, process kills; a fake remote
 uv run --no-sync python scripts/probe_task_notices.py # what is owed, the notifier and Vigil, receipts, the notice switch, the v6→v7 lift
+uv run --no-sync python scripts/probe_email_calendar.py # the inbox as data: normalization, the model held to the message, a preview through the runner, the owner's door
 uv run --no-sync python scripts/probe_task_tools.py  # real SDK dispatcher, turn authority, cancellation, drain debt
 uv run --no-sync python scripts/probe_task_wire.py   # two private Chart sockets, controls, conflicts, reconnect, a draft and its private approval
 uv run --no-sync python scripts/probe_task_wire.py --live  # synthetic task states in Chart; temporary storage
@@ -2250,6 +2294,7 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `music.py` | Spotify on the Mac, through one narrow AppleScript door |
 | `spotify.py` | Spotify Web API — browser login, search and Connect playback from the brain's host |
 | `projects.py` | Atlas — durable working state per project |
+| `email_calendar.py` | Events from email: the inbox as a source, a message as bounded data, candidates held to the message, and the preview adapter |
 | `tasks.py` | Private task records, atomic owner controls, questions, evidence, recovery, eligibility, abandonment, namespaced feature records, grant drafts, standing grants, mandates, derived work, dispatch intents, and approvals; the store dispatches nothing |
 | `task_context.py` | Turn authority captured by in-process tools and fenced through commit |
 | `task_controls.py` | Shared private owner controller, offline PR-watch validation, namespace registration, the grant form's drafts and approval, mandate and grant controls, the runtime-only derive path, and control journaling |

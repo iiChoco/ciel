@@ -40,8 +40,8 @@ from typing import Any
 from ciel.config import TasksConfig
 from ciel.journal import ActionJournal
 from ciel.task_context import TaskBinding
-from ciel.tasks import (Criterion, GrantDraft, GrantSetup, Mandate, Namespace, Scope, Specification, StandingGrant, Step, Task,
-                        TaskConflict, TaskStore, TaskStoreError)
+from ciel.tasks import (Criterion, FeatureRecord, GrantDraft, GrantSetup, Mandate, Namespace, Scope, Specification, StandingGrant, Step,
+                        Task, TaskConflict, TaskStore, TaskStoreError)
 
 Asker = Callable[[str, Callable[[str], Awaitable[None]]], Awaitable[bool]]
 """The broker's question through one channel: (question, send) -> yes."""
@@ -59,6 +59,11 @@ class TaskController:
         self.setups = setups
         """What the adapters offer the owner to approve; the Chart form's fields."""
         self._asker: Asker | None = None
+        self._requests: dict[str, Callable[[dict[str, Any]], tuple[Specification, Step]]] = {}
+        """Finite tasks a feature lets an owner turn ask for, by operation name."""
+        self._summaries: dict[str, tuple[frozenset[str], Callable[[Task, tuple[FeatureRecord, ...]], str]]] = {}
+        """How a feature describes a task's records to the owner: by namespace,
+        the operations that mark a task as its own and the words."""
         self.execution = False
         """Whether a runner exists here: a resumed or answered task is then queued, not parked."""
         self.store: TaskStore | None = None
@@ -108,6 +113,19 @@ class TaskController:
         """The pipeline lends its broker; without one, approval says so."""
         self._asker = asker
 
+    def bind_feature(self, namespace: Namespace, operations: frozenset[str], *,
+                     requests: dict[str, Callable[[dict[str, Any]], tuple[Specification, Step]]] | None = None,
+                     summary: Callable[[Task, tuple[FeatureRecord, ...]], str] | None = None) -> None:
+        """A registered feature's own doors: the finite tasks an owner turn may
+        ask for (each builds a specification from the owner's arguments, in
+        application code) and the words it gives a task's records."""
+        if namespace not in self.namespaces:
+            raise TaskConflict('only a registered adapter binds a feature')
+        for operation, build in (requests or {}).items():
+            self._requests[operation] = build
+        if summary is not None:
+            self._summaries[namespace.name] = (frozenset(operations), summary)
+
     async def view(self, binding: TaskBinding | None, task_id: str | None = None) -> dict[str, Any]:
         store = self._store(binding)
         assert binding is not None
@@ -122,6 +140,13 @@ class TaskController:
             view['setups'] = [asdict(setup) for setup in self.setups]
         else:
             view['received'] = received
+            task = await store.get(binding.origin.owner, task_id)
+            for namespace, (operations, summarize) in self._summaries.items():
+                if task.next_step.operation in operations and store.namespace_supported(namespace):
+                    try:
+                        view['feature'] = summarize(task, await store.records(binding.origin.owner, namespace))
+                    except Exception:  # noqa: BLE001 - a feature's words are optional; the record is not
+                        log.warning('a feature could not describe its task', exc_info=True)
         return view
 
     def _setup(self, namespace: Any) -> GrantSetup:
@@ -230,6 +255,13 @@ class TaskController:
                                  tuple(Criterion(c, target, 'success') for c in checks))
             task = await store.create(binding.origin, spec, Step('read', 'github.pr_checks', target),
                                       resource_wait=True, fence=binding.fence, record=lambda t: self._record(operation, t))
+        elif operation in self._requests:
+            try:
+                spec, step = self._requests[operation](args)
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+            task = await store.create(binding.origin, spec, step, fence=binding.fence, record=lambda t: self._record(operation, t))
+            return {'task': asdict(task)}
         elif operation == 'grant_draft_save':
             draft = await self._draft_save(binding, store, args, revision)
             return {'draft': asdict(draft)}

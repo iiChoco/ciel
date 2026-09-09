@@ -2142,6 +2142,48 @@ class WorldConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class EmailCalendarConfig:
+    """Events from email (``email_calendar.py``): the inbox read as a
+    source of dated commitments, previewed first and, under a grant the
+    owner approves in Chart, added to a calendar of their choosing.
+
+    Nothing here grants anything. ``enabled`` registers the adapter with the
+    task runner so a private owner turn can ask for a preview; the standing
+    grant, when there is one, lives in the task store and is approved through
+    the broker. The reader borrows the Gmail connector's login exactly as the
+    section alarm does, read-only, from ``[sections].gmail_oauth_keys`` and
+    ``gmail_token_file`` on the execution host: a connector login on the Mac
+    does not authorize the hub.
+    """
+
+    enabled: bool = False
+    """Register the inbox adapter. Off, no mail is read and no preview exists."""
+
+    mailbox: str = ""
+    """The mailbox identity the owner expects, checked against the Gmail
+    profile at setup; empty accepts whichever account the connector holds
+    and names it in the preview."""
+
+    timezone: str = ""
+    """The owner's IANA zone, for a commitment whose message names none.
+    Empty means such a commitment stays unresolved rather than assumed."""
+
+    allowed_senders: tuple[str, ...] = ()
+    """Exact addresses whose confirmed commitments are ready without review.
+    Empty by default: preview shows everything, automatic mode adds nothing.
+    A match filters scope; it is not proof the message is genuine."""
+
+    max_messages_per_preview: int = 25
+    """Messages one preview may list; the owner asks again for more."""
+
+    max_body_chars: int = 32000
+    """The most of one message's text that reaches the extraction call."""
+
+    max_extractions_per_day: int = 100
+    """Isolated model calls the feature may spend in a day, across tasks."""
+
+
+@dataclass(frozen=True, slots=True)
 class TasksConfig:
     """Private owner task controls, durable records, and the bounded runner."""
 
@@ -2254,6 +2296,7 @@ class Config:
     reflection: ReflectionConfig = field(default_factory=ReflectionConfig)
     projects: ProjectsConfig = field(default_factory=ProjectsConfig)
     tasks: TasksConfig = field(default_factory=TasksConfig)
+    email_calendar: EmailCalendarConfig = field(default_factory=EmailCalendarConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
     shell: ShellConfig = field(default_factory=ShellConfig)
     journal: JournalConfig = field(default_factory=JournalConfig)
@@ -2309,6 +2352,7 @@ _SECTIONS = {
     "reflection": ReflectionConfig,
     "projects": ProjectsConfig,
     "tasks": TasksConfig,
+    "email_calendar": EmailCalendarConfig,
     "files": FilesConfig,
     "shell": ShellConfig,
     "journal": JournalConfig,

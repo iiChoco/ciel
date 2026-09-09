@@ -2,6 +2,44 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — The inbox is read as data, and a preview writes nothing
+
+**Why.** The foundation's four gates hold against a synthetic adapter and
+nothing real uses them. The email-to-calendar plan's first milestone is the
+preview: before anything is granted, the owner sees what the inbox holds
+and how it would be read.
+
+**What.**
+
+- *The inbox is a source.* `gmail.py` gains a read-only reader beside the
+  sender, over the same connector login and plumbing, listing and fetching
+  raw messages and changing nothing. `email_calendar.py` parses a message
+  with the standard library into bounded text and the few headers policy
+  needs, HTML reduced to its text with nothing active kept.
+- *The model is held to the message.* The isolated extraction call gets a
+  fixed prompt that names the message untrusted data and a schema for
+  candidates; every excerpt it cites must be in the message word for word,
+  every time must be a real wall time in a named zone or the owner's, and
+  what the message does not settle stays unresolved. Policy decides ready,
+  review, or ignored; a sender match filters scope and the ready reason
+  says it is not proof.
+- *A preview is a finite task from an owner turn.* `preview_inbox` asks
+  through the controller's new feature door; the adapter lists the window
+  once, decides bulk mail without a model call, spends the task's own
+  calls on the rest, records candidates and a roster in its namespace, and
+  completes with evidence. Out of calls, no backend, or no mailbox are
+  said, not guessed at. The task's detail carries the feature's own words.
+- *Config, not authority.* `[email_calendar]` registers the adapter and
+  holds the owner's zone, sender list, and bounds; no grant is offered yet.
+
+**Probes.** `probe_email_calendar.py 34 (new): normalization, every
+interpretation rule, the preview request's bounds, a preview through the
+runner with replay, exhausted calls, no backend, an absent mailbox, and a
+restart, and the owner's door with a public lane refused and the summary
+quoted. Rerun unchanged: probe_sections.py 78, probe_task_runner.py 25,
+probe_task_tools.py 24, probe_task_wire.py 28, probe_hub_imports.py 6; hub
+import clean; the spoke reloaded to ready.`
+
 ## 2026-09-09 — The result reaches the owner
 
 **Why.** A task could finish, fail, or ask, and write its notice; nothing
