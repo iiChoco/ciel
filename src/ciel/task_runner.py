@@ -56,7 +56,8 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, P
 
 from ciel.brain.extract import ExtractionBackend, ExtractionError, ExtractionLimits, Lease, extract_json
 from ciel.config import TasksConfig
-from ciel.tasks import (Attempt, DerivedOrigin, Evidence, FeatureRecord, GrantSetup, Intent, Namespace, NoAuthority, RecordSet, Step,
+from ciel.proactive.events import EventQueue, ProactiveEvent
+from ciel.tasks import (Attempt, Notice, DerivedOrigin, Evidence, FeatureRecord, GrantSetup, Intent, Namespace, NoAuthority, RecordSet, Step,
                         Task, TaskConflict, TaskLimit, TaskStore, TaskStoreError, WaitReason)
 
 if TYPE_CHECKING:
@@ -525,5 +526,109 @@ class TaskRunner:
         return extract
 
 
-__all__ = ['MutationResult', 'Outcome', 'Plan', 'PreconditionFailed', 'Preparation', 'Reconciliation', 'StepContext', 'StepReport',
+class TaskNotifier:
+    """What the store owes the owner, handed to Vigil one event at a time.
+
+    The store decides what is owed; Vigil decides when and where it is
+    said, with its presence, quiet hours, and budgets; this class only
+    carries the one to the other and writes down what came back. An event
+    is pushed once per owed notice per delivery attempt, so a failed
+    delivery is offered again after its retry time and a delivered one is
+    never offered twice. The notice switch is read from the store on every
+    poll: muted means nothing is pushed, and nothing else changes.
+    """
+
+    def __init__(self, config: TasksConfig, store: Callable[[], TaskStore | None], events: Callable[[], EventQueue | None], *,
+                 clock: Callable[[], float] = time.time) -> None:
+        self._config = config
+        self._store = store
+        self._events = events
+        """Vigil's queue, looked up on every poll: it is built after the
+        controller and absent when Vigil is off."""
+        self._clock = clock
+        self._poll: asyncio.Task[None] | None = None
+        self._next_poll = 0.0
+        self.pushed: list[str] = []
+        """Notice ids handed to Vigil, newest last, for the owner view and probes."""
+
+    def poll(self, now: float) -> None:
+        """At most every few seconds, off the loop's critical path."""
+        if self._events() is None or self._store() is None:
+            return
+        if self._poll is not None and not self._poll.done():
+            return
+        if now < self._next_poll:
+            return
+        self._next_poll = now + _NOTIFY_POLL_S
+        self._poll = asyncio.create_task(self.poll_now(now))
+
+    async def poll_now(self, now: float | None = None) -> int:
+        """Offer every owed notice to Vigil; returns how many were new to it."""
+        store, events = self._store(), self._events()
+        if store is None or events is None:
+            return 0
+        stamp = self._clock() if now is None else now
+        try:
+            if not await store.notify_enabled(self._config.owner):
+                return 0
+            owed = await store.undelivered(self._config.owner, now=stamp)
+        except (TaskStoreError, TaskConflict, ValueError):
+            log.debug('owed notices could not be read', exc_info=True)
+            return 0
+        pushed = 0
+        for notice, attempts in owed:
+            event = ProactiveEvent(
+                id=events.next_id(), source='task', importance=3 if notice.status == 'failed' else 2,
+                created_at=stamp, expires_at=None, summary=_notice_summary(notice),
+                dedupe_key=f'task:{notice.id}:{attempts + 1}',
+                payload={'notice_id': notice.id, 'task_id': notice.task_id},
+            )
+            if events.push(event):
+                self.pushed.append(notice.id)
+                del self.pushed[:-32]
+                pushed += 1
+        return pushed
+
+    async def delivered(self, event: ProactiveEvent, destination: str) -> None:
+        """Vigil says the lane took it; the attempt is on the record."""
+        await self._record(event, destination, 'sent', '')
+
+    async def failed(self, event: ProactiveEvent, destination: str, detail: str) -> None:
+        await self._record(event, destination, 'failed', detail)
+
+    async def _record(self, event: ProactiveEvent, destination: str, outcome: Literal['sent', 'failed'], detail: str) -> None:
+        store = self._store()
+        notice_id = event.payload.get('notice_id')
+        if store is None or event.source != 'task' or not notice_id:
+            return
+        try:
+            await store.record_delivery(self._config.owner, notice_id, destination, outcome, detail or outcome,
+                                        now=self._clock(), retry_after_s=self._config.notice_retry_s)
+        except (TaskStoreError, TaskConflict, ValueError):
+            log.warning('a task notice delivery could not be recorded', exc_info=True)
+
+    async def close(self) -> None:
+        if self._poll is not None and not self._poll.done():
+            self._poll.cancel()
+            try:
+                await self._poll
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001 - closing
+                pass
+
+
+_NOTIFY_POLL_S = 5.0
+"""Between looks at what is owed; a notice noticed within five seconds reads as prompt."""
+
+
+def _notice_summary(notice: Notice) -> str:
+    """One spoken-English line: the outcome the owner asked for, and where it stands."""
+    outcome = notice.outcome.rstrip('.')
+    if notice.status == 'done':
+        return f'Done: {outcome}.'
+    if notice.status == 'failed':
+        return f'I could not finish this: {outcome}. {notice.detail.rstrip(".")}.'
+    return f'A task needs you: {outcome}. {notice.detail.rstrip(".")}.'
+
+
+__all__ = ['TaskNotifier', 'MutationResult', 'Outcome', 'Plan', 'PreconditionFailed', 'Preparation', 'Reconciliation', 'StepContext', 'StepReport',
            'TaskAdapter', 'TaskRunner', 'WritingAdapter']

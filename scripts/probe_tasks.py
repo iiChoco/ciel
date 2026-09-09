@@ -317,7 +317,7 @@ async def probe_lifecycle(root: Path) -> None:
 def strip_dispatch(db: sqlite3.Connection) -> None:
     """What a store from before schema six looks like: no intents, no approvals, and questions without a kind."""
     db.executescript('''
-        DROP TABLE approvals; DROP TABLE intents;
+        DROP TABLE deliveries; DROP TABLE settings; DROP TABLE approvals; DROP TABLE intents;
         CREATE TABLE questions_old (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL,
             prompt TEXT NOT NULL, choices_json TEXT NOT NULL, step_json TEXT, answer TEXT, answered_revision INTEGER);
         INSERT INTO questions_old SELECT id,task_id,revision,prompt,choices_json,step_json,answer,answered_revision FROM questions;
@@ -752,14 +752,14 @@ async def probe_migration(root: Path) -> None:
         version = db.execute('PRAGMA user_version').fetchone()[0]
         db.close()
         check('a version-two store opens as the current version with every task in place and the new allowance at its configured value',
-              version == 6 and lifted.status == 'queued' and lifted.next_step == READ and lifted.polls == 1
+              version == 7 and lifted.status == 'queued' and lifted.next_step == READ and lifted.polls == 1
               and lifted.model_calls == 0 and lifted.max_model_calls == 5)
         check('the lifted origin says it was human and a repeated request finds its task',
               lifted.origin.kind == 'human' and (await create(store)).id == task.id)
         view = await store.owner_view(OWNER)
         check('a lifted store lists no mandates and no grants yet', view['mandates'] == [] and view['grants'] == [])
     db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
-    db.execute('PRAGMA user_version=7')
+    db.execute('PRAGMA user_version=8')
     db.close()
     try:
         async with TaskStore(cfg):

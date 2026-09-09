@@ -2,6 +2,52 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — The result reaches the owner
+
+**Why.** A task could finish, fail, or ask, and write its notice; nothing
+carried the notice anywhere, and nothing knew whether the owner had seen
+it. This is the independent-action plan's fourth milestone, and with it the
+foundation's four gates have been built: a bounded, approved task can
+proceed, wait, recover, verify, and report independently, against a
+synthetic adapter. No real adapter exists yet.
+
+**What.**
+
+- *What is owed is a fact in the store.* Schema seven adds deliveries and a
+  settings table. A completion, a failure, or the question a task waits on
+  now is owed until the owner looks at the task on a private lane; the look,
+  through Chart or `inspect_task`, is the receipt, recorded per notice.
+  Every delivery attempt is recorded after the fact with the lane that
+  carried it; a sent notice is not offered again, a failed one is offered
+  again after `notice_retry_s`.
+- *Vigil says it.* `TaskNotifier` hands each owed notice to Vigil's queue
+  once per attempt as an ordinary event, importance timely or urgent for a
+  failure, in one spoken line with only identifiers in its payload. The
+  pipeline records a spoken nudge, a text, or a held note read into the next
+  conversation as sent. Presence, quiet hours, and budgets stay Vigil's.
+- *The notice switch is not a pause.* `notices_mute` and `notices_unmute`
+  are owner controls with the same admission as every other, persisted in
+  the store, journaled as the notice switch, reachable from Chart and as
+  `mute_task_notices` by voice. Muted, nothing is offered and every task
+  keeps running.
+- *The view says where things stand.* The list carries the switch and how
+  many notices are owed; a task's detail carries its current authority, its
+  unresolved effects, and its notices with their deliveries.
+
+**Probes.** `probe_task_notices.py 23 (new): what is owed after a reopen
+and what is not, the failed and sent attempts, the receipt once, the switch
+persisted and refused to a public lane, the notifier's one offer per attempt
+and the retry, the receipt through the controller, the runner stepping under
+mute, unmute offering what was owed, and the version-six lift.
+probe_wire.py +1: the switch needs no record and no revision. Rerun
+unchanged: probe_tasks.py 202, probe_task_authority.py 93,
+probe_task_dispatch.py 37, probe_task_runner.py 25, probe_task_wire.py 28,
+probe_task_tools.py 24, probe_hub_arbiter.py 61, probe_vigil.py 173,
+probe_turns.py 78, probe_hub_imports.py 6, probe_ladder.py 25; hub import
+clean; the spoke reloaded to ready. Visual: the live Chart fixture showed
+the switch and the owed count in the list and a notice's state in a task's
+detail.`
+
 ## 2026-09-09 — An interrupted action can be understood
 
 **Why.** The runner could read and the store could hold a grant, but no

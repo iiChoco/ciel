@@ -1362,7 +1362,8 @@ Its first milestone, the runner, the ladder's task step, namespaced feature
 records, and the isolated extraction call, landed on 2026-09-08 and is
 described under durable tasks below. The second milestone's records, two
 kinds of origin, grant drafts, standing grants, mandates, and derived tasks,
-landed on 2026-09-09, and the Chart grant form with the broker's approval
+landed on 2026-09-09, and the Chart grant form with the broker's approval,
+dispatch with reconciliation, and delivery with receipts
 followed the same day, and the third milestone, dispatch intent, guarded
 mutation dispatch, and reconciliation, landed on 2026-09-09 as well; nothing
 derives work under a grant until an adapter offers one, and no adapter can
@@ -1500,6 +1501,25 @@ what was approved through `pause_mandate`, `resume_mandate`, and
 `revoke_grant`; it never fills the form or answers for the page. No feature
 offers a grant yet; the probes supply a synthetic one.
 
+**A result is owed until the owner has seen it.** Completion, failure, and
+the question a task is waiting on write their notice in the same
+transaction as the state, so a crash before anyone is told loses nothing;
+the store keeps the notice owed until the owner looks at the task on a
+private lane, which is the receipt, and records every delivery attempt
+beside it with the lane that carried it. The notifier hands each owed
+notice to Vigil once per attempt as an ordinary event, in one spoken line
+with only identifiers in its payload; Vigil's presence, quiet hours, and
+budgets decide when and where it is said, and a spoken nudge, a text, or a
+held note read into the next conversation is recorded as sent. A notice
+that was sent is not offered again; one Vigil holds is not a failure, it is
+still owed and rides the next conversation. A delivery that failed outright
+is offered again after `notice_retry_s`. The notice switch is its own
+control, persisted in the store and reachable from Chart and by voice as
+`mute_task_notices`; muted means nothing is offered, every task keeps
+running, and the view says so without any task reading as paused. A public
+lane can neither look nor switch. Lanes without idempotent delivery may
+repeat a notice after a send whose receipt was lost; that limit stands.
+
 **Derived work inherits, it never invents.** A task's origin now says which
 kind it is. A `HumanOrigin` is a live private owner turn, as before, and is
 still the only kind `create` accepts. A `DerivedOrigin` names its mandate,
@@ -1612,6 +1632,7 @@ max_grant_lifetime_s = 2592000.0  # the longest a grant may run from approval to
 dispatch_deadline_s = 60.0  # a committed intent unsent past this is abandoned, not sent late
 mutation_timeout_s = 60.0   # the longest one send may take before its outcome is unknown
 max_reconcile_reads = 3     # reads that cannot tell before the owner is asked
+notice_retry_s = 900.0      # after a delivery that reached no lane, offer the notice again
 extraction_model = ""       # empty: the brain's model
 extraction_timeout_s = 90.0
 extraction_max_chars = 32000
@@ -1645,7 +1666,7 @@ its wait/failure policy explicitly. The size limit bounds each serialized
 request, next step, observation batch, and private view. Enabling controls does
 not start scheduling; `runner` does.
 
-This is schema version six. Version-two through -five stores are lifted at
+This is schema version seven. Version-two through -six stores are lifted at
 open with every task in place, an open version-four draft discarded rather
 than guessed at; version-one stores and newer stores are refused without
 migration or reset. Choose a fresh dedicated directory for these
@@ -1973,6 +1994,7 @@ uv run --no-sync python scripts/probe_task_runner.py # a synthetic adapter: one 
 uv run --no-sync python scripts/probe_extraction.py  # the isolated call: bounds, lease, timeout, cancellation, schema check, the client with nothing attached
 uv run --no-sync python scripts/probe_task_authority.py # drafts, grants, mandates, derived work, the form's draft and the broker's yes, the v3 and v4 lifts
 uv run --no-sync python scripts/probe_task_dispatch.py  # a mutation sent once: intent, authority, reconciliation, the owner's word, process kills; a fake remote
+uv run --no-sync python scripts/probe_task_notices.py # what is owed, the notifier and Vigil, receipts, the notice switch, the v6→v7 lift
 uv run --no-sync python scripts/probe_task_tools.py  # real SDK dispatcher, turn authority, cancellation, drain debt
 uv run --no-sync python scripts/probe_task_wire.py   # two private Chart sockets, controls, conflicts, reconnect, a draft and its private approval
 uv run --no-sync python scripts/probe_task_wire.py --live  # synthetic task states in Chart; temporary storage
@@ -2061,7 +2083,7 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `tasks.py` | Private task records, atomic owner controls, questions, evidence, recovery, eligibility, abandonment, namespaced feature records, grant drafts, standing grants, mandates, derived work, dispatch intents, and approvals; the store dispatches nothing |
 | `task_context.py` | Turn authority captured by in-process tools and fenced through commit |
 | `task_controls.py` | Shared private owner controller, offline PR-watch validation, namespace registration, the grant form's drafts and approval, mandate and grant controls, the runtime-only derive path, and control journaling |
-| `task_runner.py` | The bounded runner: one step for the oldest eligible task, the adapter contracts for reads and for mutations, guarded dispatch, reconciliation, abandonment, and the human-input interrupt |
+| `task_runner.py` | The bounded runner: one step for the oldest eligible task, the adapter contracts for reads and for mutations, guarded dispatch, reconciliation, abandonment, and the human-input interrupt, and the notifier that hands owed notices to Vigil and records what came back |
 | `brain/extract.py` | One isolated model call per extraction: a client with nothing attached, the turn lease, and the schema checked twice |
 | `transcript.py` | Trace — the record of the path actually taken |
 | `reload.py` | Analytic Continuation — watch the source, re-exec, resume |

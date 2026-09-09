@@ -111,9 +111,17 @@ class TaskController:
     async def view(self, binding: TaskBinding | None, task_id: str | None = None) -> dict[str, Any]:
         store = self._store(binding)
         assert binding is not None
+        received = 0
+        if task_id is not None:
+            # The look is the receipt: an attended private owner reading the
+            # task's own record has received every notice it owed. Written
+            # first, so the view they get already says so.
+            received = await store.acknowledge(binding.origin.owner, task_id, binding.origin.lane, fence=binding.fence)
         view = await store.owner_view(binding.origin.owner, task_id, fence=binding.fence)
         if task_id is None:
             view['setups'] = [asdict(setup) for setup in self.setups]
+        else:
+            view['received'] = received
         return view
 
     def _setup(self, namespace: Any) -> GrantSetup:
@@ -238,6 +246,15 @@ class TaskController:
             mandate = await store.mandate_control(binding.origin.owner, mandate_id, operation.removeprefix('mandate_'), revision=revision,
                                                   fence=binding.fence, record=lambda m: self._record(operation, m))
             return {'mandate': asdict(mandate)}
+        elif operation in ('notices_mute', 'notices_unmute'):
+            enabled = await store.set_notify(binding.origin.owner, operation == 'notices_unmute', fence=binding.fence)
+            if self.journal is not None:
+                try:
+                    self.journal.record(tool=f'task_{operation}', args={}, response='on' if enabled else 'off',
+                                        note='The notice switch; execution is unaffected.')
+                except Exception:
+                    log.warning('could not journal the notice switch', exc_info=True)
+            return {'notify': enabled}
         elif operation == 'grant_revoke':
             grant_id = args.get('grant_id')
             if not isinstance(grant_id, str) or not grant_id:

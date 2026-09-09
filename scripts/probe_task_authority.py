@@ -96,7 +96,7 @@ LOOK = Step('read', 'calendar.create', 'calendar:primary')
 def strip_dispatch(db: sqlite3.Connection) -> None:
     """What a store from before schema six looks like: no intents, no approvals, and questions without a kind."""
     db.executescript('''
-        DROP TABLE approvals; DROP TABLE intents;
+        DROP TABLE deliveries; DROP TABLE settings; DROP TABLE approvals; DROP TABLE intents;
         CREATE TABLE questions_old (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL,
             prompt TEXT NOT NULL, choices_json TEXT NOT NULL, step_json TEXT, answer TEXT, answered_revision INTEGER);
         INSERT INTO questions_old SELECT id,task_id,revision,prompt,choices_json,step_json,answer,answered_revision FROM questions;
@@ -434,7 +434,7 @@ async def probe_migration(root: Path) -> None:
         version = db.execute('PRAGMA user_version').fetchone()[0]
         db.close()
         check('a version-three store opens as the current version with every task in place and its origin saying it was human',
-              version == 6 and lifted.status == 'queued' and lifted.origin == task.origin and lifted.origin.kind == 'human')
+              version == 7 and lifted.status == 'queued' and lifted.origin == task.origin and lifted.origin.kind == 'human')
         same = await store.create(Origin(OWNER, 'request-1', 'voice', ingress_ids=('voice:1',)), child_spec(), LOOK, now=7001)
         check('a repeated request still finds its migrated task', same.id == task.id)
         grant, mandate = await activate(store, now=7002)
@@ -453,7 +453,7 @@ async def probe_migration(root: Path) -> None:
         db.close()
         drafts = {d.id: d for d in await store.grant_drafts(OWNER)}
         check('a version-four store opens as the current version: the open draft is discarded, the activated one keeps its history, the grant stands',
-              version == 6 and drafts[open_draft.id].status == 'discarded' and drafts[open_draft.id].revision == open_draft.revision + 1
+              version == 7 and drafts[open_draft.id].status == 'discarded' and drafts[open_draft.id].revision == open_draft.revision + 1
               and any(d.status == 'activated' for d in drafts.values()) and (await store.mandates(OWNER))[0].status == 'active')
         check('a lifted store takes a new draft with every field', (await draft(store, 7004)).status == 'draft')
 

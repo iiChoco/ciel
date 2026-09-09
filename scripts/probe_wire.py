@@ -112,6 +112,9 @@ def probe_codec() -> None:
           refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'mandate_pause', 'revision': 1}), 'c2h')
           and refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'grant_revoke', 'grant_id': 'g'}), 'c2h')
           and not refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'grant_revoke', 'grant_id': 'g', 'revision': 2}), 'c2h'))
+    check('the notice switch needs no record and no revision',
+          not refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'notices_mute'}), 'c2h')
+          and not refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'notices_unmute'}), 'c2h'))
     check('Chart says retain a minted identity independently of their ack sequence', wire.decode(json.dumps({'type': 'say', 'text': 'watch', 'seq': 1, 'request_id': 'minted'}), 'c2h')['request_id'] == 'minted')
     print("\nthe codec")
     check(

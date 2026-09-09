@@ -2145,6 +2145,10 @@ class TasksConfig:
     """Reconciliation reads that may come back unable to tell before the
     owner is asked what happened."""
 
+    notice_retry_s: float = 900.0
+    """How long after a delivery that failed to reach any private lane a
+    notice is offered to Vigil again."""
+
     extraction_model: str = ""
     """The model the isolated extraction call uses; empty means the brain's."""
 

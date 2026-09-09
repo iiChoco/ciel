@@ -89,7 +89,7 @@ from ciel.transcript import Transcript
 from ciel.turn import TurnRequest, TurnSink, lane_spec, prompt_note, owner_origin
 from ciel.tasks import Origin
 from ciel.task_controls import TaskController
-from ciel.task_runner import TaskRunner
+from ciel.task_runner import TaskNotifier, TaskRunner
 from ciel.brain.extract import AgentSdkExtractor
 from ciel.brain.tools.tasks import bind_tasks
 from ciel.ui.indicator import Indicator, TeeIndicator, build_indicator
@@ -771,6 +771,7 @@ class Pipeline:
     """Runs Ciel until stopped."""
 
     _shortcuts: GlobalShortcuts | None = None
+    _task_notifier: TaskNotifier | None = None
     _talk_requested = False
     _shortcut_quiet = False
     _shortcut_epoch = 0
@@ -996,6 +997,10 @@ class Pipeline:
             setups=self._task_runner.setups if self._task_runner is not None else (),
         )
         self._task_controller.bind_approval(self._approve_grant)
+        # What the store owes the owner rides Vigil's queue; the notifier
+        # exists even where the runner does not, since a hub with no runner
+        # still owes the notices it holds.
+        self._task_notifier = TaskNotifier(config.tasks, lambda: self._task_controller.store, lambda: self._events)
         self._task_controller.execution = self._task_runner is not None
         bind_tasks(self._task_controller, self._brain._task_authority.capture)
         if self._web_link is not None:
@@ -1367,6 +1372,8 @@ class Pipeline:
                         self._world_tick()
                     if self._task_runner is not None:
                         self._task_runner.refresh(now_wall)
+                    if self._task_notifier is not None:
+                        self._task_notifier.poll(now_wall)
 
                     # The turn-slot arbitration: one frozen snapshot, one
                     # pure pick (the ladder lives in ciel.schedule — the
@@ -1849,6 +1856,8 @@ class Pipeline:
                     self._world_tick()
                 if self._task_runner is not None:
                     self._task_runner.refresh(now_wall)
+                if self._task_notifier is not None:
+                    self._task_notifier.poll(now_wall)
 
                 source = pick_next(self._loop_snapshot())
                 if await self._enact(source, None):
@@ -2798,6 +2807,8 @@ class Pipeline:
             self._events.mark_spoken(
                 event, time.time(), time.strftime("%Y-%m-%d")
             )
+            if self._task_notifier is not None:
+                await self._task_notifier.delivered(event, "spoken")
             if not completed:
                 self._record("event", "proactive: interrupted")
             if event.source == "brief":
@@ -3013,6 +3024,8 @@ class Pipeline:
             self._events.mark_messaged(
                 event, time.time(), time.strftime("%Y-%m-%d")
             )
+            if self._task_notifier is not None:
+                await self._task_notifier.delivered(event, "message")
             if event.source == "brief":
                 self._events.take_held(time.time())
         except asyncio.CancelledError:
@@ -3162,6 +3175,11 @@ class Pipeline:
         notes = self._events.take_held(time.time())
         if not notes:
             return text
+        for note in notes:
+            if getattr(note, "source", None) == "task" and self._task_notifier is not None:
+                # A held task notice reaches the owner inside this turn; the
+                # record is written off the turn's critical path.
+                asyncio.create_task(self._task_notifier.delivered(note, "held-note"))
         print(f"  [delivering {len(notes)} held note(s)]", flush=True)
         self._record("event", f"held notes delivered ({len(notes)})")
         listing = " ".join(note.summary for note in notes)
@@ -3835,6 +3853,8 @@ class Pipeline:
         await asyncio.gather(*closers, return_exceptions=True)
         if self._task_runner is not None:
             await self._task_runner.close()
+        if self._task_notifier is not None:
+            await self._task_notifier.close()
         await self._task_controller.close()
         bind_tasks(None, lambda: None)
         if self._world is not None:

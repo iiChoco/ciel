@@ -243,6 +243,7 @@ _TASK_IDENTITY = {
     'list': '', 'inspect': 'task_id', 'pause': 'task_id', 'resume': 'task_id', 'answer': 'task_id', 'cancel': 'task_id',
     'grant_draft_save': '', 'grant_draft_discard': 'draft_id', 'grant_approve': 'draft_id',
     'mandate_pause': 'mandate_id', 'mandate_resume': 'mandate_id', 'mandate_revoke': 'mandate_id', 'grant_revoke': 'grant_id',
+    'notices_mute': '', 'notices_unmute': '',
 }
 """Every Chart task operation and the record identity it must carry."""
 
@@ -287,7 +288,8 @@ def validate(frame: Any, direction: Direction) -> dict[str, Any]:
             if operation == 'grant_draft_save':
                 if not all(isinstance(v, str) and v for v in (*frame.get('operations', []), *frame.get('targets', []))) or not frame.get('namespace'):
                     raise WireError('a draft names its feature, operations, and targets')
-            needs_revision = operation not in ('list', 'inspect') and (operation != 'grant_draft_save' or frame.get('draft_id'))
+            needs_revision = (operation not in ('list', 'inspect', 'notices_mute', 'notices_unmute')
+                              and (operation != 'grant_draft_save' or frame.get('draft_id')))
             if needs_revision and (type(frame.get('revision')) is not int or frame['revision'] < 1):
                 raise WireError('a Chart control needs its rendered revision')
             if operation == 'grant_approve' and not frame.get('digest'):

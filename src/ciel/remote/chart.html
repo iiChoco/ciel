@@ -413,7 +413,8 @@
   #taskdetail p, #taskdetail li { margin-bottom: 6px; }
   #taskdetail ol { padding-left: 20px; color: var(--text-dim); }
   .task-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
-  .task-actions button, #taskrefresh { border: 1px solid var(--glass-border); padding: 5px 9px; font: 12px var(--mono); }
+  .task-actions button, #taskrefresh, .notice-switch { border: 1px solid var(--glass-border); padding: 5px 9px; font: 12px var(--mono); }
+  #tasklist .notice-switch { display: inline-block; width: auto; border-bottom: 1px solid var(--glass-border); margin: 6px 0; }
   #taskpanel button:disabled { opacity: .45; cursor: wait; }
   #grants { padding-top: 12px; border-top: 1px solid var(--line); margin-top: 8px; overflow-wrap: anywhere; }
   #grants h3 { font: 16px var(--serif); margin-bottom: 6px; }
@@ -1056,6 +1057,19 @@ function showTask(data) {
   const history = document.createElement("ol");
   taskDetail.appendChild(history);
   for (const entry of data.history) taskText(history, "li", `${entry.after_status}: ${entry.detail}`);
+  if (data.authority) {
+    const a = data.authority;
+    taskText(taskDetail, "p", a.kind === "grant"
+      ? `Authority: grant ${a.grant_status}${a.grant_current ? "" : " (revised since)"} · mandate ${a.mandate_status}`
+      : a.kind === "approval" ? `Authority: your approval ${a.approval_ref}` : `Authority: you, per action · ${a.approved_actions} approved`);
+  }
+  for (const intent of data.unresolved || []) taskText(taskDetail, "p", `Unresolved effect: ${intent.operation} on ${intent.target} · sent, outcome unknown`);
+  for (const notice of data.notices || []) {
+    const last = notice.deliveries[notice.deliveries.length - 1];
+    const seen = notice.deliveries.some(d => d.outcome === "acknowledged");
+    const state = seen ? "received" : last ? `${last.outcome} · ${last.destination}` : "owed";
+    taskText(taskDetail, "p", `Notice: ${notice.status} · ${state}`);
+  }
 }
 // ── standing grants: the form, the drafts, the mandates ─────────────────
 // A draft is what the owner is looking at; Approve sends the revision and
@@ -1198,7 +1212,19 @@ async function refreshTasks() {
         taskDetail.scrollIntoView({block: "nearest"});
       });
     }
-    taskNotice(data.tasks.length ? "Saved requests. No background execution is available." : "No saved tasks.");
+    taskNotice((data.tasks.length ? "Saved requests." : "No saved tasks.")
+      + (data.notify === false ? " Notices muted; tasks keep running." : "")
+      + (data.owed ? ` ${data.owed} notice${data.owed === 1 ? "" : "s"} owed.` : ""));
+    if (data.notify !== undefined) {
+      const sw = taskText(taskList, "button", data.notify ? "Mute notices" : "Unmute notices");
+      sw.type = "button";
+      sw.className = "notice-switch";
+      sw.title = "The notice switch only; execution is unaffected";
+      sw.addEventListener("click", async () => {
+        try { await requestTask(data.notify ? "notices_mute" : "notices_unmute"); } catch (error) { taskNotice(error.message, true); }
+        await refreshTasks();
+      });
+    }
     showGrants(data);
     if (selectedTask) {
       const detail = await requestTask("inspect", {task_id: selectedTask});

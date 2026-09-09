@@ -63,6 +63,14 @@ asks the adapter what happened, and after enough unanswered reads asks the
 owner; only a verdict, applied or not, moves the task again, and a task the
 owner ended meanwhile records the verdict without reviving.
 
+**A result is owed until the owner has seen it.** Completion writes its
+notice with the same transaction; that intent outlives any crash. Delivery
+is recorded separately, attempt by attempt, with the private destination
+that carried it, and a notice stays owed until the owner looks at the task
+on a private lane, which is the receipt. Muting notices is a persisted
+setting of its own: the runner keeps working under it, and nothing about it
+reads as a pause.
+
 **Derived work inherits, it never invents.** A child's origin names its
 mandate, grant, adapter, event, and source revision, and nothing that claims
 attendance or a human lane. The store admits it only inside the grant's scope,
@@ -105,7 +113,7 @@ Phase = Literal['prepared', 'dispatched', 'observed', 'checkpointed', 'verified'
 WaitReason = Literal['owner', 'external', 'resource', 'reconciliation']
 _TERMINAL = frozenset(('done', 'failed', 'cancelled'))
 _NOTICE = frozenset(('waiting', 'paused', 'done', 'failed', 'cancelled'))
-_SCHEMA = 6
+_SCHEMA = 7
 _POLICY = 1
 """What a grant's scope and limits mean; a grant records the version it was approved under."""
 GrantStatus = Literal['active', 'revoked', 'expired']
@@ -154,6 +162,17 @@ _DISPATCH_TABLES = '''
                 operation TEXT NOT NULL, target TEXT NOT NULL, payload_digest TEXT NOT NULL,
                 status TEXT NOT NULL CHECK(status IN ('asked','approved','declined')),
                 answered_revision INTEGER, consumed_by TEXT
+            );
+'''
+_DELIVERY_TABLES = '''
+            CREATE TABLE deliveries (
+                id TEXT PRIMARY KEY, notice_id TEXT NOT NULL REFERENCES outbox(id), destination TEXT NOT NULL,
+                attempt INTEGER NOT NULL CHECK(attempt > 0),
+                outcome TEXT NOT NULL CHECK(outcome IN ('sent','failed','acknowledged')),
+                detail TEXT NOT NULL, at REAL NOT NULL, retry_at REAL
+            );
+            CREATE TABLE settings (
+                owner TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY(owner,key)
             );
 '''
 _FEATURE_TABLES = '''
@@ -372,6 +391,21 @@ class Notice:
     outcome: str
     detail: str
     created_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class Delivery:
+    """One attempt to put a notice in front of the owner, or the owner's look at it."""
+
+    id: str
+    notice_id: str
+    destination: str
+    """The private lane: spoken, message, held-note, or the lane of the look."""
+    attempt: int
+    outcome: Literal['sent', 'failed', 'acknowledged']
+    detail: str
+    at: float
+    retry_at: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -649,7 +683,7 @@ class TaskStore:
             if not fresh:
                 version = self._db.execute('PRAGMA user_version').fetchone()[0]
                 app = self._db.execute('PRAGMA application_id').fetchone()[0]
-                if app != _APPLICATION or version not in (2, 3, 4, 5, _SCHEMA):
+                if app != _APPLICATION or version not in (2, 3, 4, 5, 6, _SCHEMA):
                     raise TaskStoreError('unsupported task schema; no migration or downgrade was attempted')
                 if self._db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise TaskStoreError('task database failed its integrity check')
@@ -661,8 +695,10 @@ class TaskStore:
                 self._migrate_from_3()
             if not fresh and version < 5:
                 self._migrate_from_4()
-            if not fresh and version < _SCHEMA:
+            if not fresh and version < 6:
                 self._migrate_from_5()
+            if not fresh and version < _SCHEMA:
+                self._migrate_from_6()
             if not fresh:
                 self._validate_rows()
             if fresh:
@@ -731,6 +767,7 @@ class TaskStore:
             {_FEATURE_TABLES}
             {_AUTHORITY_TABLES}
             {_DISPATCH_TABLES}
+            {_DELIVERY_TABLES}
             PRAGMA application_id={_APPLICATION};
             PRAGMA user_version={_SCHEMA};
             COMMIT;
@@ -800,10 +837,22 @@ class TaskStore:
             BEGIN IMMEDIATE;
             {addition}
             {_DISPATCH_TABLES}
+            PRAGMA user_version=6;
+            COMMIT;
+        ''')
+        log.info('task store migrated from schema 5 to 6')
+
+    def _migrate_from_6(self) -> None:
+        """Version six wrote notices and delivered none; every notice it left
+        is still owed, which is exactly what an empty deliveries table says."""
+        assert self._db is not None
+        self._db.executescript(f'''
+            BEGIN IMMEDIATE;
+            {_DELIVERY_TABLES}
             PRAGMA user_version={_SCHEMA};
             COMMIT;
         ''')
-        log.info('task store migrated from schema 5 to %d', _SCHEMA)
+        log.info('task store migrated from schema 6 to %d', _SCHEMA)
 
     def register(self, namespace: Namespace) -> None:
         """Application code announces an adapter's records before the store opens."""
@@ -1025,6 +1074,8 @@ class TaskStore:
             'derivations': 'owner mandate_id namespace event_key source_revision task_id created_at',
             'intents': 'action_id task_id attempt_id operation target payload_digest precondition_digest recipe_json authority_json journal_ref deadline created_at resolution resolved_at resolved_by reconcile_reads',
             'approvals': 'question_id task_id operation target payload_digest status answered_revision consumed_by',
+            'deliveries': 'id notice_id destination attempt outcome detail at retry_at',
+            'settings': 'owner key value updated_at',
         }
         for table, expected in columns.items():
             actual = [row['name'] for row in self._db.execute(f'PRAGMA table_info({table})')]
@@ -1164,6 +1215,16 @@ class TaskStore:
             question = self._db.execute('SELECT * FROM questions WHERE id=? AND task_id=?', (row['question_id'], row['task_id'])).fetchone()
             if question is None or question['kind'] != 'approval' or (row['status'] != 'asked') != (question['answer'] is not None):
                 raise TaskStoreError('approval does not match its question')
+        for row in self._db.execute('SELECT * FROM deliveries'):
+            delivery = self._delivery_from(row)
+            if self._db.execute('SELECT 1 FROM outbox WHERE id=?', (delivery.notice_id,)).fetchone() is None:
+                raise TaskStoreError('delivery lost its notice')
+            _text(delivery.destination, 'destination')
+            if _clock(delivery.at) != delivery.at or (delivery.outcome == 'failed') != (delivery.retry_at is not None):
+                raise TaskStoreError('delivery has an inconsistent record')
+        for row in self._db.execute('SELECT * FROM settings'):
+            _text(row['owner'], 'owner')
+            _text(row['key'], 'setting')
         for row in self._db.execute('SELECT * FROM derivations'):
             task_row = self._db.execute('SELECT * FROM tasks WHERE id=? AND owner=?', (row['task_id'], row['owner'])).fetchone()
             if task_row is None:
@@ -1577,7 +1638,12 @@ class TaskStore:
                           'grants': [asdict(self._grant_from(row)) for row in self._db.execute(
                               'SELECT * FROM grants WHERE owner=? ORDER BY updated_at DESC,id LIMIT ?', (owner, self._config.max_active))],
                           'drafts': [asdict(self._draft_from(row)) for row in self._db.execute(
-                              "SELECT * FROM grant_drafts WHERE owner=? AND status='draft' ORDER BY updated_at DESC,id LIMIT ?", (owner, self._config.max_active))]}
+                              "SELECT * FROM grant_drafts WHERE owner=? AND status='draft' ORDER BY updated_at DESC,id LIMIT ?", (owner, self._config.max_active))],
+                          'notify': self._notify_enabled(owner),
+                          'owed': self._db.execute("SELECT count(*) FROM outbox o JOIN tasks t ON o.task_id=t.id WHERE t.owner=? AND o.id IN "
+                                                   "(SELECT id FROM outbox) AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.notice_id=o.id AND d.outcome='acknowledged') "
+                                                   "AND (o.status IN ('done','failed') OR (o.status='waiting' AND o.revision=t.revision AND t.wait_reason IN ('owner','reconciliation')))",
+                                                   (owner,)).fetchone()[0]}
             else:
                 task = self._get(owner, task_id)
                 questions = [dict(r) for r in self._db.execute('SELECT * FROM questions WHERE task_id=? ORDER BY revision DESC LIMIT 1', (task_id,))]
@@ -1587,7 +1653,13 @@ class TaskStore:
                     question.pop('step_json')
                 result = {'task': asdict(task), 'question': question,
                           'history': [dict(r) for r in self._db.execute('SELECT * FROM transitions WHERE task_id=? ORDER BY revision DESC LIMIT 64', (task_id,))],
-                          'evidence': [json.loads(r[0]) for r in self._db.execute('SELECT record_json FROM evidence WHERE attempt_id=(SELECT id FROM attempts WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT 1) LIMIT 64', (task.id,))]}
+                          'evidence': [json.loads(r[0]) for r in self._db.execute('SELECT record_json FROM evidence WHERE attempt_id=(SELECT id FROM attempts WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT 1) LIMIT 64', (task.id,))],
+                          'authority': self._authority_view(task),
+                          'unresolved': [asdict(self._intent_from(r)) for r in self._db.execute(
+                              'SELECT * FROM intents WHERE task_id=? AND resolution IS NULL ORDER BY created_at LIMIT 8', (task.id,))],
+                          'notices': [{**dict(n), 'deliveries': [asdict(self._delivery_from(d)) for d in self._db.execute(
+                              'SELECT * FROM deliveries WHERE notice_id=? ORDER BY at,attempt LIMIT 16', (n['id'],))]}
+                              for n in self._db.execute('SELECT * FROM outbox WHERE task_id=? ORDER BY created_at DESC LIMIT 8', (task.id,))]}
             self._bounded(result)
             return result
         return await self._run(lambda: self._transaction(read, fence))
@@ -2262,6 +2334,119 @@ class TaskStore:
                               self._bounded(asdict(attempt.step))))
             return task
         return await self._run(lambda: self._transaction(write))
+
+    # ── delivery: what is owed, what was sent, what was seen ─────────────────
+
+    def _delivery_from(self, row: sqlite3.Row) -> Delivery:
+        return Delivery(row['id'], row['notice_id'], row['destination'], row['attempt'], row['outcome'], row['detail'], row['at'], row['retry_at'])
+
+    def _authority_view(self, task: Task) -> dict[str, Any] | None:
+        """What currently permits this task's actions, for the owner's eyes."""
+        assert self._db is not None
+        origin = task.origin
+        if isinstance(origin, DerivedOrigin):
+            mandate = self._db.execute('SELECT status,revision FROM mandates WHERE id=?', (origin.parent_mandate_id,)).fetchone()
+            grant = self._db.execute('SELECT status,revision,expires_at FROM grants WHERE id=?', (origin.grant_id,)).fetchone()
+            return {'kind': 'grant', 'grant_id': origin.grant_id, 'grant_status': grant['status'] if grant else 'missing',
+                    'grant_current': bool(grant) and grant['revision'] == origin.grant_revision, 'expires_at': grant['expires_at'] if grant else None,
+                    'mandate_id': origin.parent_mandate_id, 'mandate_status': mandate['status'] if mandate else 'missing'}
+        if origin.approval_ref is not None:
+            return {'kind': 'approval', 'approval_ref': origin.approval_ref}
+        approved = self._db.execute("SELECT count(*) FROM approvals WHERE task_id=? AND status='approved' AND consumed_by IS NULL", (task.id,)).fetchone()[0]
+        return {'kind': 'owner', 'approved_actions': approved}
+
+    def _notify_enabled(self, owner: str) -> bool:
+        assert self._db is not None
+        row = self._db.execute("SELECT value FROM settings WHERE owner=? AND key='notify'", (owner,)).fetchone()
+        return row is None or row['value'] == 'on'
+
+    async def notify_enabled(self, owner: str) -> bool:
+        return await self._run(lambda: self._transaction(lambda: self._notify_enabled(owner)))
+
+    async def set_notify(self, owner: str, enabled: bool, *, now: float | None = None, fence: Fence | None = None) -> bool:
+        """The notice switch, persisted. It says nothing about execution."""
+        _text(owner, 'owner')
+        stamp = _clock(now)
+        def write() -> bool:
+            assert self._db is not None
+            self._db.execute("INSERT OR REPLACE INTO settings VALUES(?,'notify',?,?)", (owner, 'on' if enabled else 'off', stamp))
+            return bool(enabled)
+        return await self._run(lambda: self._transaction(write, fence))
+
+    async def undelivered(self, owner: str, *, now: float | None = None, limit: int = 8) -> tuple[tuple[Notice, int], ...]:
+        """Notices still owed, oldest first, each with the number of delivery
+        attempts so far. Owed means: a completion or a failure, or the
+        question the task is waiting on right now, that the owner has not
+        looked at and that no delivery has reached; a failed delivery is owed
+        again once its retry time comes."""
+        stamp = _clock(now)
+        if type(limit) is not int or limit < 1:
+            raise ValueError('limit must be a positive integer')
+        def read() -> tuple[tuple[Notice, int], ...]:
+            assert self._db is not None
+            found = []
+            rows = self._db.execute(
+                "SELECT o.* FROM outbox o JOIN tasks t ON o.task_id=t.id WHERE t.owner=? "
+                "AND (o.status IN ('done','failed') OR (o.status='waiting' AND o.revision=t.revision AND t.wait_reason IN ('owner','reconciliation'))) "
+                'ORDER BY o.created_at,o.id LIMIT ?', (owner, limit * 4)).fetchall()
+            for row in rows:
+                deliveries = [self._delivery_from(d) for d in self._db.execute('SELECT * FROM deliveries WHERE notice_id=? ORDER BY at,attempt', (row['id'],))]
+                if any(d.outcome in ('sent', 'acknowledged') for d in deliveries):
+                    continue
+                if deliveries and deliveries[-1].outcome == 'failed' and deliveries[-1].retry_at is not None and deliveries[-1].retry_at > stamp:
+                    continue
+                found.append((Notice(**dict(row)), len(deliveries)))
+                if len(found) >= limit:
+                    break
+            return tuple(found)
+        return await self._run(lambda: self._transaction(read))
+
+    async def record_delivery(self, owner: str, notice_id: str, destination: str, outcome: Literal['sent', 'failed'], detail: str = '', *,
+                              now: float | None = None, retry_after_s: float = 0.0) -> Delivery:
+        """A delivery attempt, recorded after the fact: sent means the private
+        lane took it, failed means it did not and when to try again."""
+        _text(destination, 'destination')
+        if outcome not in ('sent', 'failed'):
+            raise ValueError('a delivery attempt is sent or failed')
+        stamp = _clock(now)
+        def write() -> Delivery:
+            assert self._db is not None
+            if self._db.execute('SELECT 1 FROM outbox o JOIN tasks t ON o.task_id=t.id WHERE o.id=? AND t.owner=?', (notice_id, owner)).fetchone() is None:
+                raise TaskConflict('notice is not available to this owner')
+            attempt = self._db.execute('SELECT count(*) FROM deliveries WHERE notice_id=?', (notice_id,)).fetchone()[0] + 1
+            delivery_id = uuid.uuid4().hex
+            self._db.execute('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?)',
+                             (delivery_id, notice_id, destination, attempt, outcome, self._bounded(detail) and detail, stamp,
+                              stamp + max(0.0, retry_after_s) if outcome == 'failed' else None))
+            return self._delivery_from(self._db.execute('SELECT * FROM deliveries WHERE id=?', (delivery_id,)).fetchone())
+        return await self._run(lambda: self._transaction(write))
+
+    async def acknowledge(self, owner: str, task_id: str, destination: str, *, now: float | None = None, fence: Fence | None = None) -> int:
+        """The owner looked at the task on a private lane: every notice it
+        owes is received. Returns how many that was; looking twice is free."""
+        _text(destination, 'destination')
+        stamp = _clock(now)
+        def write() -> int:
+            assert self._db is not None
+            self._get(owner, task_id)
+            count = 0
+            for row in self._db.execute('SELECT id FROM outbox WHERE task_id=?', (task_id,)).fetchall():
+                if self._db.execute("SELECT 1 FROM deliveries WHERE notice_id=? AND outcome='acknowledged'", (row['id'],)).fetchone():
+                    continue
+                attempt = self._db.execute('SELECT count(*) FROM deliveries WHERE notice_id=?', (row['id'],)).fetchone()[0] + 1
+                self._db.execute('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,NULL)',
+                                 (uuid.uuid4().hex, row['id'], destination, attempt, 'acknowledged', 'the owner looked', stamp))
+                count += 1
+            return count
+        return await self._run(lambda: self._transaction(write, fence))
+
+    async def deliveries(self, owner: str, notice_id: str) -> tuple[Delivery, ...]:
+        def read() -> tuple[Delivery, ...]:
+            assert self._db is not None
+            if self._db.execute('SELECT 1 FROM outbox o JOIN tasks t ON o.task_id=t.id WHERE o.id=? AND t.owner=?', (notice_id, owner)).fetchone() is None:
+                raise TaskConflict('notice is not available to this owner')
+            return tuple(self._delivery_from(r) for r in self._db.execute('SELECT * FROM deliveries WHERE notice_id=? ORDER BY at,attempt', (notice_id,)))
+        return await self._run(lambda: self._transaction(read))
 
     # ── the runner's side ─────────────────────────────────────────────────────
 
