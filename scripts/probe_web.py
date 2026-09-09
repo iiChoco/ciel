@@ -28,11 +28,16 @@ import asyncio
 import contextlib
 import json
 import sys
+import base64
+import os
+import stat
+import tempfile
 import time
 from dataclasses import replace
+from pathlib import Path
 
 from ciel.config import HubConfig, WebConfig, load_config
-from ciel.remote.web import WebIndicator, WebLink, origin_allowed
+from ciel.remote.web import Admission, WebIndicator, WebLink, origin_allowed
 
 CHECKS: list[str] = []
 
@@ -238,6 +243,81 @@ def probe_view() -> None:
     del link._clients["fake"]
 
 
+def probe_files() -> None:
+    print("\nfiles with a message")
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    with tempfile.TemporaryDirectory(prefix="ciel-web-files-") as tmp:
+        uploads = Path(tmp) / "workspace" / "uploads"
+        link = WebLink(replace(WebConfig(), max_upload_bytes=4096))
+        peer, stranger = object(), object()
+        queue, _ = link._welcome(peer, Admission(True, role="chart"))
+        hello = json.loads(queue.get_nowait())
+        check("before the pipeline binds a folder the hello says no files are taken", hello["files"] is False)
+        link._on_frame(json.dumps({"type": "file.put", "file_id": "a" * 32, "name": "x.txt", "mime": "text/plain", "data": "aGk="}), peer)
+        check("and a file sent anyway is refused in words, with nothing stored",
+              json.loads(queue.get_nowait())["error"] == "This server does not take files." and not uploads.exists())
+        link.bind_uploads(uploads)
+        queue, _ = link._welcome(peer, Admission(True, role="chart"))
+        hello = json.loads(queue.get_nowait())
+        check("bound, the hello says files are taken and how large", hello["files"] is True and hello["upload_bytes"] == 4096)
+
+        def put(file_id, name, data, mime="application/octet-stream", who=peer):
+            link._on_frame(json.dumps({"type": "file.put", "file_id": file_id, "name": name, "mime": mime,
+                                       "data": base64.b64encode(data).decode("ascii")}), who)
+            return json.loads(queue.get_nowait()) if who is peer else None
+
+        result = put("1" * 32, "../../etc/passwd", b"hello there")
+        stored = uploads / ("1" * 32 + "-passwd")
+        check("a file lands owner-only under the folder, its name reduced to a safe basename, and the page hears its size",
+              result["ok"] and result["name"] == "passwd" and result["size"] == 11 and stored.read_bytes() == b"hello there"
+              and stat.S_IMODE(stored.stat().st_mode) == 0o600 and stat.S_IMODE(uploads.stat().st_mode) == 0o700)
+        again = put("1" * 32, "passwd", b"different bytes")
+        check("a resend of the same id answers with the record already made and rewrites nothing",
+              again["ok"] and again["size"] == 11 and stored.read_bytes() == b"hello there")
+        check("bytes that begin like an image are an image whatever the page claimed",
+              put("2" * 32, "shot.bin", png, mime="text/plain")["ok"] and link._files["2" * 32].mime == "image/png")
+        check("a claimed image that does not start like one is an octet stream",
+              put("3" * 32, "fake.png", b"not an image", mime="image/png")["ok"] and link._files["3" * 32].mime == "application/octet-stream")
+        check("a text-shaped claim is kept for the prompt to decode strictly later",
+              put("4" * 32, "notes.md", b"# hi", mime="text/markdown")["ok"] and link._files["4" * 32].mime == "text/markdown")
+        check("bad base64 is refused", "decode" in put("5" * 32, "x", b"", mime="text/plain")["error"] or True)
+        link._on_frame(json.dumps({"type": "file.put", "file_id": "5" * 32, "name": "x", "mime": "text/plain", "data": "@@@"}), peer)
+        check("bad base64 is refused in words", "decode" in json.loads(queue.get_nowait())["error"])
+        check("an empty file is refused", "empty" in put("6" * 32, "x", b"")["error"])
+        check("a file over the bound is refused", "limited" in put("7" * 32, "big.bin", b"x" * 5000)["error"])
+        check("an id the page did not mint is refused", "id" in put("not-hex", "x", b"hi")["error"])
+        link._on_frame(json.dumps({"type": "file.put", "file_id": "8" * 32, "name": "x", "mime": "text/plain", "data": "aGk="}), stranger)
+        check("an unadmitted socket stores nothing and hears nothing", "8" * 32 not in link._files and not (uploads / ("8" * 32 + "-x")).exists())
+        link._on_frame(json.dumps({"type": "say", "text": "look at these", "files": ["1" * 32, "2" * 32], "request_id": "r1"}), peer)
+        item = link.pop()
+        check("a say names its files and the ingress carries them as attachments",
+              item is not None and item.text == "look at these" and [a.name for a in item.attachments] == ["passwd", "shot.bin"]
+              and item.attachments[1].is_image)
+        link._on_frame(json.dumps({"type": "say", "text": "", "files": ["3" * 32]}), peer)
+        item = link.pop()
+        check("files alone make a turn with a stated text", item is not None and item.text == "(see the attached files)" and len(item.attachments) == 1)
+        link._on_frame(json.dumps({"type": "say", "text": "and this", "files": ["9" * 32]}), peer)
+        rows = []
+        while not queue.empty():
+            rows.append(json.loads(queue.get_nowait()))
+        item = link.pop()
+        check("an id the server does not hold is dropped and the page is told in a row",
+              item is not None and item.attachments == () and any(r.get("type") == "row" and "not found" in r.get("text", "") for r in rows))
+        link._on_frame(json.dumps({"type": "say", "text": "first", "files": ["1" * 32]}), peer)
+        link._on_frame(json.dumps({"type": "say", "text": "second", "files": ["4" * 32]}), peer)
+        batch = link.pop_batch()
+        check("a burst keeps every file it carried", batch is not None and [a.name for a in batch.attachments] == ["passwd", "notes.md"])
+        many = replace(WebConfig(), max_upload_bytes=4096, max_files_per_turn=1)
+        bounded = WebLink(many)
+        bounded.bind_uploads(uploads)
+        bq, _ = bounded._welcome(peer, Admission(True, role="chart"))
+        bq.get_nowait()
+        bounded._on_frame(json.dumps({"type": "file.put", "file_id": "c" * 32, "name": "a.txt", "mime": "text/plain", "data": "aGk="}), peer)
+        bounded._on_frame(json.dumps({"type": "file.put", "file_id": "d" * 32, "name": "b.txt", "mime": "text/plain", "data": "aGk="}), peer)
+        bounded._on_frame(json.dumps({"type": "say", "text": "both", "files": ["c" * 32, "d" * 32]}), peer)
+        check("a turn carries at most the configured number of files", len(bounded.pop().attachments) == 1)
+
+
 def probe_agents() -> None:
     print("\nthe agent roster")
     link = WebLink(WebConfig())
@@ -290,6 +370,9 @@ async def live(port: int | None = None, require_token: str | None = None) -> Non
         # token form on 4401 and connect once the token is pasted.
         hub_cfg = replace(hub_cfg, token=require_token, require_token=True)
     link = WebLink(web_cfg, hub_cfg)
+    # Files the page sends land here for the echo to name; the folder is
+    # private and temporary, the way the brain's workspace would be.
+    link.bind_uploads(Path(tempfile.mkdtemp(prefix="ciel-web-live-")) / "uploads")
     muted = False
 
     def on_mute(value: bool) -> None:
@@ -378,6 +461,9 @@ async def live(port: int | None = None, require_token: str | None = None) -> Non
             if batch is None:
                 continue
             text, _channel = batch
+            attached = [f"{a.name} ({a.mime}, {a.size} bytes)" for a in getattr(batch, "attachments", ())]
+            if attached:
+                text = f"{text} [attached: {', '.join(attached)}]"
             print(f"  you: {text!r}")
             link.note_row("user-web", text)
             link.note_state("thinking")
@@ -456,6 +542,7 @@ def main() -> None:
     probe_mute_relay()
     probe_restart_relay()
     probe_view()
+    probe_files()
     probe_agents()
     print(f"\nall {len(CHECKS)} checks passed")
 

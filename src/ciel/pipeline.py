@@ -89,7 +89,7 @@ from ciel.schedule import Snapshot, Source, State, pick_next
 from ciel.commands import Command, match as match_command
 from ciel.timers import Timer, announcement, spoken_clock, spoken_duration
 from ciel.transcript import Transcript
-from ciel.turn import TurnRequest, TurnSink, lane_spec, prompt_note, owner_origin
+from ciel.turn import Attachment, TurnRequest, TurnSink, attachment_prompt, lane_spec, prompt_note, owner_origin
 from ciel.tasks import Origin
 from ciel.task_controls import TaskController
 from ciel.task_runner import TaskNotifier, TaskRunner
@@ -1028,6 +1028,9 @@ class Pipeline:
         bind_tasks(self._task_controller, self._brain._task_authority.capture)
         if self._web_link is not None:
             self._web_link.bind_tasks(self._task_controller)
+            # The Chart's files land inside the brain's workspace, where its
+            # own file tools can reach them.
+            self._web_link.bind_uploads(config.files.workspace / "uploads")
         # Memory writes carry provenance: "proactive" when a Vigil turn with
         # nobody around is writing, "conversation" otherwise — reflection
         # included, since it distills a conversation the user was part of.
@@ -1636,7 +1639,8 @@ class Pipeline:
             batch = self._web_link.pop_batch()
             assert batch is not None  # pending was just checked
             line, _channel = batch
-            self._turn = asyncio.create_task(self._handle_web_turn(line, origin=getattr(batch, "origin", None)))
+            self._turn = asyncio.create_task(self._handle_web_turn(line, origin=getattr(batch, "origin", None),
+                                                                   attachments=getattr(batch, "attachments", ())))
             return True
 
         if source is Source.REMOTE:
@@ -2210,7 +2214,8 @@ class Pipeline:
             _DiscordSink(self, send_here),
         )
 
-    async def _handle_web_turn(self, text: str, *, origin: Origin | None = None) -> None:
+    async def _handle_web_turn(self, text: str, *, origin: Origin | None = None,
+                               attachments: tuple[Attachment, ...] = ()) -> None:
         """One turn that arrived through the GUI (Chart).
 
         The typed lane with the room's quietness made explicit: same
@@ -2228,7 +2233,7 @@ class Pipeline:
         """
         assert self._web_link is not None
         await self._run_turn(
-            TurnRequest(lane="web", text=text, arrival_wall=time.time(), origin=origin),
+            TurnRequest(lane="web", text=text, arrival_wall=time.time(), origin=origin, attachments=attachments),
             self._web_sink(),
         )
 
@@ -2276,8 +2281,9 @@ class Pipeline:
         # window; the voice sink sets it back the moment audio plays.
         self._spoke = False
         try:
-            print(f"\n  {spec.console_tag}: {req.text}")
-            self._record(spec.label, req.text)
+            spoken = req.text + (f" [attached: {', '.join(a.name for a in req.attachments)}]" if req.attachments else "")
+            print(f"\n  {spec.console_tag}: {spoken}")
+            self._record(spec.label, spoken)
 
             # Mechanical requests skip the brain entirely: no model
             # latency, no cost, no session traffic. The grammar only fires
@@ -2304,6 +2310,13 @@ class Pipeline:
             prompt = note + self._world_block(public=req.public) + (
                 self._with_held_notes(req.text) if spec.held_notes else req.text
             )
+            # Files the user sent ride after their words: named by path,
+            # small text quoted as data, images shown within the budget.
+            attachment_note, images = attachment_prompt(
+                req.attachments, max_inline_chars=self._config.web.max_inline_chars,
+                image_budget_chars=self._config.web.image_prompt_chars,
+            )
+            prompt += attachment_note
             await sink.begin(started)
             async with AsyncExitStack() as stack:
                 confirm_origin = spec.confirm_origin
@@ -2335,6 +2348,8 @@ class Pipeline:
                     turn_args['public_audience'] = f'discord:{getattr(req.channel, "id", id(req.channel))}'
                 elif req.origin is not None:
                     turn_args['origin'] = req.origin
+                if images and not req.public:
+                    turn_args['images'] = images
                 stream = await stack.enter_async_context(
                     aclosing(self._brain.ask(prompt, **turn_args))
                 )

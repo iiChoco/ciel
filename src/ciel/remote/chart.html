@@ -369,6 +369,26 @@
   }
   #send:hover:not(:disabled) { background: rgba(232, 201, 138, .12); }
   #send:disabled { opacity: .35; cursor: default; }
+  #attach {
+    padding: 12px 14px;
+    border: 1px solid var(--glass-border);
+    clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
+    font: 600 10px/1 var(--mono);
+    letter-spacing: .22em;
+    color: var(--text-dim);
+  }
+  #attach:hover { color: var(--text); background: rgba(160, 240, 255, .06); }
+  #attach[hidden] { display: none; }
+  #attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 28px 8px; flex: none; }
+  #attachments:empty { display: none; }
+  #attachments .chip {
+    display: inline-flex; align-items: center; gap: 8px; max-width: 100%;
+    padding: 5px 9px; border: 1px solid var(--glass-border);
+    font: 12px var(--mono); color: var(--text-dim); overflow-wrap: anywhere;
+  }
+  #attachments .chip.error { border-color: var(--st-error); color: var(--st-error); }
+  #attachments .chip button { color: inherit; font: inherit; padding: 0 2px; }
+  body.dropping footer { border-top-color: var(--gold); }
 
   @media (max-width: 640px) {
     .corner { display: none; }
@@ -504,7 +524,10 @@
   </div>
 </div></div>
 
+<div id="attachments" aria-label="Files to send"></div>
 <footer>
+  <button id="attach" type="button" hidden title="Attach files to your message">FILE</button>
+  <input id="files" type="file" multiple hidden>
   <textarea id="text" rows="1" placeholder="Type to Ciel — or just speak"></textarea>
   <button id="send" disabled>SEND</button>
 </footer>
@@ -943,8 +966,103 @@ function saveLedger() {
 
 saveLedger();
 
-function say(t) {
+// ── files with a message ────────────────────────────────────────────────
+// A file goes ahead of its say as its own frame and is answered by id; the
+// say then names the ids it carries, and the ledger keeps them with the
+// words so a resend after a reconnect still points at what was stored.
+// Images are scaled down here, on the page, so the hub never has to.
+const attachBtn = document.getElementById("attach");
+const fileInput = document.getElementById("files");
+const attachmentsEl = document.getElementById("attachments");
+const fileWaits = new Map(); // file_id → {resolve, reject, timeout}
+let uploadBytes = 0; // what the hello allowed; 0 means this server takes no files
+const pending = []; // {id, name, mime, blob, chip}
+const IMAGE_EDGE = 1568, IMAGE_BYTES = 700000;
+
+function sizeText(n) { return n < 1024 ? n + " B" : n < 1048576 ? Math.round(n / 1024) + " KB" : (n / 1048576).toFixed(1) + " MB"; }
+function renderPending() {
+  attachmentsEl.replaceChildren();
+  for (const entry of pending) {
+    const chip = document.createElement("span");
+    chip.className = "chip" + (entry.error ? " error" : "");
+    chip.textContent = `${entry.name} · ${sizeText(entry.blob.size)}${entry.error ? " · " + entry.error : ""}`;
+    const remove = document.createElement("button");
+    remove.type = "button"; remove.textContent = "×"; remove.title = "Remove";
+    remove.addEventListener("click", () => { pending.splice(pending.indexOf(entry), 1); renderPending(); });
+    chip.appendChild(remove);
+    attachmentsEl.appendChild(chip);
+  }
+}
+async function shrinkImage(file) {
+  if (!file.type.startsWith("image/") || file.type === "image/gif") return file;
+  let bitmap;
+  try { bitmap = await createImageBitmap(file); } catch { return file; }
+  const edge = Math.max(bitmap.width, bitmap.height);
+  if (edge <= IMAGE_EDGE && file.size <= IMAGE_BYTES) { bitmap.close(); return file; }
+  const scale = Math.min(1, IMAGE_EDGE / edge);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", 0.85));
+  if (!blob) return file;
+  return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", {type: "image/jpeg"});
+}
+async function addFiles(list) {
+  for (const raw of list) {
+    if (!raw || !uploadBytes) continue;
+    const file = await shrinkImage(raw);
+    const entry = {id: messageId(), name: file.name || "file", mime: file.type || "application/octet-stream", blob: file, error: null};
+    if (file.size > uploadBytes) entry.error = `larger than ${sizeText(uploadBytes)}`;
+    else if (file.size === 0) entry.error = "empty";
+    pending.push(entry);
+  }
+  renderPending();
+}
+function putFile(entry) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("could not read the file"));
+    reader.onload = () => {
+      const data = String(reader.result).split(",")[1] || "";
+      const timeout = setTimeout(() => { fileWaits.delete(entry.id); reject(new Error("no answer from the server")); }, 60000);
+      fileWaits.set(entry.id, {resolve, reject, timeout});
+      if (!sendFrame({type: "file.put", file_id: entry.id, name: entry.name, mime: entry.mime, data, size: entry.blob.size})) {
+        clearTimeout(timeout); fileWaits.delete(entry.id); reject(new Error("offline"));
+      }
+    };
+    reader.readAsDataURL(entry.blob);
+  });
+}
+async function uploadPending() {
+  const ids = [];
+  for (const entry of pending) {
+    if (entry.error) throw new Error(`${entry.name}: ${entry.error}`);
+    try { await putFile(entry); }
+    catch (error) { entry.error = error.message; renderPending(); throw error; }
+    ids.push(entry.id);
+  }
+  return ids;
+}
+attachBtn.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", async () => { await addFiles(Array.from(fileInput.files)); fileInput.value = ""; text.focus(); });
+text.addEventListener("paste", (ev) => {
+  const files = Array.from(ev.clipboardData?.items || []).filter(i => i.kind === "file").map(i => i.getAsFile()).filter(Boolean);
+  if (files.length) { ev.preventDefault(); addFiles(files); }
+});
+document.addEventListener("dragover", (ev) => { if (uploadBytes) { ev.preventDefault(); document.body.classList.add("dropping"); } });
+document.addEventListener("dragleave", () => document.body.classList.remove("dropping"));
+document.addEventListener("drop", (ev) => {
+  document.body.classList.remove("dropping");
+  if (!uploadBytes) return;
+  ev.preventDefault();
+  addFiles(Array.from(ev.dataTransfer?.files || []));
+});
+
+function say(t, files = []) {
   const message = {text: t, request_id: messageId()};
+  if (files.length) message.files = files;
   if (!acks) {
     // No hello yet, or an older server: the pre-ledger lane, fire-and-forget.
     if (!sendFrame({ type: "say", ...message })) return false;
@@ -1270,6 +1388,8 @@ function connect() {
       // The capability handshake: the ledger, the probe, and the restart
       // chip all wait for the server to say it speaks them.
       acks = !!f.acks;
+      uploadBytes = f.files === true && Number.isInteger(f.upload_bytes) ? f.upload_bytes : 0;
+      attachBtn.hidden = !uploadBytes;
       taskPanel.hidden = f.tasks !== true;
       if (!taskPanel.hidden) refreshTasks();
       restartBtn.style.display = acks ? "" : "none";
@@ -1305,6 +1425,13 @@ function connect() {
         taskRequests.delete(f.request_id);
         if (f.ok) pending.resolve(f.data);
         else pending.reject(new Error(f.error || "Task request failed."));
+      }
+    } else if (f.type === "file.result") {
+      const wait = fileWaits.get(f.file_id);
+      if (wait) {
+        clearTimeout(wait.timeout);
+        fileWaits.delete(f.file_id);
+        if (f.ok) wait.resolve(f); else wait.reject(new Error(f.error || "refused"));
       }
     } else if (f.type === "task.changed") {
       if (!taskBusy) refreshTasks();
@@ -1363,13 +1490,26 @@ function connect() {
   ws.onerror = () => ws.close();
 }
 
-function submit() {
+let submitting = false;
+async function submit() {
   const t = text.value.trim();
-  if (!t) return;
-  if (!say(t)) return; // not connected — keep the draft; the banner says why
-  text.value = "";
-  text.style.height = "auto";
-  text.focus();
+  if (submitting || (!t && !pending.length)) return;
+  submitting = true;
+  sendBtn.disabled = true;
+  try {
+    let files = [];
+    try { files = await uploadPending(); }
+    catch (error) { addRow("event", "a file was not sent: " + error.message, Date.now() / 1000); return; }
+    if (!say(t || "(see the attached files)", files)) return; // not connected — keep the draft; the banner says why
+    pending.length = 0;
+    renderPending();
+    text.value = "";
+    text.style.height = "auto";
+  } finally {
+    submitting = false;
+    sendBtn.disabled = !ws || ws.readyState !== WebSocket.OPEN;
+    text.focus();
+  }
 }
 
 sendBtn.addEventListener("click", submit);

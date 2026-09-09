@@ -94,6 +94,7 @@ CATALOG: dict[str, FrameSpec] = {
             "seq": "int", "epoch": "str", "acks": "bool", "resumed": "bool",
             "muted": "bool", "state": "str", "agents": "list", "history": "list",
             "world": "dict", "speakback": "bool", "tasks": "bool",
+            "files": "bool", "upload_bytes": "int",
         },
     ),
     "ping": FrameSpec("both", optional={"t_wall": "num"}),
@@ -105,8 +106,13 @@ CATALOG: dict[str, FrameSpec] = {
     "say": FrameSpec(
         "c2h",
         required={"text": "str"},
-        optional={"seq": "int", "lane": "str", "say_id": "str", "request_id": "str", "owner_input": "bool"},
+        optional={"seq": "int", "lane": "str", "say_id": "str", "request_id": "str", "owner_input": "bool", "files": "list"},
     ),
+    # A file the Chart sends ahead of a say: the page mints ``file_id``,
+    # the hub stores the bytes owner-only inside the brain's workspace and
+    # answers ``file.result``; the say then names the ids it carries.
+    "file.put": FrameSpec("c2h", required={"file_id": "str", "name": "str", "mime": "str", "data": "str"}, optional={"size": "int"}),
+    "file.result": FrameSpec("h2c", required={"file_id": "str", "ok": "bool"}, optional={"error": "str", "name": "str", "size": "int"}),
     "note.save": FrameSpec("c2h", required={"note_id": "str", "text": "str"}),
     "note.result": FrameSpec("h2c", required={"note_id": "str", "ok": "bool"}, optional={"error": "str"}),
     "task.request": FrameSpec("c2h", required={"request_id": "str", "operation": "str"},
@@ -299,6 +305,14 @@ def validate(frame: Any, direction: Direction) -> dict[str, Any]:
     for name in ('say_id', 'request_id'):
         if kind == 'say' and name in frame and frame[name] is not None and not 0 < len(frame[name]) <= 256:
             raise WireError('message identity is missing or too long')
+    if kind == 'say' and frame.get('files') is not None:
+        if len(frame['files']) > 16 or any(not isinstance(f, str) or not 0 < len(f) <= 64 for f in frame['files']):
+            raise WireError('a say names at most sixteen files by bounded id')
+    if kind in ('file.put', 'file.result'):
+        if not 0 < len(frame['file_id']) <= 64:
+            raise WireError('file identity is missing or too long')
+        if kind == 'file.put' and (not 0 < len(frame['name']) <= 512 or len(frame['mime']) > 128):
+            raise WireError('file name or type is missing or too long')
     return frame
 
 

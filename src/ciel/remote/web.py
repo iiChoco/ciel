@@ -91,6 +91,12 @@ protocol and never knows what is drawing it.
     never voided. At-least-once on purpose: the ack rides the outbound
     queue, so a connection dying between the two can double a line —
     a visible, cheap failure where the void was a silent one.
+  * ``{"type": "file.put", "file_id": str, "name": str, "mime": str,
+    "data": str}`` — one file, base64, ahead of the say that will name
+    it. Answered with ``file.result`` ``{"file_id", "ok", "error"|"name",
+    "size"}`` to the sender alone; a say carries ``"files": [file_id…]``.
+    Stored owner-only under the brain's workspace, sniffed for its real
+    type, bounded by the hello's ``upload_bytes``.
   * ``{"type": "ping"}`` — a liveness probe, answered with ``pong``.
     For the same half-open sockets: protocol-level pings are invisible
     to page script, so a page returning from a nap asks at the app
@@ -128,11 +134,14 @@ dropped alone. The GUI must never be able to take Ciel down with it.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import hmac
 import ipaddress
 import json
 import logging
+import re
 import os
 import secrets
 import time
@@ -148,7 +157,7 @@ from ciel.config import HubConfig, WebConfig
 if TYPE_CHECKING:
     from ciel.interview.app import InterviewApp
 
-from ciel.turn import Ingress, TurnBatch, owner_origin, pop_turn_batch
+from ciel.turn import Attachment, Ingress, TurnBatch, owner_origin, pop_turn_batch
 from ciel.task_controls import TaskController
 from ciel.task_context import TaskBinding
 
@@ -279,6 +288,44 @@ def _mint_token(path: Path) -> str:
     return token
 
 
+_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"%PDF-", "application/pdf"),
+)
+_MIME = re.compile(r"[a-z0-9.+-]+/[a-z0-9.+-]+")
+
+
+def _sniff(data: bytes, claimed: str) -> str:
+    """What the bytes are. Images and PDFs are known by their first bytes,
+    and a claimed image that does not start like one is not an image; a
+    text-shaped claim is kept, since the prompt decodes it strictly before
+    quoting it; anything else is an octet stream."""
+    for magic, mime in _MAGIC:
+        if data.startswith(magic):
+            return mime
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    claimed = claimed.strip().lower()
+    if _MIME.fullmatch(claimed) and not claimed.startswith("image/") and claimed != "application/pdf":
+        return claimed
+    return "application/octet-stream"
+
+
+def _safe_name(raw: str) -> str:
+    """A basename that cannot leave the uploads folder or confuse a shell."""
+    base = Path(raw.replace("\\", "/")).name
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "_", base).strip(" ._")
+    if not cleaned:
+        return "file"
+    if len(cleaned) > 100:
+        stem, dot, ext = cleaned.rpartition(".")
+        cleaned = (stem[: 100 - len(ext) - 1] + dot + ext) if dot and len(ext) <= 12 else cleaned[:100]
+    return cleaned
+
+
 class WebLink:
     """The GUI's server half: a turn queue, a broadcast fan-out, a page."""
 
@@ -292,6 +339,11 @@ class WebLink:
         self.task_owner = "local-owner"
         self._task_controller: TaskController | None = None
         self._task_requests: set[asyncio.Task[None]] = set()
+        self._uploads: Path | None = None
+        """Where the Chart's files land, inside the brain's workspace; None
+        until the pipeline binds it, and then the hello says files are taken."""
+        self._files: dict[str, Attachment] = {}
+        """Files this process stored, by the page's id; a say names them."""
         self._hub = hub or HubConfig()
         self._interview = interview
         """The interview room, when the hub serves one: its routes ride
@@ -350,6 +402,71 @@ class WebLink:
         """Set by the pipeline: the GUI's restart button calls here.
         The same ownership rule as on_mute — the re-exec belongs to the
         pipeline's frame loop; the link only relays the request."""
+
+    def bind_uploads(self, directory: Path) -> None:
+        """Take files from the Chart into ``directory``, created owner-only."""
+        self._uploads = directory.expanduser()
+
+    def _store_file(self, frame: dict[str, Any], ws: Any) -> None:
+        """One file from an admitted page, saved before its say arrives.
+
+        The id is the page's, the name is reduced to a safe basename, the
+        type is what the bytes say they are, and the file is written
+        owner-only with an exclusive create so a resend of the same id
+        answers with the record already made. Every refusal is a sentence
+        back to the page and nothing on disk.
+        """
+        file_id = str(frame.get("file_id", ""))
+        def refuse(reason: str) -> None:
+            self._send_to(ws, {"type": "file.result", "file_id": file_id, "ok": False, "error": reason})
+        if ws not in self._peers or ws not in self._clients:
+            return
+        if self._uploads is None:
+            refuse("This server does not take files.")
+            return
+        if not re.fullmatch(r"[0-9a-f]{32}", file_id):
+            refuse("The file id is not one the page mints.")
+            return
+        if file_id in self._files:
+            known = self._files[file_id]
+            self._send_to(ws, {"type": "file.result", "file_id": file_id, "ok": True, "name": known.name, "size": known.size})
+            return
+        name = _safe_name(str(frame.get("name", "")))
+        try:
+            data = base64.b64decode(str(frame.get("data", "")), validate=True)
+        except (binascii.Error, ValueError):
+            refuse("The file did not decode.")
+            return
+        if not data:
+            refuse("The file is empty.")
+            return
+        if len(data) > self._config.max_upload_bytes:
+            refuse(f"Files are limited to {self._config.max_upload_bytes // (1024 * 1024)} MB.")
+            return
+        mime = _sniff(data, str(frame.get("mime", "")))
+        path = self._uploads / f"{file_id}-{name}"
+        try:
+            self._uploads.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(data)
+            except BaseException:
+                path.unlink(missing_ok=True)
+                raise
+        except OSError:
+            log.warning("could not save a Chart file", exc_info=True)
+            refuse("The file could not be saved.")
+            return
+        self._files[file_id] = Attachment(name, mime, str(path), len(data))
+        self._send_to(ws, {"type": "file.result", "file_id": file_id, "ok": True, "name": name, "size": len(data)})
+
+    def _attachments_for(self, ids: Any) -> tuple[tuple[Attachment, ...], int]:
+        """The stored files a say names, and how many it named that are not here."""
+        if not isinstance(ids, list) or not ids:
+            return (), 0
+        found = [self._files[i] for i in ids if isinstance(i, str) and i in self._files]
+        return tuple(found[: self._config.max_files_per_turn]), len(ids) - len(found)
 
     def bind_tasks(self, controller: TaskController) -> None:
         self._task_controller = controller
@@ -668,7 +785,9 @@ class WebLink:
             )
             raise web.HTTPForbidden
 
-        ws = web.WebSocketResponse(heartbeat=30.0)
+        # Room for one file as base64 plus its frame; anything larger is the
+        # socket's refusal, before a byte reaches the store.
+        ws = web.WebSocketResponse(heartbeat=30.0, max_msg_size=self._config.max_upload_bytes * 4 // 3 + 65536)
         await ws.prepare(request)
         peer = request.remote
 
@@ -774,6 +893,8 @@ class WebLink:
             "seq": self._ring.seq,
             "acks": True,
             "tasks": True,
+            "files": self._uploads is not None,
+            "upload_bytes": self._config.max_upload_bytes,
             "resumed": replay is not None,
             "muted": self._muted,
             "speakback": self._speak_back,
@@ -833,6 +954,11 @@ class WebLink:
                     # poison the sender's own receipt stream.
                     self._send_to(ws, {"type": "ack", "seq": seq})
                 text = str(frame.get("text", "")).strip()
+                attachments, missing = self._attachments_for(frame.get("files")) if ws in self._peers else ((), 0)
+                if missing:
+                    self.note_row("event", f"{missing} attachment{'s' if missing != 1 else ''} not found on the server; send them again")
+                if not text and attachments:
+                    text = "(see the attached files)"
                 if not text:
                     return
                 if len(text) > self._config.max_inbound_chars:
@@ -841,7 +967,9 @@ class WebLink:
                 origin = None
                 if ws in self._peers and isinstance(identity, str) and identity:
                     origin = owner_origin(self.task_owner, 'web', identity, namespace='chart')
-                self._queue.append(Ingress(time.monotonic(), text, None, origin))
+                self._queue.append(Ingress(time.monotonic(), text, None, origin, attachments))
+            elif kind == "file.put":
+                self._store_file(frame, ws)
             elif kind == "ping":
                 self._send_to(ws, {"type": "pong"})
             elif kind == "mute":

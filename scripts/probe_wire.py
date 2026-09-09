@@ -61,6 +61,8 @@ def refused(raw: str, direction: wire.Direction) -> bool:
 SAMPLES: dict[str, dict] = {
     "hello": {"v": 1, "role": "chart", "token": "t", "client_id": "c",
               "caps": ["acks"], "resume": {"epoch": "e", "seq": 3}},
+    'file.put': {'file_id': 'b' * 32, 'name': 'notes.txt', 'mime': 'text/plain', 'data': 'aGk=', 'size': 2},
+    'file.result': {'file_id': 'b' * 32, 'ok': True, 'name': 'notes.txt', 'size': 2},
     'note.save': {'note_id': 'a' * 32, 'text': 'A thought'},
     'note.result': {'note_id': 'a' * 32, 'ok': True},
     'task.request': {'request_id': 'r', 'operation': 'list'},
@@ -115,6 +117,14 @@ def probe_codec() -> None:
           refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'mandate_pause', 'revision': 1}), 'c2h')
           and refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'grant_revoke', 'grant_id': 'g'}), 'c2h')
           and not refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'grant_revoke', 'grant_id': 'g', 'revision': 2}), 'c2h'))
+    check('a say names at most sixteen files by bounded id',
+          not refused(json.dumps({'type': 'say', 'text': 'see', 'files': ['f' * 32]}), 'c2h')
+          and refused(json.dumps({'type': 'say', 'text': 'see', 'files': ['f'] * 17}), 'c2h')
+          and refused(json.dumps({'type': 'say', 'text': 'see', 'files': [3]}), 'c2h'))
+    check('a file frame carries a bounded id and name',
+          refused(json.dumps({'type': 'file.put', 'file_id': '', 'name': 'x', 'mime': 'text/plain', 'data': 'aGk='}), 'c2h')
+          and refused(json.dumps({'type': 'file.put', 'file_id': 'f' * 32, 'name': 'x' * 513, 'mime': 'text/plain', 'data': 'aGk='}), 'c2h')
+          and not {'file.put', 'file.result'} & wire.BROADCAST_TYPES)
     check('the notice switch needs no record and no revision',
           not refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'notices_mute'}), 'c2h')
           and not refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'notices_unmute'}), 'c2h'))

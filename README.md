@@ -629,6 +629,10 @@ uv sync --extra web
 [web]
 enabled = true
 # port = 8765        # the page lives at http://127.0.0.1:8765
+# max_upload_bytes = 8388608   # the largest file the page may send with a message
+# max_files_per_turn = 8       # files one message may carry
+# max_inline_chars = 16000     # a text file this small is quoted into the prompt as data
+# image_prompt_chars = 900000  # the base64 budget for images shown to the model in one turn
 ```
 
 **Mute** is the reason this exists. While muted, Ciel holds its tongue
@@ -649,6 +653,25 @@ turns count as presence, unlike Discord ones. The one browser-shaped hole
 (any web page may try `ws://127.0.0.1`) is closed by an Origin check:
 pages from other origins are refused before a frame is read. Think hard
 before widening `host`; there is no account id here to gate on.
+
+**Files with a message.** The FILE button, a paste, or a drop puts files
+beside the composer as chips; SEND uploads them ahead of the words, each as
+its own `file.put` frame answered by id, and the say names the ids it
+carries. The page scales an image down to 1568 pixels on its long edge as
+a JPEG before it leaves, so a screenshot arrives well under the model's
+line budget; other files arrive as they are, up to `max_upload_bytes`. The
+server keeps nothing it was not told: the name is reduced to a safe
+basename, the type is what the first bytes say it is (a claimed image that
+does not begin like one is an octet stream), and the file is written
+owner-only under `[files].workspace/uploads`, where the brain's own file
+tools can open it. The model is told each file's name, type, size, and
+path with a note that their contents are data, never instructions; a text
+file under `max_inline_chars` is quoted there, an image within
+`image_prompt_chars` of base64 is shown to it, and anything past either
+bound is named for it to read. The transcript row names what was attached
+and never its contents, and a public Discord turn never carries a file.
+The hello says whether the server takes files and how large; an older
+server hides the button.
 
 **A native app later** is already provided for: the page speaks a small
 JSON protocol over one WebSocket, documented at the top of
@@ -1418,12 +1441,28 @@ passive listener: the backslash pair also reaches the app you were typing in.
 Set `double_backslash = false` to keep only the command chord, or set
 `shortcut = ""` to keep only the pair. Bindings name physical ANSI positions.
 
-**Enter** adds a line. **Shift–Enter** or the Save button puts the note into
-Invariant as a reference, preserving its wording and paragraphs without a
-model call. A green receipt appears before the window tucks away and returns
-focus. **Escape** or × hides the window with the draft intact. Tab reaches Save
-and the hide button. Ask Ciel later, for example, “Find my note about the moon
-garden”; notes use the ordinary memory index and `recall` keyword search.
+The window follows the Quick Note Prototype supplied on 2026-09-09: a
+560-point cut-corner bar with a gold dot and an inline save hint. Native colours
+use the prototype's sRGB space, preserving its dark ground and accents. The editor
+grows with the thought up to 180 points, then scrolls. Hover reveals the
+character count, **Tuck away**, and **Save**; Tab reveals the same controls
+and focuses Save, with a cyan focus border. A narrow window puts the count
+on its own row. Drag the bar's background to move it; reopening keeps that
+position for the life of the window process.
+
+**Command–A** selects the whole note; **Command–X/C/V** cut, copy, and paste
+through the native text editor. These shortcuts act while the editor has
+focus and is editable, including after a failed save restores the draft.
+
+**Enter** adds a line. **Shift–Enter** or Save puts the note into Invariant as
+a reference, preserving its wording and paragraphs without a model call.
+While saving, the bar folds to a single line with a breathing gold dot and a
+progress label. A real receipt shows “Saved to memory.” in green for 1.1
+seconds, then tucks the window away and returns focus. A failure restores the
+editor, turns the dot and border red, and keeps the error and **Retry** visible
+even without hover. **Escape** or Tuck away hides the window with the draft
+intact. Ask Ciel later, for example, “Find my note about the moon garden”;
+notes use the ordinary memory index and `recall` keyword search.
 
 The draft lives in `notes.dir/draft.json`, owner-only, and reopens after a
 restart. In split mode the hub writes `memory.dir/note-<id>.md`; local mode
@@ -2217,7 +2256,7 @@ uv run --no-sync python scripts/probe_hub_imports.py # Linux imports and tempora
 uv run --no-sync python scripts/probe_shellguard.py  # confirmation and mutating command options
 uv run --no-sync python scripts/probe_shortcuts.py   # global Mac controls, note chord and backslash pair, lifecycle, interruption, mute
 uv run --no-sync python scripts/probe_notes.py       # private drafts, memory, retry receipts, both voice paths; temporary state only
-uv run --no-sync python scripts/probe_note_window.py # macOS native editor: focus, newlines, save, retry, Escape, narrow layout
+uv run --no-sync python scripts/probe_note_window.py # compact native bar: growth, hover/keyboard controls, save, retry, Escape, narrow layout
 uv run --no-sync python scripts/probe_speaker.py     # Barn Door: diagnostic policy, private readings, both voice paths
 uv run --no-sync python scripts/probe_files.py       # file/search boundaries and session credentials
 uv run --no-sync python scripts/probe_tool_rpc.py    # Mac snapshots, undo, and process cancellation
@@ -2226,7 +2265,7 @@ uv run scripts/probe_vigil.py         # Vigil: queue, policy, presence, the Witn
 uv run scripts/probe_discord.py       # the Discord lane's scripted checks
 uv run scripts/probe_discord.py --live  # connect for real and echo your DMs
 uv run scripts/probe_discord.py --send hi  # send one DM and exit
-uv run scripts/probe_web.py           # the GUI lane: queue, origin gate, mute relay, roster
+uv run scripts/probe_web.py           # the GUI lane: queue, origin gate, mute relay, roster, files with a message
 uv run scripts/probe_web.py --live    # serve the real page and echo, no mic or model
 uv run scripts/probe_grants.py        # capability granting: catalog + surgery
 uv run scripts/probe_stt.py           # the speech gate; transcript filters: hallucinations, loops

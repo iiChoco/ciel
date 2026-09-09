@@ -2,6 +2,117 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — A file can come with the words
+
+**Why.** The Chart could carry words and nothing else. A screenshot, a
+PDF, a CSV: each had to be described instead of shown, and "look at this"
+meant the screen tool on the Mac or nothing at all from a phone.
+
+**What.**
+
+- *The page sends the file ahead of the say.* A FILE button, a paste, or a
+  drop makes chips beside the composer; SEND uploads each as its own
+  `file.put` frame, answered by id, and the say names the ids. The ledger
+  keeps them with the words, so a resend after a reconnect still points at
+  what was stored. Images are scaled to 1568 pixels on the long edge as JPEG
+  on the page; the hub never resizes. The hello says whether files are
+  taken and how large, and an older server hides the button.
+- *The server keeps nothing it was not told.* The name is reduced to a safe
+  basename, the type is what the first bytes say it is, the size is bounded
+  by `[web].max_upload_bytes`, and the file is written owner-only with an
+  exclusive create under `[files].workspace/uploads`, where the brain's file
+  tools can reach it. A resend of an id answers with the record already
+  made; an unadmitted socket stores nothing; an id the server does not hold
+  is dropped and the page told in a row.
+- *The model is shown what fits and told about the rest.* Every attachment
+  is named with type, size, and path under a note that its contents are
+  data, never instructions. A text file under `max_inline_chars` is quoted;
+  an image within `image_prompt_chars` of base64 rides beside the words as
+  an image block in one user message, the SDK's streaming shape; anything
+  larger is named for the model to open. The transcript row names what was
+  attached and never its contents; a public turn never carries a file.
+
+**Probes.** `probe_web.py 45 → 59: the hello before and after binding, an
+owner-only file under a safe name with its size answered, a resend that
+rewrites nothing, sniffed images and octet streams, bad base64, empty and
+oversized files, an unminted id, an unadmitted socket, a say with files,
+files alone, an id not held, a burst keeping its files, and the per-turn
+bound. probe_turns.py 80 → 88: the attachment note, quoting, budgets, the
+image message's shape, a web turn handing the brain the picture, and the
+transcript row. probe_wire.py 80 → 83: the file frames and the say's file
+list.` Rerun unchanged: probe_hub_arbiter.py 61, probe_hub_imports.py 6,
+probe_task_wire.py 28, probe_confirm_wire.py 17; hub import clean; the
+spoke reloaded to ready. Visual: the live echo page served with an uploads
+folder; the button, chips, a sent image and text file echoed with their
+types, and the narrow layout were checked in the browser.
+
+## 2026-09-09 — The whole thought can be selected
+
+**Why.** Command–A did nothing in the floating note. The accessory process
+has no Edit menu, and its text view did not handle the command shortcut path.
+
+**What.**
+
+- *The editor receives its familiar commands.* Command–A selects all;
+  Command–X/C/V reach the native cut, copy, and paste actions. Dispatch is
+  limited to the focused, editable editor, respects text composition, and
+  leaves extra modifier combinations to AppKit. The reproduction is in
+  `reports/2026-09-09-note-edit-shortcuts.md`.
+
+**Probes.** `probe_note_window.py 41 → 48: window-level Select All, Unicode
+and Caps Lock, selection replacement persisted to the draft, clipboard action
+dispatch, extra modifiers, button focus, and editing blocked during a save.`
+The Select All check failed before the fix. Clipboard dispatch uses spies
+on the temporary editor, without reading or changing the owner's clipboard.
+
+## 2026-09-09 — The dark ground keeps its shade
+
+**Why.** The native quick note looked lighter and bluer than the supplied
+design. Its hex tokens were being interpreted as macOS calibrated RGB:
+the intended sRGB background `#0a1620` became approximately `#091d2b`.
+
+**What.**
+
+- *The same numbers mean the same colour.* The note's shared colour helper
+  now explicitly uses sRGB for text, layers, and controls, preserving the
+  prototype's palette and opacity. The reproduction and measured values
+  are in `reports/2026-09-09-note-colours.md`.
+
+**Probes.** `probe_note_window.py 37 → 41: background, editor and hint,
+error red, and receipt greens match the prototype in sRGB.`
+The new background check failed before the fix. Native hover, saved, and
+narrow error renders were reviewed; the spoke reloaded to ready.
+
+## 2026-09-09 — A thought needs only a line
+
+**Why.** The first quick-note window gave a passing thought a whole sheet.
+The owner's Quick Note Prototype puts the blank line within reach and reveals
+more room and controls only when they are useful.
+
+**What.**
+
+- *A bar that grows with the thought.* The native window follows the supplied
+  prototype: 560 points wide, cut corners, a gold dot, 17-point system text,
+  and an inline save hint. Paragraphs expand the editor to 180 points before
+  it scrolls. The Chart's Instrument palette remains unchanged.
+- *Controls arrive with attention.* Hover reveals the count, Tuck away, and
+  Save. Tab reveals and focuses the controls too, retaining them while they
+  have keyboard focus. Narrow windows give the count its own row. The top
+  edge stays still as the bar grows, and reopening keeps its dragged position.
+- *Memory still owes the receipt.* Saving folds the bar to one line with a
+  breathing gold dot. A successful receipt becomes a green serif line before
+  tucking away; a failed save restores the editor with a red border, wrapped
+  error, and Retry that stays visible without hover. Draft retention, private
+  memory writes, and the global shortcuts keep their existing paths.
+
+**Probes.** `probe_note_window.py 19 → 37: compact height, paragraph growth,
+scrolling, hover and keyboard disclosure, focus retention, compact progress
+and success, pinned retry, reopening during a receipt, narrow error wrapping,
+length limits without truncation, and position preservation. probe_notes.py
+34 and probe_shortcuts.py 66 pass unchanged.` Native renders reviewed at
+560 and 400 points: empty, multiline, hover, keyboard focus, saving, saved,
+error, narrow error, and long-note states. The spoke reloaded to ready.
+
 ## 2026-09-09 — The keyboard is asked only where there is one
 
 **Why.** Every hub restart since 2026-09-06 logged a `PermissionError`

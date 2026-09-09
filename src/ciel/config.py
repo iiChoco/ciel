@@ -1490,6 +1490,23 @@ class WebConfig:
     lane's bound, for the Discord lane's reason: this limits pastes, not
     conversation."""
 
+    max_upload_bytes: int = 8 * 1024 * 1024
+    """The largest file the Chart may send with a message. Images are
+    scaled down by the page before they leave it; other files arrive as
+    they are and are saved owner-only under the brain's workspace."""
+
+    max_files_per_turn: int = 8
+    """Files one message may carry; more are dropped with the page told so."""
+
+    max_inline_chars: int = 16000
+    """A text file this small is quoted into the prompt as data; a longer
+    one is named by path for the model to read if it needs to."""
+
+    image_prompt_chars: int = 900000
+    """The base64 budget for images shown to the model in one turn; the
+    SDK carries a turn on one line of about a megabyte, so what does not
+    fit is named by path instead of shown."""
+
     history_lines: int = 200
     """How many recent transcript rows a connecting client is caught up
     with. Session-scoped and in-memory: the GUI opening mid-conversation

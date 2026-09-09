@@ -29,7 +29,7 @@ import time
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import replace
 from types import TracebackType
-from typing import AsyncIterator, Awaitable, Callable, Self
+from typing import AsyncIterator, Awaitable, Callable, Self, Any
 
 from claude_agent_sdk import (
     AgentDefinition,
@@ -82,6 +82,19 @@ screenshots in a tool result overflow (2026-09-05: 'JSON message exceeded
 maximum buffer size', and the brain never heard another word). Sixty-four
 is a bound on memory per line, not a target; the screen tool keeps its own
 payload far under it."""
+
+async def user_message(text: str, images: tuple[tuple[str, str], ...]) -> AsyncIterator[dict[str, Any]]:
+    """One user turn with pictures in it, in the SDK's streaming shape.
+
+    A string prompt is text alone; images ride as base64 content blocks
+    beside the text, in one message, the way the Messages API takes them.
+    The caller has already kept the whole thing under the SDK's line budget.
+    """
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for media_type, data in images:
+        content.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}})
+    yield {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
+
 
 class Brain:
     """A conversational Claude session that yields speakable sentences."""
@@ -673,7 +686,8 @@ class Brain:
 
     # ── the conversational turn ──────────────────────────────────────────────
 
-    async def ask(self, text: str, *, origin: Origin | None = None, public_audience: str | None = None) -> AsyncIterator[tuple[str, str]]:
+    async def ask(self, text: str, *, origin: Origin | None = None, public_audience: str | None = None,
+                  images: tuple[tuple[str, str], ...] = ()) -> AsyncIterator[tuple[str, str]]:
         """Send a user turn; yield ``(kind, sentence)`` as they become available.
 
         ``kind`` is ``"thinking"`` for spoken reasoning and ``"reply"`` for the
@@ -733,7 +747,7 @@ class Brain:
             await self._drain_stale()
             if origin is not None and not self._needs_drain and not self._unattended.engaged and not self._public_mode:
                 self._task_authority.install(origin)
-            await self._client.query(text)
+            await self._client.query(user_message(text, images) if images else text)
             query_sent = True
             self._owed_results += 1
 
