@@ -129,5 +129,11 @@ async def dismiss_candidate(args: dict[str, Any]) -> dict[str, Any]:
     return await _call('inbox_dismiss', args)
 
 
+@tool('approve_proposal', 'Approve one open proposal to move or remove an event Ciel added, only when the owner explicitly asks: the exact proposal, at the revision shown by inspect_task, becomes one task whose scope is that operation alone, sent at the event\'s current version so an edit of yours is never overwritten. Use the proposal key from inspect_task.',
+      {'type': 'object', 'properties': {'proposal': {'type': 'string'}}, 'required': ['proposal'], 'additionalProperties': False})
+async def approve_proposal(args: dict[str, Any]) -> dict[str, Any]:
+    return await _call('inbox_approve', args)
+
+
 TASK_TOOLS = [create_task, list_tasks, inspect_task, pause_task, resume_task, answer_task, cancel_task, pause_mandate, resume_mandate, revoke_grant,
-              mute_task_notices, unmute_task_notices, preview_inbox, add_event_from_mail, dismiss_candidate]
+              mute_task_notices, unmute_task_notices, preview_inbox, add_event_from_mail, dismiss_candidate, approve_proposal]

@@ -2,6 +2,48 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — A change is a proposal until the owner says so
+
+**Why.** An event added from one message is later moved or cancelled by
+another. A create-only grant must not act on that, and an owner who edited
+the event by hand must never be overwritten. The plan's last milestone: the
+change as an inert proposal, one task from the owner's approval of exactly
+it, sent at the event's version.
+
+**What.**
+
+- *A proposal on the event record.* The extraction schema's commitment
+  gains `cancelled`; a later message from the sender of an added event,
+  about it by title, becomes an inert `proposal` record naming the update or
+  the removal, its message, and its excerpts. Nothing is derived; the
+  create's receipt stands; a newer message supersedes the open proposal,
+  kept under its source's key. A moved commitment with no original on
+  record is review, never a fresh add.
+- *One task from one approval.* `approve_proposal` and the controller's
+  request door make the task and mark the proposal approved at its revision
+  in one transaction, the task's origin carrying the approval as its
+  authority; a stale or repeated approval makes no task.
+- *Sent at the version, only what was proposed.* `calendar.update` and
+  `calendar.delete` join the adapter as plan, send, and reconcile: the plan
+  reads the event's version, the send carries it, Google's 412 is a failed
+  precondition that is unsent and planned again, and the change touches
+  only the proposed fields, so the owner's edits to others stand. The real
+  client sends conditional PATCH and DELETE with If-Match. The read-back
+  completes on the proposed fields, or on the event being gone.
+
+**Probes.** `probe_email_calendar.py 77 → 89: the original on the calendar,
+a move as an open update proposal with the receipt untouched, a moved
+commitment without an original as review, a newer message superseding the
+open proposal, the approval's one task with the update alone and the
+proposal marked at its revision, a second approval refused, the update sent
+with no question and read back, an edit between plan and send as a failed
+precondition with the edit standing, and a cancellation as a removal sent at
+the version and read back as gone.` Rerun unchanged: probe_task_runner.py
+25, probe_task_dispatch.py 37, probe_task_authority.py 93,
+probe_task_wire.py 28, probe_task_tools.py 24, probe_turns.py 88,
+probe_hub_arbiter.py 61, probe_hub_imports.py 6; hub import clean; the
+spoke reloaded to ready.
+
 ## 2026-09-09 — Automatic means the same, without the question
 
 **Why.** A candidate could be added by hand, one approval each. The plan's

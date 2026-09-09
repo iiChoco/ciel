@@ -1031,8 +1031,15 @@ class Pipeline:
                 async def dismiss_candidate(store: Any, owner: str, args: dict[str, Any]) -> Any:
                     from ciel.email_calendar import dismiss
                     return await dismiss(store, owner, str(args.get('candidate') or ''))
+                async def ask_approve(args: dict[str, Any]) -> Any:
+                    from ciel.email_calendar import approve_proposal_request
+                    store = self._task_controller.store
+                    if store is None:
+                        raise ValueError('Tasks are unavailable.')
+                    records = await store.records(config.tasks.owner, adapter.namespace.name)
+                    return approve_proposal_request(config.email_calendar, str(args.get('proposal') or ''), records)
                 self._task_controller.bind_feature(adapter.namespace, adapter.operations,
-                                                   requests={'inbox_preview': ask_preview, 'inbox_add': ask_add},
+                                                   requests={'inbox_preview': ask_preview, 'inbox_add': ask_add, 'inbox_approve': ask_approve},
                                                    controls={'inbox_dismiss': dismiss_candidate},
                                                    summary=adapter.summarize,
                                                    activated=adapter.activated, mandate_changed=adapter.mandate_changed)

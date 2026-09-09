@@ -51,6 +51,17 @@ grant's authority with no question, sending exactly what a per-action add
 would have sent. A candidate that needs review is recorded and not derived.
 Pausing the mandate pauses the watch; revoking the grant ends it.
 
+**A change is a proposal until the owner says so.** A later message from
+the same sender about an event Ciel added, saying it moved or is cancelled,
+never touches the calendar by itself: the watch records an inert proposal on
+the event record, naming the update or the deletion it would take and the
+message it came from, and the create's receipt stays as it was. A create-only
+grant covers neither, so nothing is derived. The owner approves the exact
+proposal, revision and all, and that approval makes one task whose scope is
+the approved operation; the send carries the event's version, so an event the
+owner edited in the meantime is a conflict, not an overwrite. A newer message
+about the same event supersedes the open proposal.
+
 **An event is added once, under a name only Ciel would choose.** Adding a
 candidate is a second finite task the owner asks for: it checks the
 calendars for the event already there, plans one insertion under an event
@@ -83,6 +94,9 @@ import json
 import urllib.parse
 
 from ciel.config import EmailCalendarConfig
+import urllib.error
+import urllib.request
+
 from ciel.gmail import GmailClient
 from ciel.task_runner import Derivation, MutationResult, Outcome, Plan, PreconditionFailed, Preparation, Reconciliation, StepContext
 from ciel.tasks import (Criterion, Evidence, FeatureRecord, GrantLimits, GrantSetup, HumanOrigin, Intent, Mandate, Namespace, RecordSet,
@@ -91,8 +105,8 @@ from ciel.tasks import (Criterion, Evidence, FeatureRecord, GrantLimits, GrantSe
 log = logging.getLogger(__name__)
 
 NAMESPACE_NAME = 'email_calendar'
-OPERATIONS = frozenset({'inbox.read', 'inbox.poll', 'inbox.extract', 'calendar.check', 'calendar.create', 'calendar.verify'})
-CALENDAR_OPERATIONS = frozenset({'calendar.check', 'calendar.create', 'calendar.verify'})
+OPERATIONS = frozenset({'inbox.read', 'inbox.poll', 'inbox.extract', 'calendar.check', 'calendar.create', 'calendar.update', 'calendar.delete', 'calendar.verify'})
+CALENDAR_OPERATIONS = frozenset({'calendar.check', 'calendar.create', 'calendar.update', 'calendar.delete', 'calendar.verify'})
 _DATE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _WHEN = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$')
 
@@ -102,7 +116,7 @@ CANDIDATE_SCHEMA: dict[str, Any] = {
     'additionalProperties': False,
     'properties': {
         'category': {'type': 'string', 'enum': ['confirmation', 'invitation', 'promotion', 'other']},
-        'commitment': {'type': 'string', 'enum': ['confirmed', 'needs_rsvp', 'offer', 'none']},
+        'commitment': {'type': 'string', 'enum': ['confirmed', 'needs_rsvp', 'offer', 'none', 'cancelled']},
         'events': {'type': 'array', 'items': {
             'type': 'object',
             'required': ['title', 'start', 'end', 'timezone', 'location', 'excerpts', 'unresolved'],
@@ -126,7 +140,7 @@ EXTRACTION_PROMPT = (
     'Answer only with the JSON object the schema describes. '
     'category: confirmation (a booking, reservation, or appointment the reader already holds), invitation (the reader must '
     'still accept or decline), promotion (marketing, a newsletter, a suggested or conditional event), or other. '
-    'commitment: confirmed, needs_rsvp, offer, or none. '
+    'commitment: confirmed, needs_rsvp, offer, none, or cancelled (the email says a commitment the reader held is cancelled or moved; for a move, give the new time). '
     'events: one entry per distinct dated event, each with its title, start and end as YYYY-MM-DDTHH:MM in the local time '
     'the email gives, the IANA timezone the email names or an empty string if it names none, the location or an empty '
     'string, excerpts copied word for word from the email that state the date, the time, and the commitment, and '
@@ -217,13 +231,20 @@ class CalendarConflict(CalendarUnavailable):
 
 
 class CalendarSource(Protocol):
-    """One calendar account, read and one write: is it reachable, what is
-    in a window, what is at an id, and insert one event under an id."""
+    """One calendar account: is it reachable, what is in a window, what is
+    at an id, insert one event under an id, and change or remove one only
+    at the version the caller last saw."""
 
     def available(self) -> bool: ...
     def get(self, calendar: str, event_id: str) -> dict[str, Any] | None: ...
     def find(self, calendar: str, time_min: str, time_max: str) -> list[dict[str, Any]]: ...
     def insert(self, calendar: str, body: dict[str, Any]) -> dict[str, Any]: ...
+    def update(self, calendar: str, event_id: str, body: dict[str, Any], etag: str) -> dict[str, Any]: ...
+    def delete(self, calendar: str, event_id: str, etag: str) -> None: ...
+
+
+class CalendarMoved(CalendarUnavailable):
+    """The event's version is not the one the change was planned against."""
 
 
 _CALENDAR_API = 'https://www.googleapis.com/calendar/v3'
@@ -264,6 +285,32 @@ class GoogleCalendar(GmailClient):
             if 'answered 409' in str(exc):
                 raise CalendarConflict(str(exc)) from exc
             raise CalendarUnavailable(str(exc)) from exc
+
+    def _conditional(self, method: str, calendar: str, event_id: str, body: dict[str, Any] | None, etag: str) -> dict[str, Any]:
+        """A change at one version: Google honours If-Match and answers 412
+        when the event moved, which is exactly the answer wanted."""
+        from ciel.gmail import GmailUnavailable
+        url = f'{_CALENDAR_API}/calendars/{urllib.parse.quote(calendar, safe="")}/events/{urllib.parse.quote(event_id, safe="")}'
+        data = json.dumps(body).encode('utf-8') if body is not None else None
+        request = urllib.request.Request(url, data=data, method=method, headers={
+            'Authorization': f'Bearer {self._token()}', 'If-Match': etag, **({'Content-Type': 'application/json'} if data else {})})
+        try:
+            with urllib.request.urlopen(request, timeout=15.0) as response:
+                raw = response.read().decode('utf-8')
+                return json.loads(raw) if raw.strip() else {}
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode('utf-8', errors='replace')[:200]
+            if exc.code == 412:
+                raise CalendarMoved(f'the event moved: {detail}') from exc
+            raise CalendarUnavailable(f'Google answered {exc.code}: {detail}') from exc
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, GmailUnavailable) as exc:
+            raise CalendarUnavailable(str(exc)) from exc
+
+    def update(self, calendar: str, event_id: str, body: dict[str, Any], etag: str) -> dict[str, Any]:
+        return self._conditional('PATCH', calendar, event_id, body, etag)
+
+    def delete(self, calendar: str, event_id: str, etag: str) -> None:
+        self._conditional('DELETE', calendar, event_id, None, etag)
 
 
 def event_id_for(mailbox: str, message_id: str, index: int, calendar: str) -> str:
@@ -513,6 +560,8 @@ def interpret(data: dict[str, Any], message: Normalized, config: EmailCalendarCo
             decision, reason = 'review', 'the cited evidence is not in the message word for word'
         elif category == 'promotion' or commitment in ('offer', 'none'):
             decision, reason = 'ignored', f'{category}: not a commitment'
+        elif commitment == 'cancelled':
+            decision, reason = 'review', 'a change to a commitment; if Ciel added the original, this becomes a proposal on it'
         elif commitment == 'needs_rsvp' or category == 'invitation':
             decision, reason = 'review', 'an invitation; whether to attend is yours'
         elif unresolved:
@@ -562,11 +611,17 @@ def _validate_record(payload: dict[str, Any]) -> None:
     elif kind == 'watch':
         if not isinstance(payload.get('task_id'), str) or not isinstance(payload.get('mandate_id'), str):
             raise ValueError('watch')
+    elif kind == 'proposal':
+        for name in ('event', 'operation', 'source_digest', 'status', 'message_id'):
+            if not isinstance(payload.get(name), str):
+                raise ValueError(name)
+        if payload['operation'] not in ('calendar.update', 'calendar.delete') or payload['status'] not in ('open', 'approved', 'superseded', 'dismissed'):
+            raise ValueError('proposal')
     elif kind == 'event':
         for name in ('candidate', 'calendar', 'event_id', 'digest', 'status'):
             if not isinstance(payload.get(name), str):
                 raise ValueError(name)
-        if payload['status'] not in ('planned', 'adding', 'added', 'present', 'suppressed', 'conflict', 'missing'):
+        if payload['status'] not in ('planned', 'adding', 'added', 'present', 'suppressed', 'conflict', 'missing', 'updated', 'removed'):
             raise ValueError('status')
     else:
         raise ValueError('kind')
@@ -620,7 +675,7 @@ def add_request(config: EmailCalendarConfig, candidate_key: str, records: tuple[
     if not candidate.get('start') or not candidate.get('end') or not candidate.get('timezone') or candidate.get('unresolved'):
         raise ValueError('The candidate is unresolved: ' + (', '.join(candidate.get('unresolved') or []) or 'no time') + '. Settle it first.')
     target = f'calendar:{config.destination_calendar.strip()}'
-    spec = Specification(f'"{candidate.get("title") or "Event"}" is on the calendar', Scope(tuple(sorted(CALENDAR_OPERATIONS)), (target,)),
+    spec = Specification(f'"{candidate.get("title") or "Event"}" is on the calendar', Scope(('calendar.check', 'calendar.create', 'calendar.verify'), (target,)),
                          (Criterion('placed', target, 'on the calendar'),))
     return spec, Step('read', 'calendar.check', target, (('candidate', candidate_key),))
 
@@ -642,6 +697,43 @@ async def dismiss(store: Any, owner: str, candidate_key: str) -> dict[str, Any]:
 def _criterion(ctx: StepContext) -> str:
     """The one criterion an inbox task completes on: the preview's or the watch's."""
     return ctx.task.specification.criteria[0].id
+
+
+def proposal_request(config: EmailCalendarConfig, proposal_key: str, records: tuple[FeatureRecord, ...], approval_ref: str = '') -> tuple[Specification, Step]:
+    """The finite task the owner's approval of one exact proposal makes: the
+    approved operation, and nothing else, on Ciel's own event."""
+    proposal = next((r for r in records if r.key == proposal_key and r.payload.get('kind') == 'proposal'), None)
+    if proposal is None:
+        raise ValueError('No such proposal; see the event\'s record in inspect_task.')
+    if proposal.payload.get('status') != 'open':
+        raise ValueError(f'That proposal is {proposal.payload.get("status")}; only an open one can be approved.')
+    event = next((r for r in records if r.key == proposal.payload['event']), None)
+    if event is None:
+        raise ValueError('The event the proposal is about is gone from the records.')
+    operation = proposal.payload['operation']
+    candidate_key = event.payload['candidate']
+    calendar = event.payload['calendar']
+    target = f'calendar:{calendar}'
+    title = next((r.payload.get('title') for r in records if r.key == candidate_key), 'the event')
+    if operation == 'calendar.delete':
+        outcome, expected = f'"{title}" is off the calendar', 'removed'
+    else:
+        payload = proposal.payload.get('payload') or {}
+        outcome, expected = f'"{title}" is moved to {payload.get("start")} on the calendar', 'changed'
+    spec = Specification(outcome, Scope((operation, 'calendar.verify'), (target,)), (Criterion('placed', target, expected),))
+    return spec, Step('mutation', operation, target, (('candidate', candidate_key), ('proposal', proposal_key)))
+
+
+def approve_proposal_request(config: EmailCalendarConfig, proposal_key: str, records: tuple[FeatureRecord, ...]) -> dict[str, Any]:
+    """What the controller's door needs to make the task in one transaction
+    with the proposal's approval: the specification and step, the record
+    write that marks the proposal approved at exactly its current revision,
+    and the reference the task's origin carries as its authority."""
+    spec, step = proposal_request(config, proposal_key, records)
+    proposal = next(r for r in records if r.key == proposal_key)
+    approval_ref = f'proposal:{proposal_key}:{proposal.revision}'
+    records_set = RecordSet(NAMESPACE_NAME, (RecordWrite(proposal_key, {**proposal.payload, 'status': 'approved', 'approval_ref': approval_ref}, proposal.revision),))
+    return {'specification': spec, 'step': step, 'records': records_set, 'approval_ref': approval_ref}
 
 
 # ── the adapter ──────────────────────────────────────────────────────────────
@@ -751,17 +843,28 @@ class EmailCalendarAdapter:
 
     def _event_context(self, ctx: StepContext) -> tuple[str, dict[str, Any], str, str, dict[str, Any], FeatureRecord | None]:
         """The candidate a calendar step is about, its calendar, its id, its
-        body, and the event record so far."""
+        body, and the event record so far. For a change, the body carries the
+        proposal's fields over the candidate's, and ``self._proposed`` names
+        which fields the proposal set, so the send and the read-back touch
+        those and leave the owner's other edits alone."""
+        self._proposed: dict[str, Any] = {}
         arguments = dict(ctx.task.next_step.arguments)
         key = arguments.get('candidate', '')
         record = next((r for r in ctx.records if r.key == key and r.payload.get('kind') == 'candidate'), None)
         if record is None:
             raise ValueError('the candidate is gone from the records')
-        candidate = record.payload
+        candidate = dict(record.payload)
         calendar = ctx.task.next_step.target.removeprefix('calendar:')
         mailbox = self._config.mailbox.strip().lower() or 'unknown'
         index = int(key.rsplit(':', 1)[-1]) if key.rsplit(':', 1)[-1].isdigit() else 0
         event_id = event_id_for(mailbox, str(candidate['message_id']), index, calendar)
+        proposal_key = arguments.get('proposal', '')
+        if proposal_key:
+            proposal = next((r.payload for r in ctx.records if r.key == proposal_key), None)
+            if proposal is None:
+                raise ValueError('the proposal is gone from the records')
+            self._proposed = {k: v for k, v in (proposal.get('payload') or {}).items() if v}
+            candidate.update(self._proposed)
         body = calendar_body(candidate, event_id, key)
         existing = next((r for r in ctx.records if r.key == f'event:{key}'), None)
         return key, candidate, calendar, event_id, body, existing
@@ -815,28 +918,56 @@ class EmailCalendarAdapter:
     async def plan(self, ctx: StepContext) -> Plan:
         assert self._calendar is not None
         key, candidate, calendar, event_id, body, existing = self._event_context(ctx)
+        operation = ctx.task.next_step.operation
         current = self._calendar.get(calendar, event_id)
         state = 'absent' if current is None else ('cancelled' if current.get('status') == 'cancelled' else ('ours' if _owned(current) else 'foreign'))
-        if state != 'absent':
-            raise PreconditionFailed(f'the event id is {state} on the calendar')
         verify = Step('read', 'calendar.verify', ctx.task.next_step.target, ctx.task.next_step.arguments)
-        return Plan(payload=body, preconditions={'event_id': event_id, 'existing': state},
-                    recipe={'calendar': calendar, 'event_id': event_id, 'digest': _owned(body) or '', 'candidate': key}, verify=verify)
+        if operation == 'calendar.create':
+            if state != 'absent':
+                raise PreconditionFailed(f'the event id is {state} on the calendar')
+            return Plan(payload=body, preconditions={'event_id': event_id, 'existing': state},
+                        recipe={'calendar': calendar, 'event_id': event_id, 'digest': _owned(body) or '', 'candidate': key, 'operation': operation}, verify=verify)
+        # A change or a removal: only Ciel's own event, only at the version
+        # read now; the send carries that version and fails if it moved.
+        if state != 'ours':
+            raise PreconditionFailed(f'the event is {state} on the calendar; nothing to change')
+        assert current is not None
+        etag = str(current.get('etag') or '')
+        fields = [k for k in ('start', 'end', 'location') if k in self._proposed]
+        payload = {} if operation == 'calendar.delete' else {k: body[k] for k in fields}
+        return Plan(payload={'operation': operation, 'etag': etag, **payload}, preconditions={'event_id': event_id, 'etag': etag},
+                    recipe={'calendar': calendar, 'event_id': event_id, 'digest': _owned(body) or '', 'candidate': key, 'operation': operation,
+                            'etag': etag}, verify=verify)
 
     async def mutate(self, ctx: StepContext, intent: Intent, plan: Plan) -> MutationResult:
         """Send once. A conflict on the id is success only if what is there is
-        this event; anything else is an outcome nobody can vouch for."""
+        this event; a change or a removal goes at the version it was planned
+        against, and a moved version is a precondition that failed, unsent."""
         assert self._calendar is not None
         calendar, event_id, digest, key = intent.recipe['calendar'], intent.recipe['event_id'], intent.recipe['digest'], intent.recipe['candidate']
+        operation = intent.recipe.get('operation', 'calendar.create')
         existing = next((r for r in ctx.records if r.key == f'event:{key}'), None)
+        if operation == 'calendar.create':
+            try:
+                created = self._calendar.insert(calendar, plan.payload)
+            except CalendarConflict:
+                current = self._calendar.get(calendar, event_id)
+                if current is None or current.get('status') == 'cancelled' or _owned(current) != digest:
+                    raise
+                created = current
+            return MutationResult(records=RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'adding', existing, ctx.task.id, str(created.get('etag') or '')),)))
+        etag = str(intent.recipe.get('etag') or '')
         try:
-            created = self._calendar.insert(calendar, plan.payload)
-        except CalendarConflict:
-            current = self._calendar.get(calendar, event_id)
-            if current is None or current.get('status') == 'cancelled' or _owned(current) != digest:
-                raise
-            created = current
-        return MutationResult(records=RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'adding', existing, ctx.task.id, str(created.get('etag') or '')),)))
+            if operation == 'calendar.delete':
+                self._calendar.delete(calendar, event_id, etag)
+                changed: dict[str, Any] = {}
+            else:
+                changed = self._calendar.update(calendar, event_id, {k: v for k, v in plan.payload.items() if k not in ('operation', 'etag')}, etag)
+        except CalendarMoved as exc:
+            raise PreconditionFailed(str(exc)) from exc
+        status = 'removing' if operation == 'calendar.delete' else 'adding'
+        return MutationResult(records=RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'adding' if status == 'adding' else 'added', existing, ctx.task.id,
+                                                                                    str(changed.get('etag') or etag), note='change sent' if operation == 'calendar.update' else 'removal sent'),)))
 
     async def reconcile(self, ctx: StepContext, intent: Intent) -> Reconciliation:
         """What became of a send nobody saw answered, read by the id it chose."""
@@ -844,6 +975,21 @@ class EmailCalendarAdapter:
         calendar, event_id, digest, key = intent.recipe['calendar'], intent.recipe['event_id'], intent.recipe['digest'], intent.recipe['candidate']
         existing = next((r for r in ctx.records if r.key == f'event:{key}'), None)
         current = self._calendar.get(calendar, event_id)
+        operation = intent.recipe.get('operation', 'calendar.create')
+        if operation == 'calendar.delete':
+            if current is None or current.get('status') == 'cancelled':
+                return Reconciliation('applied', detail='the event is gone from the calendar')
+            if str(current.get('etag') or '') == intent.recipe.get('etag'):
+                return Reconciliation('not_applied', detail='the event is still there at the version the removal was planned against')
+            return Reconciliation('unknown', detail='the event is there at another version; someone changed it')
+        if operation == 'calendar.update':
+            if current is None or current.get('status') == 'cancelled':
+                return Reconciliation('unknown', detail='the event is gone; the change may or may not have landed first')
+            if str(current.get('etag') or '') == intent.recipe.get('etag'):
+                return Reconciliation('not_applied', detail='the event is unchanged at the version the change was planned against')
+            candidate_key = intent.recipe['candidate']
+            body_ok = any(r.key == f'event:{candidate_key}' for r in ctx.records)
+            return Reconciliation('applied' if body_ok else 'unknown', detail='the event moved on from the planned version')
         if current is None:
             return Reconciliation('not_applied', detail='no event under the id; it never landed')
         if current.get('status') == 'cancelled':
@@ -860,6 +1006,15 @@ class EmailCalendarAdapter:
         key, candidate, calendar, event_id, body, existing = self._event_context(ctx)
         digest = _owned(body) or ''
         current = self._calendar.get(calendar, event_id)
+        expected = ctx.task.specification.criteria[0].expected
+        if expected == 'removed':
+            gone = current is None or current.get('status') == 'cancelled'
+            records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'removed' if gone else 'added', existing, ctx.task.id,
+                                                                   str((current or {}).get('etag') or ''), note='' if gone else 'still on the calendar'),))
+            if gone:
+                return Outcome(evidence=(Evidence('placed', target, 'removed', 'calendar', ctx.now),), records=records)
+            return Outcome(evidence=(Evidence('placed', target, 'still on the calendar', 'calendar', ctx.now),),
+                           wait=('external', 'The event is still on the calendar; the removal did not take.'), records=records)
         if current is None:
             records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'missing', existing, ctx.task.id, note='not found after adding'),))
             return Outcome(evidence=(Evidence('placed', target, 'missing after adding', 'calendar', ctx.now),),
@@ -873,7 +1028,21 @@ class EmailCalendarAdapter:
             records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'conflict', existing, ctx.task.id, note='not Ciel\'s event'),))
             return Outcome(evidence=(Evidence('placed', target, 'another event under the id', 'calendar', ctx.now),),
                            wait=('external', 'An event that is not this one sits under the id Ciel chose; nothing is overwritten.'), records=records)
-        note = '' if _same_fields(current, body, candidate['timezone']) else 'edited on the calendar since'
+        same = _same_fields(current, body, candidate['timezone'])
+        if expected == 'changed':
+            # Only what the proposal set is held against the calendar; the
+            # owner's own edits to the rest are theirs.
+            zone = candidate['timezone']
+            same = all((_wall(current.get(k), zone) == body[k]['dateTime'][:16]) if k in ('start', 'end') else (str(current.get(k) or '') == body[k])
+                       for k in self._proposed if k in ('start', 'end', 'location'))
+            status = 'updated' if same else 'added'
+            records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, status, existing, ctx.task.id, str(current.get('etag') or ''),
+                                                                   note='' if same else 'not as proposed'),))
+            if same:
+                return Outcome(evidence=(Evidence('placed', target, 'changed', 'calendar', ctx.now),), records=records)
+            return Outcome(evidence=(Evidence('placed', target, 'not as proposed', 'calendar', ctx.now),),
+                           wait=('external', 'The event does not read as proposed; it is left as it is.'), records=records)
+        note = '' if same else 'edited on the calendar since'
         records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'added', existing, ctx.task.id, str(current.get('etag') or ''), note),))
         return Outcome(evidence=(Evidence('placed', target, 'on the calendar', 'calendar', ctx.now),), records=records)
 
@@ -979,6 +1148,11 @@ class EmailCalendarAdapter:
         writes.append(RecordWrite(record.key, {**base, 'status': status, 'reason': candidates[0].reason}, record.revision))
         derivations: list[Derivation] = []
         mandate_id = dict(ctx.task.next_step.arguments).get('mandate', '')
+        proposals = self._proposals(ctx, message, candidates)
+        if proposals:
+            writes.extend(proposals)
+            writes[0] = RecordWrite(record.key, {**base, 'status': 'review', 'reason': 'a change to an event already on the calendar; proposed, not made'}, record.revision)
+            return self._progress(ctx, target, writes)
         for index, candidate in enumerate(candidates):
             if candidate.decision == 'ignored' and not candidate.start:
                 continue
@@ -996,6 +1170,44 @@ class EmailCalendarAdapter:
         outcome = self._progress(ctx, target, writes)
         return Outcome(evidence=outcome.evidence, next_step=outcome.next_step, delay_s=outcome.delay_s, records=outcome.records,
                        derive=tuple(derivations))
+
+    def _proposals(self, ctx: StepContext, message: Normalized, candidates: tuple[Candidate, ...]) -> list[RecordWrite]:
+        """A message from the sender of an event Ciel added, about that event
+        by title, saying it moved or is off: an inert proposal on the event
+        record, superseding any open one, and nothing on the calendar."""
+        added = [r for r in ctx.records if r.payload.get('kind') == 'event' and r.payload.get('status') in ('added', 'updated')]
+        if not added:
+            return []
+        by_key = {r.key: r.payload for r in ctx.records if r.payload.get('kind') == 'candidate'}
+        writes: list[RecordWrite] = []
+        for candidate in candidates:
+            for event in added:
+                original = by_key.get(event.payload['candidate'])
+                if original is None or original.get('sender') != candidate.sender:
+                    continue
+                if str(original.get('title') or '').casefold().strip() != candidate.title.casefold().strip():
+                    continue
+                if candidate.commitment == 'cancelled' and not candidate.start:
+                    operation, payload = 'calendar.delete', {}
+                elif candidate.start and candidate.end and candidate.timezone and not candidate.unresolved and (
+                        candidate.start != original.get('start') or candidate.end != original.get('end') or candidate.commitment == 'cancelled'):
+                    operation = 'calendar.update'
+                    payload = {'start': candidate.start, 'end': candidate.end, 'timezone': candidate.timezone}
+                    if candidate.location and candidate.location != original.get('location'):
+                        payload['location'] = candidate.location  # a place restated is not a place changed
+                else:
+                    continue
+                open_key = f'proposal:{event.key}'
+                for r in ctx.records:
+                    if r.key == open_key and r.payload.get('status') == 'open':
+                        # The open proposal moves aside under its source's key, marked
+                        # superseded; the new one takes its place at the next revision,
+                        # so an approval of the old one, if in flight, finds it stale.
+                        writes.append(RecordWrite(f'{open_key}:{r.payload["source_digest"][:12]}', {**r.payload, 'status': 'superseded'}, None))
+                writes.append(RecordWrite(open_key, {'kind': 'proposal', 'event': event.key, 'operation': operation, 'payload': payload,
+                                                     'source_digest': message.digest, 'message_id': message.message_id, 'status': 'open',
+                                                     'excerpts': list(candidate.excerpts)}, None))
+        return writes
 
     def _progress(self, ctx: StepContext, target: str, writes: list[RecordWrite]) -> Outcome:
         return Outcome(evidence=(Evidence(_criterion(ctx), target, 'in progress', 'inbox', ctx.now),),
@@ -1064,5 +1276,5 @@ class EmailCalendarAdapter:
 
 __all__ = ['CANDIDATE_SCHEMA', 'Candidate', 'EmailCalendarAdapter', 'EXTRACTION_PROMPT', 'GmailInbox', 'InboxSource', 'NAMESPACE',
            'CalendarConflict', 'CalendarSource', 'CalendarUnavailable', 'GoogleCalendar', 'Normalized', 'RawMessage', 'add_request',
-           'Changes', 'calendar_body', 'dismiss', 'event_id_for', 'extraction_payload', 'interpret', 'normalize', 'preview_request',
-           'watch_request']
+           'CalendarMoved', 'Changes', 'calendar_body', 'dismiss', 'event_id_for', 'extraction_payload', 'interpret', 'normalize',
+           'approve_proposal_request', 'preview_request', 'proposal_request', 'watch_request']

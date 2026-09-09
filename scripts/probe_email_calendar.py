@@ -39,9 +39,9 @@ from typing import Any, AsyncIterator
 
 from ciel.brain.extract import ExtractionLimits
 from ciel.config import EmailCalendarConfig, JournalConfig, TasksConfig
-from ciel.email_calendar import (CANDIDATE_SCHEMA, CalendarConflict, CalendarUnavailable, Changes, EmailCalendarAdapter, NAMESPACE, RawMessage,
-                                 add_request, calendar_body, dismiss, event_id_for, extraction_payload, interpret, normalize, preview_request,
-                                 watch_request)
+from ciel.email_calendar import (CANDIDATE_SCHEMA, CalendarConflict, CalendarMoved, CalendarUnavailable, Changes, EmailCalendarAdapter, NAMESPACE,
+                                 RawMessage, add_request, approve_proposal_request, calendar_body, dismiss, event_id_for, extraction_payload,
+                                 interpret, normalize, preview_request, watch_request)
 from ciel.journal import ActionJournal
 from ciel.task_context import TaskBinding
 from ciel.task_controls import TaskController
@@ -215,6 +215,36 @@ class FakeCalendar:
             self.lose_next = False
             raise CalendarUnavailable('the answer was lost')
         return dict(self.events[key])
+
+    def update(self, calendar: str, event_id: str, body: dict[str, Any], etag: str) -> dict[str, Any]:
+        if not self.connected:
+            raise CalendarUnavailable('no calendar')
+        event = self.events[(calendar, event_id)]
+        if getattr(self, 'edit_between', None):
+            # The owner's edit lands between the plan and the send: the
+            # version the send carries is stale by the time it arrives.
+            self.etags += 1
+            event.update(self.edit_between)
+            event['etag'] = f'"{self.etags}"'
+            self.edit_between = None
+        if event.get('etag') != etag:
+            raise CalendarMoved('answered 412')
+        self.etags += 1
+        event.update(body)
+        event['etag'] = f'"{self.etags}"'
+        self.updates = getattr(self, 'updates', 0) + 1
+        return dict(event)
+
+    def delete(self, calendar: str, event_id: str, etag: str) -> None:
+        if not self.connected:
+            raise CalendarUnavailable('no calendar')
+        event = self.events[(calendar, event_id)]
+        if event.get('etag') != etag:
+            raise CalendarMoved('answered 412')
+        self.etags += 1
+        event['status'] = 'cancelled'
+        event['etag'] = f'"{self.etags}"'
+        self.deletes = getattr(self, 'deletes', 0) + 1
 
     def seed(self, calendar: str, event_id: str, summary: str, start: str, end: str, zone: str = 'America/Los_Angeles', owned: dict | None = None) -> None:
         self.etags += 1
@@ -754,6 +784,129 @@ async def probe_automatic(root: Path) -> None:
     await controller.close()
 
 
+MOVED_ANSWER = {'category': 'confirmation', 'commitment': 'cancelled', 'events': [{
+    'title': 'Appointment with Dr. Lee', 'start': '2026-09-16T10:00', 'end': '2026-09-16T11:00', 'timezone': '', 'location': '500 Main St',
+    'excerpts': ['your appointment has been moved to Wednesday, September 16, 2026 from 10:00 AM to 11:00 AM'], 'unresolved': []}]}
+MOVED_AGAIN_ANSWER = {'category': 'confirmation', 'commitment': 'cancelled', 'events': [{
+    'title': 'Appointment with Dr. Lee', 'start': '2026-09-17T10:00', 'end': '2026-09-17T11:00', 'timezone': '', 'location': '',
+    'excerpts': ['moved once more, to Thursday, September 17, 2026 from 10:00 AM to 11:00 AM'], 'unresolved': []}]}
+MOVED_AGAIN = mail('m4', 'Clinic Bookings <bookings@clinic.test>', 'Your appointment has moved again',
+                   'Dear patient, your appointment has been moved once more, to Thursday, September 17, 2026 from 10:00 AM to 11:00 AM.')
+CANCELLED_ANSWER = {'category': 'confirmation', 'commitment': 'cancelled', 'events': [{
+    'title': 'Appointment with Dr. Lee', 'start': '', 'end': '', 'timezone': '', 'location': '',
+    'excerpts': ['your appointment has been cancelled'], 'unresolved': ['date']}]}
+MOVED = mail('m2', 'Clinic Bookings <bookings@clinic.test>', 'Your appointment has moved',
+             'Dear patient, your appointment has been moved to Wednesday, September 16, 2026 from 10:00 AM to 11:00 AM at 500 Main St.')
+CANCELLED = mail('m3', 'Clinic Bookings <bookings@clinic.test>', 'Your appointment is cancelled', 'Dear patient, your appointment has been cancelled.')
+
+
+async def probe_proposals(root: Path) -> None:
+    print('\na change is a proposal until the owner says so')
+    calendar = FakeCalendar()
+    backend = ScriptedBackend({'Your appointment is confirmed': CONFIRMED_ANSWER, 'Your appointment has moved again': MOVED_AGAIN_ANSWER,
+                               'Your appointment has moved': MOVED_ANSWER, 'Your appointment is cancelled': CANCELLED_ANSWER})
+    f = Fixture(root, 'proposals', [CONFIRMATION], backend=backend, config=ADD_CONFIG, calendar=calendar)
+    store = await f.open()
+    key = await previewed(f)
+    task = await add_task(f, key, 'add-1')
+    await f.run(task.id)
+    await approve(f, task.id)
+    await f.run(task.id)
+    event_id = event_id_for('me@example.test', 'm1', 0, 'primary')
+    check('the original is on the calendar', (await store.get(OWNER, task.id)).status == 'done' and calendar.inserts == 1)
+    f.inbox.messages['m2'] = MOVED
+    later = await f.preview('preview-2', since='2026-09-02')
+    await f.run(later.id)
+    records = await store.records(OWNER, NAMESPACE.name)
+    proposal = next((r for r in records if r.key == f'proposal:event:{key}'), None)
+    check('a later message from the same sender moving the same event is an open proposal on the event record, and the calendar is untouched',
+          proposal is not None and proposal.payload['status'] == 'open' and proposal.payload['operation'] == 'calendar.update'
+          and proposal.payload['payload']['start'] == '2026-09-16T10:00' and proposal.payload['message_id'] == 'm2'
+          and calendar.inserts == 1 and getattr(calendar, 'updates', 0) == 0
+          and next(r.payload['status'] for r in records if r.key == 'message:m2') == 'review')
+    check('the create\'s receipt is untouched', (await store.get(OWNER, task.id)).status == 'done'
+          and next(r.payload['status'] for r in records if r.key == f'event:{key}') == 'added')
+    check('a moved commitment with no original on record is review, never a fresh add',
+          interpret(MOVED_ANSWER, normalize(MOVED, 32000), ADD_CONFIG)[0].decision == 'review')
+    first_digest = proposal.payload['source_digest']
+    f.inbox.messages['m4'] = MOVED_AGAIN
+    again = await f.preview('preview-3', since='2026-09-03')
+    await f.run(again.id)
+    records = await store.records(OWNER, NAMESPACE.name)
+    proposal = next(r for r in records if r.key == f'proposal:event:{key}')
+    check('a newer message about the same event supersedes the open proposal, which is kept under its revision, and the new one is open with the new time',
+          proposal.payload['status'] == 'open' and proposal.payload['message_id'] == 'm4' and proposal.payload['payload']['start'] == '2026-09-17T10:00'
+          and next(r.payload['status'] for r in records if r.key == f'proposal:event:{key}:{first_digest[:12]}') == 'superseded')
+    stale_revision = proposal.revision
+    controller = TaskController(replace(f.tasks, enabled=True), namespaces=(NAMESPACE,))
+    await f.close()
+    await controller.start()
+    f.store = controller.store
+    assert f.store is not None
+    async def ask_approve(args: dict[str, Any]) -> Any:
+        return approve_proposal_request(ADD_CONFIG, args['proposal'], await f.store.records(OWNER, NAMESPACE.name))
+    controller.bind_feature(NAMESPACE, f.adapter.operations, requests={'inbox_approve': ask_approve}, summary=f.adapter.summarize)
+    binding = TaskBinding(Origin(OWNER, 'chart-turn', 'web', ingress_ids=('web:9',)), 1, 1)
+    created = (await controller.apply(binding, 'inbox_approve', {'proposal': proposal.key}))['task']
+    approved_proposal = next(r for r in await f.store.records(OWNER, NAMESPACE.name) if r.key == proposal.key)
+    check('approving the exact proposal makes one task whose scope is the update alone, marks the proposal approved at its revision, and carries the approval',
+          created['specification']['scope']['operations'] == ('calendar.update', 'calendar.verify') and created['next_step']['operation'] == 'calendar.update'
+          and created['origin']['approval_ref'] == f'proposal:{proposal.key}:{stale_revision}' and approved_proposal.payload['status'] == 'approved'
+          and approved_proposal.revision == stale_revision + 1)
+    await refused('approving it again is refused: it is no longer open', controller.apply(binding, 'inbox_approve', {'proposal': proposal.key}), ValueError)
+    results = await f.run(created['id'], now=time.time() + 1)
+    event = calendar.events[('primary', event_id)]
+    record = next(r.payload for r in await f.store.records(OWNER, NAMESPACE.name) if r.key == f'event:{key}')
+    check('the update is sent at the event\'s version with no question, read back as proposed, and done; the event now says the new time',
+          results == ['dispatched', 'done'] and event['start']['dateTime'] == '2026-09-17T10:00:00' and getattr(calendar, 'updates', 0) == 1
+          and record['status'] == 'updated' and (await f.store.owner_view(OWNER, created['id']))['question'] is None)
+    f.store = None
+    await controller.close()
+
+    print('\nan edit of yours is never overwritten; a removal is a removal')
+    calendar = FakeCalendar()
+    f = Fixture(root, 'proposals-2', [CONFIRMATION], backend=backend, config=ADD_CONFIG, calendar=calendar)
+    store = await f.open()
+    key = await previewed(f)
+    task = await add_task(f, key, 'add-1')
+    await f.run(task.id)
+    await approve(f, task.id)
+    await f.run(task.id)
+    f.inbox.messages['m2'] = MOVED
+    later = await f.preview('preview-2', since='2026-09-02')
+    await f.run(later.id)
+    records = await store.records(OWNER, NAMESPACE.name)
+    proposal = next(r for r in records if r.key == f'proposal:event:{key}')
+    door = approve_proposal_request(ADD_CONFIG, proposal.key, records)
+    approving = HumanOrigin(OWNER, 'approve-turn', 'web', ingress_ids=('web:3',), approval_ref=door['approval_ref'])
+    change = await store.create(approving, door['specification'], door['step'], records=door['records'], now=1000)
+    calendar.edit_between = {'location': 'Room 12'}
+    results = await f.run(change.id)
+    check('an edit of yours landing between the plan and the send makes the change a failed precondition, unsent, planned again',
+          results and results[0] == 'abandoned' and getattr(calendar, 'updates', 0) == 0
+          and calendar.events[('primary', event_id)]['location'] == 'Room 12')
+    results = await f.run(change.id, now=1100)
+    check('planned again at the new version, the change touches only the proposed times and your edit to the place stands',
+          results == ['dispatched', 'done'] and calendar.events[('primary', event_id)]['start']['dateTime'] == '2026-09-16T10:00:00'
+          and calendar.events[('primary', event_id)]['location'] == 'Room 12' and getattr(calendar, 'updates', 0) == 1)
+    f.inbox.messages['m3'] = CANCELLED
+    later = await f.preview('preview-3', since='2026-09-03')
+    await f.run(later.id)
+    records = await store.records(OWNER, NAMESPACE.name)
+    proposal = next(r for r in records if r.key == f'proposal:event:{key}')
+    check('a cancellation from the same sender is a removal proposal on the same event',
+          proposal.payload['operation'] == 'calendar.delete' and proposal.payload['status'] == 'open' and proposal.payload['message_id'] == 'm3')
+    door = approve_proposal_request(ADD_CONFIG, proposal.key, records)
+    approving = HumanOrigin(OWNER, 'approve-turn-2', 'web', ingress_ids=('web:4',), approval_ref=door['approval_ref'])
+    removal = await store.create(approving, door['specification'], door['step'], records=door['records'], now=1200)
+    results = await f.run(removal.id, now=1200)
+    record = next(r.payload for r in await store.records(OWNER, NAMESPACE.name) if r.key == f'event:{key}')
+    check('the approved removal is sent at the event\'s version, read back as gone, and done',
+          results == ['dispatched', 'done'] and calendar.events[('primary', event_id)]['status'] == 'cancelled' and getattr(calendar, 'deletes', 0) == 1
+          and record['status'] == 'removed')
+    await f.close()
+
+
 async def main() -> None:
     probe_normalization()
     probe_interpretation()
@@ -765,6 +918,7 @@ async def main() -> None:
         await probe_watch(root)
         await probe_dismissal(root)
         await probe_automatic(root)
+        await probe_proposals(root)
     print(f'\nall {len(CHECKS)} checks passed')
 
 

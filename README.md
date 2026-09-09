@@ -186,9 +186,12 @@ shortcut = "cmd+backslash"   # empty disables the chord
 # Both gestures are on so you can try them; the pair also types into the current app.
 double_backslash = true
 double_tap_ms = 350
-dir = "~/.ciel/notes"        # private draft; completed notes go to memory.dir on the brain
+dir = "~/.ciel/notes"        # private draft and confirmed recent notes on this Mac
 max_chars = 16000
 save_timeout_s = 10.0       # keep the draft and offer retry if the hub does not receipt it
+history_limit = 100         # confirmed saves kept locally (0–1000)
+undo_discard_s = 5.0        # Undo lives only in RAM (0–30 seconds); zero disables it
+dictation_max_s = 60.0      # manual microphone capture, bounded to 1–300 seconds
 
 [audio]
 backend = "portaudio"       # "webrtc": AEC3 without ducking (macOS 14.2+); "apple": native voice processing
@@ -1262,6 +1265,24 @@ watch, and revoking the grant ends it. An empty sender list makes automatic
 mode add nothing, which is the point: the list is built from what preview
 shows, and enrolling a sender is a new draft and a fresh approval.
 
+**A change is a proposal until the owner says so.** A later message from
+the sender of an event Ciel added, about that event by title, saying it moved
+or is cancelled, never touches the calendar by itself: the watch or the
+preview records an inert proposal on the event record, naming the update or
+the removal it would take and the message it came from, and the create's
+receipt stays as it was. A create-only grant covers neither, so nothing is
+derived; a newer message about the same event supersedes the open proposal,
+which is kept under its source's key. `approve_proposal` takes the exact open
+proposal, at the revision `inspect_task` shows, and makes one task whose
+scope is that operation alone, marking the proposal approved in the same
+transaction, so a stale or repeated approval makes no task. The change is
+planned at the event's current version and sent with it, and carries only
+the fields the proposal set: an edit of yours landing between the plan and
+the send is a failed precondition, unsent and planned again, and your edits
+to other fields stand. A moved commitment with no original on record is
+review, never a fresh add. The removal reads back as gone; the change reads
+back as proposed.
+
 **What runs out is said.** A window larger than the task's model calls
 leaves the rest recorded as unread with the reason; a runtime with no
 extraction backend records the same; a mailbox that is not connected is a
@@ -1290,11 +1311,12 @@ grant_lifetime_s = 2592000.0 # thirty days; [tasks].max_grant_lifetime_s caps it
 The reader borrows `[sections].gmail_oauth_keys` and `gmail_token_file`,
 read-only, exactly as the section alarm's sender does; the writer borrows
 `[proactive].google_oauth_keys` and `google_token_file` the same way. Both
-must be authorized on the execution host. Proposals for reschedules and
-cancellations against an event already added are the plan's last milestone.
-Nothing is enabled by these words: automatic additions need the runner, the
-feature, a destination calendar, both logins on the execution host, and a
-grant the owner approved in Chart.
+must be authorized on the execution host. The plan's five milestones are
+built against fakes; the live run against a test calendar with synthetic
+mail is separate acceptance and has not been done. Nothing is enabled by
+these words: automatic additions need the runner, the feature, a destination
+calendar, both logins on the execution host, and a grant the owner approved
+in Chart.
 
 ## A spot in a section (the signup site)
 
@@ -1506,7 +1528,7 @@ The window follows the Quick Note Prototype supplied on 2026-09-09: a
 560-point cut-corner bar with a gold dot and an inline save hint. Native colours
 use the prototype's sRGB space, preserving its dark ground and accents. The editor
 grows with the thought up to 180 points, then scrolls. Hover reveals the
-character count, **Tuck away**, and **Save**; Tab reveals the same controls
+character count, **Discard**, and **Save**; Tab reveals the same controls
 and focuses Save, with a cyan focus border. A narrow window puts the count
 on its own row. Drag the bar's background to move it; reopening keeps that
 position for the life of the window process.
@@ -1518,29 +1540,61 @@ focus and is editable, including after a failed save restores the draft.
 **Enter** adds a line. **Shift–Enter** or Save puts the note into Invariant as
 a reference, preserving its wording and paragraphs without a model call.
 While saving, the bar folds to a single line with a breathing gold dot and a
-progress label. A real receipt shows “Saved to memory.” in green for 1.1
-seconds, then tucks the window away and returns focus. A failure restores the
+progress label. A real receipt shows “Saved to memory.” in green and fades
+with a six-point downward drift over 0.2 seconds before returning focus.
+Reduce Motion keeps the fade stationary; reopening cancels it. A failure restores the
 editor, turns the dot and border red, and keeps the error and **Retry** visible
-even without hover. **Escape** or Tuck away hides the window with the draft
-intact. Ask Ciel later, for example, “Find my note about the moon garden”;
+even without hover. **Escape** or **Discard** removes the unsaved draft and
+closes the window; reopening starts blank. Only Shift–Enter or Save submits
+to memory, and closing after submission does not undo that save.
+A quiet **Undo** chip stays for five seconds after discarding an unsaved
+draft. Its copy exists only in RAM: the disk draft is already gone. Undo
+restores the editor without saving to memory; expiry, a process restart, or
+starting a new draft forgets it.
+Ask Ciel later, for example, “Find my note about the moon garden”;
 notes use the ordinary memory index and `recall` keyword search.
 
-The draft lives in `notes.dir/draft.json`, owner-only, and reopens after a
-restart. In split mode the hub writes `memory.dir/note-<id>.md`; local mode
+While open, the draft lives in `notes.dir/draft.json`, owner-only, for recovery
+after an unexpected restart. Explicit dismissal deletes that backup.
+In split mode the hub writes `memory.dir/note-<id>.md`; local mode
 writes the same format locally. The note and its human-readable index are
 owner-only, and note text is quoted as data when it enters the brain's prompt.
 Nothing is broadcast to another Chart or entered as a conversation. Two notes
 with the same opening remain distinct. Retrying after a lost receipt uses the
 same id and cannot create another copy of that note.
 
+Hover or use Tab to reach **Recent**, **+ Context**, and **Dictate**:
+
+- **Recent** opens a searchable, selectable history of confirmed saves on
+  this Mac. Back or Escape returns to the current draft unchanged. The latest
+  `history_limit` entries live owner-only in `notes.dir/history.json`, so
+  browsing still works offline. This history begins with saves made after
+  the feature was installed; older notes remain available through Ciel's
+  memory search. Retried receipts do not add duplicate entries.
+- **+ Context** attaches the app you came from and a page title and URL for
+  supported browsers (Safari, Chrome, Edge, Brave, Chromium, and Arc).
+  Reading happens only on that click. The attachment appears as ordinary
+  text before Save, with **Remove Context** to take it back out. Browser
+  Automation permission may be requested by macOS; if a page cannot be read,
+  the app name is attached and the window explains the limitation.
+- **Dictate** borrows Ciel's existing microphone while Ciel is idle and
+  unmuted. Wait for **Stop Dictation**, speak, then click it to transcribe
+  with the running speech engine. Capture stops automatically after
+  `dictation_max_s`. Words enter the draft at the cursor, ahead of attached
+  context, and still need Shift–Enter or Save. These frames do not enter a
+  voice conversation. Discard cancels capture or pending transcription;
+  late results cannot recreate a closed note. Becoming busy or muted cancels
+  dictation, preserving typed text. This feature holds audio in memory and
+  never writes it to a file.
+
 An offline brain, a disabled memory store, a full disk, or a hub without note
-support leaves the draft and an error beside the editor. Reopen it and press
+support leaves the draft and an error beside the editor. Keep it open and press
 Shift–Enter to retry after the problem is resolved; drafts are not submitted
 automatically. Both halves need this version for split-mode saving. `[notes]
 enabled = false` disables capture; `[memory] enabled = false` on the brain
 also prevents saving. `max_chars` bounds the note in the editor and writer,
 and `save_timeout_s` bounds the wait for a hub receipt. The spoke keeps its
-local draft until that receipt, so a reload or failed save cannot silently
+local draft until that receipt or explicit dismissal, so a reload or failed save cannot silently
 throw an idea away.
 
 ## Independent action (planned)
@@ -2316,8 +2370,8 @@ uv run --no-sync python scripts/probe_turns.py       # lane contract, trusted in
 uv run --no-sync python scripts/probe_hub_imports.py # Linux imports and temporary task-store lifecycle
 uv run --no-sync python scripts/probe_shellguard.py  # confirmation and mutating command options
 uv run --no-sync python scripts/probe_shortcuts.py   # global Mac controls, note chord and backslash pair, lifecycle, interruption, mute
-uv run --no-sync python scripts/probe_notes.py       # private drafts, memory, retry receipts, both voice paths; temporary state only
-uv run --no-sync python scripts/probe_note_window.py # compact native bar: growth, hover/keyboard controls, save, retry, Escape, narrow layout
+uv run --no-sync python scripts/probe_notes.py       # private drafts, receipts, recent history, context, bounded dictation; temporary state only
+uv run --no-sync python scripts/probe_note_window.py # native bar: save, discard, Undo, Recent, Context, Dictate, focus and narrow layouts
 uv run --no-sync python scripts/probe_speaker.py     # Barn Door: diagnostic policy, private readings, both voice paths
 uv run --no-sync python scripts/probe_files.py       # file/search boundaries and session credentials
 uv run --no-sync python scripts/probe_tool_rpc.py    # Mac snapshots, undo, and process cancellation

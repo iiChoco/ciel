@@ -35,7 +35,7 @@ import inspect
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from ciel.config import TasksConfig
@@ -305,10 +305,19 @@ class TaskController:
         elif operation in self._requests:
             try:
                 built = self._requests[operation](args)
-                spec, step = await built if inspect.isawaitable(built) else built
+                built = await built if inspect.isawaitable(built) else built
             except ValueError as exc:
                 raise ValueError(str(exc)) from exc
-            task = await store.create(binding.origin, spec, step, fence=binding.fence, record=lambda t: self._record(operation, t))
+            # A builder answers the specification and first step, or a dict
+            # that also names the records that must land with the task and
+            # the approval the turn is giving: an approved proposal marked so
+            # at its revision, so a stale or repeated approval makes no task.
+            if isinstance(built, dict):
+                spec, step, records = built['specification'], built['step'], built.get('records')
+                origin = replace(binding.origin, approval_ref=built.get('approval_ref')) if built.get('approval_ref') else binding.origin
+            else:
+                spec, step, records, origin = built[0], built[1], None, binding.origin
+            task = await store.create(origin, spec, step, fence=binding.fence, records=records, record=lambda t: self._record(operation, t))
             return {'task': asdict(task)}
         elif operation == 'grant_draft_save':
             draft = await self._draft_save(binding, store, args, revision)
