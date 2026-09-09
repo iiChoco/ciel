@@ -2,6 +2,27 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-08 — Shift belongs to the keyboard
+
+**Why.** Keyboard clicks were being heard as snaps again. Investigation found
+that the keyboard veto watched ordinary key-down and key-up events but omitted
+modifier changes: a lone Shift or Command could sound like a snap without the
+keyboard owning up to it. `reports/2026-09-08-modifier-snap-veto.md` reproduces
+that hole; it does not attribute every reported false wake to a modifier.
+
+**What.**
+
+- *A modifier is a key too.* The existing timestamp-only veto includes modifier
+  and status-key changes on press and release. Its 300 ms window, mouse checks,
+  and gesture thresholds stay the same. Echo cancellation remains enabled.
+- *An expired veto leaves a reason to investigate.* The existing
+  `log_candidates` switch also shows key/click event ages and the veto window.
+  It records no key identity and opens no event tap.
+
+**Probes.** `probe_gestures.py 138 → 146`: modifier-only clicks cannot wake or
+complete a clap action; releases refresh the veto, expiry admits a snap again,
+and candidate timing diagnostics follow the existing switch.
+
 ## 2026-09-08 — The room keeps its volume
 
 **Why.** The split pair fixed Ciel's lisp but left Apple's voice processing
