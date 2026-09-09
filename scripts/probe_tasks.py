@@ -19,7 +19,7 @@ reconciliation, or fails the task, and feature records with a namespace:
 validated write-sets, expected revisions, a per-namespace allowance, write-sets
 riding a checkpoint, adapter-owned migration at open, unsupported and unknown
 namespaces preserved untouched, a failed migration rolled back, and a
-version-two store lifted through three to four with every task in place and
+version-two store lifted through three and four to five with every task in place and
 its origin saying it was human. No actual tool,
 model, mic, network, or user's runtime state is used.
 
@@ -739,15 +739,15 @@ async def probe_migration(root: Path) -> None:
         db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
         version = db.execute('PRAGMA user_version').fetchone()[0]
         db.close()
-        check('a version-two store opens as version four with every task in place and the new allowance at its configured value',
-              version == 4 and lifted.status == 'queued' and lifted.next_step == READ and lifted.polls == 1
+        check('a version-two store opens as version five with every task in place and the new allowance at its configured value',
+              version == 5 and lifted.status == 'queued' and lifted.next_step == READ and lifted.polls == 1
               and lifted.model_calls == 0 and lifted.max_model_calls == 5)
         check('the lifted origin says it was human and a repeated request finds its task',
               lifted.origin.kind == 'human' and (await create(store)).id == task.id)
         view = await store.owner_view(OWNER)
         check('a lifted store lists no mandates and no grants yet', view['mandates'] == [] and view['grants'] == [])
     db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
-    db.execute('PRAGMA user_version=5')
+    db.execute('PRAGMA user_version=6')
     db.close()
     try:
         async with TaskStore(cfg):

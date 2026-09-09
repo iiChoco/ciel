@@ -17,33 +17,48 @@ cannot turn a committed transition into an apparent rollback.
 runtime-only ``derive`` takes the adapter's own ``Namespace`` object, so the
 origin it records names a namespace application code registered, not a
 string a model or a socket supplied. Mandate and grant controls share the
-owner admission of every other control; a grant is never activated here,
-because activation is the broker's yes and that surface is still to come.
+owner admission of every other control.
+
+**A grant is the broker's yes, and nothing else.** The Chart form saves a
+draft from an adapter's setup: the owner narrows operations and targets, the
+host, accounts, outcome, and limits are the adapter's, shown and not chosen.
+Approve binds the revision and digest the owner is looking at, asks the
+question through the pipeline's broker on that one private session, and only
+a yes activates; the store rechecks the draft at activation, so an edit while
+the question is open leaves a draft, never a grant. No broker call is alive
+while a form is being filled in.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from typing import Any
 
 from ciel.config import TasksConfig
 from ciel.journal import ActionJournal
 from ciel.task_context import TaskBinding
-from ciel.tasks import (Criterion, Mandate, Namespace, Scope, Specification, StandingGrant, Step, Task, TaskConflict, TaskStore,
-                        TaskStoreError)
+from ciel.tasks import (Criterion, GrantDraft, GrantSetup, Mandate, Namespace, Scope, Specification, StandingGrant, Step, Task,
+                        TaskConflict, TaskStore, TaskStoreError)
+
+Asker = Callable[[str, Callable[[str], Awaitable[None]]], Awaitable[bool]]
+"""The broker's question through one channel: (question, send) -> yes."""
 
 log = logging.getLogger(__name__)
 
 
 class TaskController:
     def __init__(self, config: TasksConfig, journal: ActionJournal | None = None,
-                 namespaces: tuple[Namespace, ...] = ()) -> None:
+                 namespaces: tuple[Namespace, ...] = (), setups: tuple[GrantSetup, ...] = ()) -> None:
         self.config = config
         self.journal = journal
         self.namespaces = namespaces
         """The adapters' record namespaces, registered before the store opens."""
+        self.setups = setups
+        """What the adapters offer the owner to approve; the Chart form's fields."""
+        self._asker: Asker | None = None
         self.store: TaskStore | None = None
         self.unavailable = 'Tasks are disabled.' if not config.enabled else 'Task storage is starting.'
 
@@ -87,10 +102,84 @@ class TaskController:
             raise TaskStoreError(self.unavailable)
         return self.store
 
+    def bind_approval(self, asker: Asker | None) -> None:
+        """The pipeline lends its broker; without one, approval says so."""
+        self._asker = asker
+
     async def view(self, binding: TaskBinding | None, task_id: str | None = None) -> dict[str, Any]:
         store = self._store(binding)
         assert binding is not None
-        return await store.owner_view(binding.origin.owner, task_id, fence=binding.fence)
+        view = await store.owner_view(binding.origin.owner, task_id, fence=binding.fence)
+        if task_id is None:
+            view['setups'] = [asdict(setup) for setup in self.setups]
+        return view
+
+    def _setup(self, namespace: Any) -> GrantSetup:
+        for setup in self.setups:
+            if setup.namespace == namespace:
+                return setup
+        raise ValueError('No feature offers a grant by that name.')
+
+    async def _draft_save(self, binding: TaskBinding, store: TaskStore, args: dict[str, Any], revision: int | None) -> GrantDraft:
+        """The owner narrows a setup; everything else in the draft is the adapter's."""
+        setup = self._setup(args.get('namespace'))
+        chosen = {}
+        for field, offered in (('operations', setup.operations), ('targets', setup.targets)):
+            picked = args.get(field)
+            if not isinstance(picked, list) or not picked or any(not isinstance(p, str) for p in picked):
+                raise ValueError(f'Choose at least one of the offered {field}.')
+            allowed = {value for value, _ in offered}
+            if not set(picked) <= allowed:
+                raise ValueError(f'Only the offered {field} can be granted.')
+            chosen[field] = tuple(picked)
+        draft_id = args.get('draft_id')
+        if draft_id is not None and (not isinstance(draft_id, str) or not draft_id):
+            raise ValueError('A draft ID is a string.')
+        return await store.save_grant_draft(binding.origin.owner, setup.host, setup.namespace, setup.outcome,
+                                            Scope(chosen['operations'], chosen['targets']), setup.limits, setup.bindings,
+                                            draft_id=draft_id, expected_revision=revision, fence=binding.fence)
+
+    def _question(self, draft: GrantDraft) -> str:
+        setup = self._setup(draft.namespace)
+        labels = {**dict(setup.operations), **dict(setup.targets)}
+        operations = ', '.join(labels.get(o, o) for o in draft.scope.operations)
+        targets = ', '.join(labels.get(t, t) for t in draft.scope.targets)
+        accounts = ', '.join(value for _, value in draft.bindings)
+        limits = draft.limits
+        def span(seconds: float, unit_s: float, unit: str, one: str) -> str:
+            count = seconds / unit_s
+            return one if count == 1 else f'{count:g} {unit}s'
+        window = span(limits.window_s, 3600, 'hour', 'hour') if limits.window_s < 86400 else span(limits.window_s, 86400, 'day', 'day')
+        return (f'Approve a standing grant for {setup.title}: {operations} on {targets}'
+                f'{" as " + accounts if accounts else ""}, up to {limits.max_per_window} per {window} and '
+                f'{limits.max_children} in all, for {span(limits.lifetime_s, 86400, "day", "one day")} — okay?')
+
+    async def approve(self, binding: TaskBinding | None, args: dict[str, Any], send: Callable[[str], Awaitable[None]]) -> dict[str, Any]:
+        """Approve the exact draft the owner is looking at, through the broker.
+
+        Refuses before asking when the draft is not the one shown, so a
+        question is never put about a draft the owner has not seen. A no, a
+        timeout, or a draft that moved while the question was open leaves the
+        draft; only a yes that matches the draft at activation makes a grant.
+        """
+        store = self._store(binding)
+        assert binding is not None
+        draft_id, revision, digest = args.get('draft_id'), args.get('revision'), args.get('digest')
+        if not isinstance(draft_id, str) or not draft_id or type(revision) is not int or not isinstance(digest, str) or not digest:
+            raise ValueError('An approval names the draft, its revision, and its digest.')
+        draft = await store.grant_draft(binding.origin.owner, draft_id)
+        if draft.status != 'draft' or draft.revision != revision or draft.digest != digest:
+            raise TaskConflict('The draft changed; review it again before approving.')
+        if self._asker is None:
+            raise TaskStoreError('Approval needs a live broker; this runtime has none.')
+        question = self._question(draft)
+        if not await self._asker(question, send):
+            return {'approved': False, 'draft': asdict(draft)}
+        approval_ref = f'chart:{draft.id}:{revision}:{binding.origin.request_id}'
+        grant, mandate = await store.activate_grant(
+            binding.origin, draft.id, revision, digest, approval_ref, fence=binding.fence,
+            record=lambda m: self._record('grant_activate', m, note=f'Approved through the broker as {approval_ref}; no execution dispatched.'))
+        return {'approved': True, 'grant': asdict(grant), 'mandate': asdict(mandate)}
 
     def _record(self, operation: str, task: Task | Mandate | StandingGrant, note: str = 'Explicit private owner control; no execution dispatched.') -> None:
         if self.journal is not None:
@@ -131,6 +220,15 @@ class TaskController:
                                  tuple(Criterion(c, target, 'success') for c in checks))
             task = await store.create(binding.origin, spec, Step('read', 'github.pr_checks', target),
                                       resource_wait=True, fence=binding.fence, record=lambda t: self._record(operation, t))
+        elif operation == 'grant_draft_save':
+            draft = await self._draft_save(binding, store, args, revision)
+            return {'draft': asdict(draft)}
+        elif operation == 'grant_draft_discard':
+            draft_id = args.get('draft_id')
+            if not isinstance(draft_id, str) or not draft_id:
+                raise ValueError('A draft ID is required.')
+            draft = await store.discard_grant_draft(binding.origin.owner, draft_id, revision=revision, fence=binding.fence)
+            return {'draft': asdict(draft)}
         elif operation in ('mandate_pause', 'mandate_resume', 'mandate_revoke'):
             mandate_id = args.get('mandate_id')
             if not isinstance(mandate_id, str) or not mandate_id:

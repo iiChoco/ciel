@@ -415,6 +415,16 @@
   .task-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
   .task-actions button, #taskrefresh { border: 1px solid var(--glass-border); padding: 5px 9px; font: 12px var(--mono); }
   #taskpanel button:disabled { opacity: .45; cursor: wait; }
+  #grants { padding-top: 12px; border-top: 1px solid var(--line); margin-top: 8px; overflow-wrap: anywhere; }
+  #grants h3 { font: 16px var(--serif); margin-bottom: 6px; }
+  #grants p, #grants li { margin-bottom: 6px; }
+  #grants .dim { color: var(--text-dim); }
+  #grants form { border: 1px solid var(--line); padding: 8px 10px; margin: 8px 0; }
+  #grants fieldset { border: none; padding: 0; margin: 6px 0; }
+  #grants legend { color: var(--gold); font: 12px var(--mono); margin-bottom: 4px; }
+  #grants label { display: block; margin: 3px 0; cursor: pointer; }
+  #grants input[type="checkbox"] { accent-color: var(--gold); margin-right: 6px; }
+  #grants select { font: 12px var(--mono); color: var(--text); background: rgba(0, 0, 0, .3); border: 1px solid var(--glass-border); padding: 4px 6px; max-width: 100%; }
   @media (max-width: 480px) { #taskpanel { margin: 0 10px 6px; padding: 8px; } }
 </style>
 </head>
@@ -464,6 +474,7 @@
   <button id="taskrefresh" type="button">Refresh</button>
   <div id="tasklist" aria-label="Saved tasks"></div>
   <section id="taskdetail" aria-label="Task details" tabindex="-1"></section>
+  <section id="grants" aria-label="Standing grants" tabindex="-1"></section>
 </details>
 
 
@@ -974,13 +985,13 @@ function taskNotice(text, error = false) {
   taskStatus.textContent = text;
   taskStatus.classList.toggle("error", error);
 }
-function requestTask(operation, fields = {}) {
+function requestTask(operation, fields = {}, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     const request_id = messageId();
     const timeout = setTimeout(() => {
       taskRequests.delete(request_id);
       reject(new Error("No task response. Refresh before retrying; the control may have been saved."));
-    }, 20000);
+    }, timeoutMs);
     taskRequests.set(request_id, {resolve, reject, timeout});
     if (!sendFrame({type: "task.request", request_id, operation, ...fields})) {
       clearTimeout(timeout);
@@ -1046,6 +1057,127 @@ function showTask(data) {
   taskDetail.appendChild(history);
   for (const entry of data.history) taskText(history, "li", `${entry.after_status}: ${entry.detail}`);
 }
+// ── standing grants: the form, the drafts, the mandates ─────────────────
+// A draft is what the owner is looking at; Approve sends the revision and
+// digest rendered here, and the broker's question arrives on this socket
+// alone as the ordinary confirm prompt. A yes there is the only thing that
+// makes a grant; this page never assumes one.
+const grantsEl = document.getElementById("grants");
+let draftEditing = null; // {id, revision, namespace, operations, targets} while a saved draft is being edited
+function grantLabel(setup, kind, value) {
+  const found = (setup ? setup[kind] : []).find(([v]) => v === value);
+  return found ? found[1] : value;
+}
+function grantScope(setup, scope) {
+  return scope.operations.map(o => grantLabel(setup, "operations", o)).join(", ") + " on " +
+    scope.targets.map(t => grantLabel(setup, "targets", t)).join(", ");
+}
+async function grantControl(operation, fields, busyText, timeoutMs) {
+  if (taskBusy) return;
+  taskBusy = true;
+  grantsEl.querySelectorAll("button").forEach(b => b.disabled = true);
+  taskNotice(busyText);
+  let failure = null, result = null;
+  try { result = await requestTask(operation, fields, timeoutMs); }
+  catch (error) { failure = error.message; }
+  finally { taskBusy = false; }
+  await refreshTasks();
+  grantsEl.focus();
+  if (failure) taskNotice(failure + " The view has been refreshed where available.", true);
+  else if (operation === "grant_approve") taskNotice(result.approved ? "Grant approved; the mandate is active." : "Not approved. The draft is kept.", !result.approved);
+  return result;
+}
+function showGrants(data) {
+  grantsEl.replaceChildren();
+  const setups = data.setups || [], drafts = data.drafts || [], mandates = data.mandates || [], grants = data.grants || [];
+  if (!setups.length && !drafts.length && !mandates.length) return;
+  taskText(grantsEl, "h3", "Standing grants");
+  const bySetup = new Map(setups.map(s => [s.namespace, s]));
+  const button = (parent, label, handler) => {
+    const b = taskText(parent, "button", label);
+    b.type = "button";
+    b.disabled = taskBusy;
+    b.addEventListener("click", handler);
+    return b;
+  };
+  for (const mandate of mandates) {
+    const grant = grants.find(g => g.id === mandate.grant_id);
+    const setup = bySetup.get(mandate.namespace);
+    const title = setup ? setup.title : mandate.namespace;
+    taskText(grantsEl, "p", `${title} · ${mandate.outcome} · ${mandate.status} · ${mandate.children} derived`);
+    if (grant) taskText(grantsEl, "p", `${grantScope(setup, grant.scope)} · until ${new Date(grant.expires_at * 1000).toLocaleDateString()}`).className = "dim";
+    const actions = document.createElement("div");
+    actions.className = "task-actions";
+    grantsEl.appendChild(actions);
+    if (mandate.status === "active") button(actions, "Pause", () => grantControl("mandate_pause", {mandate_id: mandate.id, revision: mandate.revision}, "Pausing…"));
+    if (mandate.status === "paused") button(actions, "Resume", () => grantControl("mandate_resume", {mandate_id: mandate.id, revision: mandate.revision}, "Resuming…"));
+    if (grant && !["revoked", "expired"].includes(grant.status)) button(actions, "Revoke grant", () => grantControl("grant_revoke", {grant_id: grant.id, revision: grant.revision}, "Revoking…"));
+  }
+  for (const draft of drafts) {
+    const setup = bySetup.get(draft.namespace);
+    taskText(grantsEl, "p", `Draft · ${setup ? setup.title : draft.namespace} · ${grantScope(setup, draft.scope)} · revision ${draft.revision}`);
+    taskText(grantsEl, "p", `${draft.outcome} · as ${draft.bindings.map(([, v]) => v).join(", ") || "no account"} · up to ${draft.limits.max_per_window} per window, ${draft.limits.max_children} in all · digest ${draft.digest.slice(0, 12)}`).className = "dim";
+    const actions = document.createElement("div");
+    actions.className = "task-actions";
+    grantsEl.appendChild(actions);
+    button(actions, "Approve", () => {
+      taskNotice("Answer the question in the conversation to approve this draft.");
+      grantControl("grant_approve", {draft_id: draft.id, revision: draft.revision, digest: draft.digest}, "Waiting for your answer…", 180000);
+    });
+    if (setup) button(actions, "Edit", () => { draftEditing = {id: draft.id, revision: draft.revision, namespace: draft.namespace, operations: draft.scope.operations, targets: draft.scope.targets}; showGrants(data); });
+    button(actions, "Discard", () => grantControl("grant_draft_discard", {draft_id: draft.id, revision: draft.revision}, "Discarding…"));
+  }
+  if (!setups.length) return;
+  const form = document.createElement("form");
+  grantsEl.appendChild(form);
+  const editing = draftEditing && bySetup.has(draftEditing.namespace) ? draftEditing : null;
+  taskText(form, "legend", editing ? "Edit draft" : "New draft");
+  const picker = document.createElement("select");
+  picker.setAttribute("aria-label", "Feature");
+  for (const setup of setups) {
+    const option = document.createElement("option");
+    option.value = setup.namespace;
+    option.textContent = setup.title;
+    picker.appendChild(option);
+  }
+  picker.value = editing ? editing.namespace : setups[0].namespace;
+  picker.disabled = !!editing;
+  form.appendChild(picker);
+  const setup = bySetup.get(picker.value);
+  const boxes = {};
+  for (const kind of ["operations", "targets"]) {
+    const set = document.createElement("fieldset");
+    taskText(set, "legend", kind);
+    boxes[kind] = [];
+    for (const [value, label] of setup[kind]) {
+      const row = document.createElement("label");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = value;
+      box.checked = editing ? editing[kind].includes(value) : true;
+      row.appendChild(box);
+      row.appendChild(document.createTextNode(label));
+      set.appendChild(row);
+      boxes[kind].push(box);
+    }
+    form.appendChild(set);
+  }
+  taskText(form, "p", `${setup.outcome} · on ${setup.host} as ${setup.bindings.map(([, v]) => v).join(", ") || "no account"} · up to ${setup.limits.max_per_window} per window, ${setup.limits.max_children} in all, for ${Math.round(setup.limits.lifetime_s / 86400)} days`).className = "dim";
+  picker.addEventListener("change", () => { draftEditing = null; showGrants({...data, _picked: picker.value}); });
+  if (data._picked && !editing) picker.value = data._picked;
+  const actions = document.createElement("div");
+  actions.className = "task-actions";
+  form.appendChild(actions);
+  button(actions, editing ? "Save changes" : "Save draft", () => {
+    const fields = {namespace: picker.value, operations: boxes.operations.filter(b => b.checked).map(b => b.value), targets: boxes.targets.filter(b => b.checked).map(b => b.value)};
+    if (editing) Object.assign(fields, {draft_id: editing.id, revision: editing.revision});
+    draftEditing = null;
+    grantControl("grant_draft_save", fields, "Saving draft…");
+  });
+  if (editing) button(actions, "Stop editing", () => { draftEditing = null; showGrants(data); });
+  form.addEventListener("submit", e => e.preventDefault());
+}
+
 async function refreshTasks() {
   if (taskPanel.hidden || !taskPanel.open) return;
   const generation = ++taskRefreshGeneration;
@@ -1067,6 +1199,7 @@ async function refreshTasks() {
       });
     }
     taskNotice(data.tasks.length ? "Saved requests. No background execution is available." : "No saved tasks.");
+    showGrants(data);
     if (selectedTask) {
       const detail = await requestTask("inspect", {task_id: selectedTask});
       if (generation === taskRefreshGeneration) showTask(detail);

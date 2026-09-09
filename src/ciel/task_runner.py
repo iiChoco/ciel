@@ -44,7 +44,7 @@ from typing import Any, Awaitable, Callable, Iterable, Literal, Protocol
 
 from ciel.brain.extract import ExtractionBackend, ExtractionError, ExtractionLimits, Lease, extract_json
 from ciel.config import TasksConfig
-from ciel.tasks import (Attempt, Evidence, FeatureRecord, Namespace, RecordSet, Step, Task, TaskConflict, TaskLimit,
+from ciel.tasks import (Attempt, Evidence, FeatureRecord, GrantSetup, Namespace, RecordSet, Step, Task, TaskConflict, TaskLimit,
                         TaskStore, TaskStoreError, WaitReason)
 
 log = logging.getLogger(__name__)
@@ -144,6 +144,12 @@ class TaskRunner:
     @property
     def namespaces(self) -> tuple[Namespace, ...]:
         return tuple(a.namespace for a in self._adapters if a.namespace is not None)
+
+    @property
+    def setups(self) -> tuple[GrantSetup, ...]:
+        """What each adapter offers the owner to approve; an adapter with no
+        standing work to offer simply has none."""
+        return tuple(setup for setup in (getattr(a, 'setup', None) for a in self._adapters) if setup is not None)
 
     # ── what the ladder reads ─────────────────────────────────────────────────
 

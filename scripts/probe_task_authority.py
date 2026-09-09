@@ -21,9 +21,16 @@ mandate; an expired grant is marked so on the record; the owner's approval of
 an exact proposal creates one task and marks the proposal in one transaction,
 a stale proposal revision creates none, and a derived origin can never come
 through create; the controller derives only through a registered namespace
-and journals it; the owner view lists mandates and grants; a version-three
-store is lifted to four with every origin saying it was human and a repeated
-request still finding its task; and everything validates after reopening.
+and journals it; the owner view lists mandates, grants, and open drafts; the
+Chart form saves a draft that narrows an adapter's setup and carries nothing
+the owner did not see; approval is refused before any question for a draft
+the owner is not looking at or a runtime with no broker, a no leaves the
+draft, an edit while the question is open leaves a draft even after a yes,
+and only a matching yes activates, journaled with its approval reference; a
+version-three store is lifted to four with every origin saying it was human
+and a repeated request still finding its task; a version-four store is
+lifted to five with its open draft discarded and its grant standing; and
+everything validates after reopening.
 
     uv run --no-sync python scripts/probe_task_authority.py
 """
@@ -41,8 +48,8 @@ from ciel.config import JournalConfig, TasksConfig
 from ciel.journal import ActionJournal
 from ciel.task_context import TaskBinding
 from ciel.task_controls import TaskController
-from ciel.tasks import (Criterion, DerivedOrigin, Evidence, GrantLimits, HumanOrigin, Namespace, Origin, RecordSet, RecordWrite, Scope,
-                        Specification, Step, TaskConflict, TaskLimit, TaskStore)
+from ciel.tasks import (Criterion, DerivedOrigin, Evidence, GrantLimits, GrantSetup, HumanOrigin, Namespace, Origin, RecordSet, RecordWrite,
+                        Scope, Specification, Step, TaskConflict, TaskLimit, TaskStore, TaskStoreError)
 
 CHECKS: list[str] = []
 OWNER = 'fixture-owner'
@@ -51,6 +58,11 @@ SCOPE = Scope(('calendar.create', 'inbox.read'), ('calendar:primary', 'inbox:mai
 LIMITS = GrantLimits(max_children=4, window_s=60.0, max_per_window=2, lifetime_s=3600.0)
 NAMESPACE = Namespace('fixture-inbox', 1, lambda payload: None if isinstance(payload.get('status'), str) else (_ for _ in ()).throw(ValueError('status')))
 OTHER = Namespace('fixture-other', 1, lambda payload: None)
+OUTCOME = 'Confirmed dinners land on the calendar'
+SETUP = GrantSetup(NAMESPACE.name, 'Events from email', OUTCOME, 'hub',
+                   (('calendar.create', 'add an event'), ('inbox.read', 'read the inbox')),
+                   (('calendar:primary', 'Personal calendar'), ('inbox:main', 'Main inbox')),
+                   (('account', 'me@example.test'),), LIMITS)
 
 
 def check(name: str, ok: bool) -> None:
@@ -88,51 +100,57 @@ def opened(directory: Path, **kwargs: object) -> TaskStore:
     return store
 
 
+async def draft(store: TaskStore, now: float, scope: Scope = SCOPE, limits: GrantLimits = LIMITS, **kwargs: object):
+    return await store.save_grant_draft(OWNER, 'hub', NAMESPACE.name, OUTCOME, scope, limits, (('account', 'me@example.test'),), now=now, **kwargs)
+
+
 async def activate(store: TaskStore, now: float = 1000.0, limits: GrantLimits = LIMITS) -> tuple:
-    draft = await store.save_grant_draft(OWNER, 'hub', SCOPE, (('account', 'me@example.test'),), now=now)
-    return await store.activate_grant(TURN, draft.id, draft.revision, draft.digest, 'journal:approval-1',
-                                      outcome='Confirmed dinners land on the calendar', namespace=NAMESPACE.name, limits=limits, now=now)
+    saved = await draft(store, now, limits=limits)
+    return await store.activate_grant(TURN, saved.id, saved.revision, saved.digest, 'journal:approval-1', now=now)
 
 
 async def probe_drafts_and_activation(root: Path) -> None:
     print('\na draft is looked at; a grant is approved')
     async with opened(root / 'activation') as store:
-        draft = await store.save_grant_draft(OWNER, 'hub', Scope(('inbox.read', 'calendar.create', 'inbox.read'), ('inbox:main', 'calendar:primary')),
-                                             (('account', 'me@example.test'),), now=1000)
-        check('a saved draft is normalized, revisioned, and never executable',
-              draft.scope == SCOPE and draft.revision == 1 and draft.status == 'draft' and len(draft.digest) == 64)
-        edited = await store.save_grant_draft(OWNER, 'hub', SCOPE, (('account', 'other@example.test'),), draft_id=draft.id, expected_revision=1, now=1001)
-        check('editing the draft moves its revision and its digest together', edited.revision == 2 and edited.digest != draft.digest)
-        await refused('an edit against a stale draft revision is refused', store.save_grant_draft(OWNER, 'hub', SCOPE, draft_id=draft.id, expected_revision=1))
+        saved = await draft(store, 1000, scope=Scope(('inbox.read', 'calendar.create', 'inbox.read'), ('inbox:main', 'calendar:primary')))
+        check('a saved draft is normalized, revisioned, names its adapter and outcome, and is never executable',
+              saved.scope == SCOPE and saved.revision == 1 and saved.status == 'draft' and len(saved.digest) == 64
+              and saved.namespace == NAMESPACE.name and saved.outcome == OUTCOME and saved.limits == LIMITS)
+        edited = await draft(store, 1001, scope=Scope(('calendar.create',), ('calendar:primary',)), draft_id=saved.id, expected_revision=1)
+        check('editing the draft moves its revision and its digest together', edited.revision == 2 and edited.digest != saved.digest)
+        await refused('an edit against a stale draft revision is refused', draft(store, 1002, draft_id=saved.id, expected_revision=1))
+        await refused('a draft cannot name a namespace no adapter registered',
+                      store.save_grant_draft(OWNER, 'hub', 'nobody', OUTCOME, SCOPE, LIMITS, now=1002), TaskStoreError)
+        await refused('a draft with limits above the configured caps is refused, not clamped silently',
+                      draft(store, 1002, limits=replace(LIMITS, max_children=100000)), TaskLimit)
         await refused('an approval of the revision the owner no longer sees leaves a draft, never a grant',
-                      store.activate_grant(TURN, draft.id, 1, draft.digest, 'journal:1', outcome='x', namespace=NAMESPACE.name, limits=LIMITS))
+                      store.activate_grant(TURN, saved.id, 1, saved.digest, 'journal:1'))
         await refused('an approval whose digest differs from the draft is refused',
-                      store.activate_grant(TURN, draft.id, 2, draft.digest, 'journal:1', outcome='x', namespace=NAMESPACE.name, limits=LIMITS))
+                      store.activate_grant(TURN, saved.id, 2, saved.digest, 'journal:1'))
         await refused('an unattended turn cannot activate a grant',
-                      store.activate_grant(replace(TURN, attended=False), draft.id, 2, edited.digest, 'journal:1', outcome='x', namespace=NAMESPACE.name, limits=LIMITS))
+                      store.activate_grant(replace(TURN, attended=False), saved.id, 2, edited.digest, 'journal:1'))
         await refused('a derived origin cannot activate a grant',
-                      store.activate_grant(DerivedOrigin(OWNER, 'r', 'm', 1, 'g', 1, NAMESPACE.name, 'e', 's', 1000.0, 'k'), draft.id, 2, edited.digest, 'journal:1',
-                                           outcome='x', namespace=NAMESPACE.name, limits=LIMITS))
-        await refused('a namespace no adapter registered cannot hold a mandate',
-                      store.activate_grant(TURN, draft.id, 2, edited.digest, 'journal:1', outcome='x', namespace='nobody', limits=LIMITS),
-                      Exception)
-        await refused('limits above the configured caps are refused, not clamped silently',
-                      store.activate_grant(TURN, draft.id, 2, edited.digest, 'journal:1', outcome='x', namespace=NAMESPACE.name,
-                                           limits=replace(LIMITS, max_children=100000)), TaskLimit)
+                      store.activate_grant(DerivedOrigin(OWNER, 'r', 'm', 1, 'g', 1, NAMESPACE.name, 'e', 's', 1000.0, 'k'), saved.id, 2, edited.digest, 'journal:1'))
         check('nothing above made a grant', not await store.grants(OWNER) and not await store.mandates(OWNER))
-        grant, mandate = await store.activate_grant(TURN, draft.id, 2, edited.digest, 'journal:approval-1',
-                                                    outcome='Confirmed dinners land on the calendar', namespace=NAMESPACE.name, limits=LIMITS, now=1002)
-        check('the approval commits the grant and the mandate together',
+        view = await store.owner_view(OWNER)
+        check('the owner view lists the open draft', view['drafts'][0]['id'] == saved.id and view['drafts'][0]['revision'] == 2)
+        grant, mandate = await store.activate_grant(TURN, saved.id, 2, edited.digest, 'journal:approval-1', now=1002)
+        check('the approval commits the grant and the mandate together, from the draft alone',
               grant.status == 'active' and grant.digest == edited.digest and grant.approval_ref == 'journal:approval-1'
+              and grant.scope == edited.scope and grant.limits == LIMITS
               and grant.expires_at == 1002 + LIMITS.lifetime_s and mandate.status == 'active' and mandate.grant_id == grant.id
-              and mandate.namespace == NAMESPACE.name and mandate.children == 0)
+              and mandate.namespace == NAMESPACE.name and mandate.outcome == OUTCOME and mandate.children == 0)
         drafts = await store.grant_drafts(OWNER)
         check('the draft is marked activated and cannot be approved twice', drafts[0].status == 'activated')
         await refused('a second approval of the same draft makes nothing',
-                      store.activate_grant(TURN, draft.id, drafts[0].revision, edited.digest, 'journal:2', outcome='x', namespace=NAMESPACE.name, limits=LIMITS))
+                      store.activate_grant(TURN, saved.id, drafts[0].revision, edited.digest, 'journal:2'))
         view = await store.owner_view(OWNER)
-        check('the owner view lists mandates and grants beside tasks',
-              view['mandates'][0]['id'] == mandate.id and view['grants'][0]['id'] == grant.id and view['tasks'] == [])
+        check('the owner view lists mandates and grants beside tasks, and the activated draft is no longer open',
+              view['mandates'][0]['id'] == mandate.id and view['grants'][0]['id'] == grant.id and view['tasks'] == [] and view['drafts'] == [])
+        lowered = await draft(store, 1003, limits=replace(LIMITS, max_children=200))
+    async with opened(root / 'activation', max_grant_children=100) as store:
+        await refused('a cap lowered after the draft was saved refuses its activation',
+                      store.activate_grant(TURN, lowered.id, lowered.revision, lowered.digest, 'journal:3'), TaskLimit)
         check('another owner sees neither', (await store.owner_view('another'))['mandates'] == [] and (await store.owner_view('another'))['grants'] == [])
     async with opened(root / 'activation') as store:
         check('grant, mandate, and activated draft validate after reopening',
@@ -283,6 +301,81 @@ async def probe_approval_path(root: Path) -> None:
         check('the approval reference survives reopening', (await store.get(OWNER, task.id)).origin.approval_ref == 'journal:proposal-evt-1:1')
 
 
+class FakeAsker:
+    """The pipeline's broker, as the controller sees it: a question, a channel, a verdict."""
+
+    def __init__(self, verdict: bool = True) -> None:
+        self.verdict = verdict
+        self.questions: list[str] = []
+        self.shown: list[str] = []
+        self.before_answer: object = None
+
+    async def __call__(self, question: str, send) -> bool:
+        self.questions.append(question)
+        await send(question)
+        if self.before_answer is not None:
+            await self.before_answer()
+        return self.verdict
+
+
+async def probe_approval_surface(root: Path) -> None:
+    print('\nthe form saves a draft; the broker\'s yes makes the grant')
+    journal = ActionJournal(JournalConfig(dir=root / 'journal-surface'))
+    controller = TaskController(config(root / 'surface', enabled=True), journal, namespaces=(NAMESPACE,), setups=(SETUP,))
+    await controller.start()
+    store = controller.store
+    assert store is not None
+    binding = TaskBinding(Origin(OWNER, 'chart-turn', 'web', ingress_ids=('web:1',)), 1, 1)
+    view = await controller.view(binding)
+    check('the list view carries the adapters\' setups for the form', view['setups'][0]['title'] == 'Events from email' and view['drafts'] == [])
+    await refused('a draft names only offered operations', controller.apply(binding, 'grant_draft_save', {'namespace': NAMESPACE.name, 'operations': ['calendar.delete'], 'targets': ['calendar:primary']}), ValueError)
+    await refused('a draft names only offered targets', controller.apply(binding, 'grant_draft_save', {'namespace': NAMESPACE.name, 'operations': ['calendar.create'], 'targets': ['calendar:work']}), ValueError)
+    await refused('a draft needs a feature that offers a grant', controller.apply(binding, 'grant_draft_save', {'namespace': 'nobody', 'operations': ['calendar.create'], 'targets': ['calendar:primary']}), ValueError)
+    saved = (await controller.apply(binding, 'grant_draft_save', {'namespace': NAMESPACE.name, 'operations': ['calendar.create'], 'targets': ['calendar:primary']}))['draft']
+    check('the saved draft narrows the setup and carries the adapter\'s host, account, outcome, and limits',
+          saved['scope'] == {'operations': ('calendar.create',), 'targets': ('calendar:primary',)} and saved['host'] == 'hub'
+          and saved['bindings'] == (('account', 'me@example.test'),) and saved['outcome'] == OUTCOME and saved['limits']['max_per_window'] == 2)
+    edited = (await controller.apply(binding, 'grant_draft_save', {'namespace': NAMESPACE.name, 'operations': ['calendar.create', 'inbox.read'], 'targets': ['calendar:primary', 'inbox:main'], 'draft_id': saved['id']}, revision=saved['revision']))['draft']
+    check('editing through the form moves the revision', edited['revision'] == 2 and edited['scope']['operations'] == ('calendar.create', 'inbox.read'))
+    shown: list[str] = []
+    async def send(text: str) -> None:
+        shown.append(text)
+    await refused('approval is refused before any question when the runtime has no broker',
+                  controller.approve(binding, {'draft_id': saved['id'], 'revision': 2, 'digest': edited['digest']}, send), TaskStoreError)
+    asker = FakeAsker(verdict=False)
+    controller.bind_approval(asker)
+    await refused('an approval of a revision the owner is not looking at is refused before the question is put',
+                  controller.approve(binding, {'draft_id': saved['id'], 'revision': 1, 'digest': saved['digest']}, send))
+    check('no question was asked for the stale draft', asker.questions == [] and shown == [])
+    result = await controller.approve(binding, {'draft_id': saved['id'], 'revision': 2, 'digest': edited['digest']}, send)
+    check('a no leaves the draft and makes no grant', result['approved'] is False and not await store.grants(OWNER) and (await store.grant_drafts(OWNER))[0].status == 'draft')
+    check('the question was shown through the session\'s own channel and names what is approved',
+          shown == asker.questions and 'add an event' in shown[0] and 'Personal calendar' in shown[0] and 'me@example.test' in shown[0] and '2 per' in shown[0])
+    asker = FakeAsker(verdict=True)
+    async def edit_while_asking() -> None:
+        await controller.apply(binding, 'grant_draft_save', {'namespace': NAMESPACE.name, 'operations': ['calendar.create'], 'targets': ['calendar:primary'], 'draft_id': saved['id']}, revision=2)
+    asker.before_answer = edit_while_asking
+    controller.bind_approval(asker)
+    await refused('an edit while the question is open leaves a draft, never a grant, even after a yes',
+                  controller.approve(binding, {'draft_id': saved['id'], 'revision': 2, 'digest': edited['digest']}, send))
+    check('still no grant', not await store.grants(OWNER))
+    current = (await store.grant_drafts(OWNER))[0]
+    asker.before_answer = None
+    result = await controller.approve(binding, {'draft_id': current.id, 'revision': current.revision, 'digest': current.digest}, send)
+    check('a yes that matches the draft activates the grant and the mandate',
+          result['approved'] is True and result['grant']['status'] == 'active' and result['mandate']['status'] == 'active'
+          and result['grant']['approval_ref'].startswith(f'chart:{current.id}:{current.revision}:'))
+    entries = journal.recent(3)
+    check('activation is journaled with its approval reference', entries[-1]['tool'] == 'task_grant_activate' and result['grant']['approval_ref'] in entries[-1]['note'])
+    await refused('the activated draft cannot be approved again', controller.approve(binding, {'draft_id': current.id, 'revision': current.revision + 1, 'digest': current.digest}, send))
+    stranger = TaskBinding(Origin('someone', 'chart-turn', 'web', ingress_ids=('web:3',)), 1, 1)
+    await refused('another owner cannot save a draft', controller.apply(stranger, 'grant_draft_save', {'namespace': NAMESPACE.name, 'operations': ['calendar.create'], 'targets': ['calendar:primary']}))
+    another = (await controller.apply(binding, 'grant_draft_save', {'namespace': NAMESPACE.name, 'operations': ['inbox.read'], 'targets': ['inbox:main']}))['draft']
+    discarded = (await controller.apply(binding, 'grant_draft_discard', {'draft_id': another['id']}, revision=another['revision']))['draft']
+    check('a discarded draft leaves the open list', discarded['status'] == 'discarded' and (await controller.view(binding))['drafts'] == [])
+    await controller.close()
+
+
 async def probe_controller(root: Path) -> None:
     print('\nthe controller derives only through a registered adapter')
     journal_dir = root / 'journal'
@@ -328,12 +421,28 @@ async def probe_migration(root: Path) -> None:
         db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
         version = db.execute('PRAGMA user_version').fetchone()[0]
         db.close()
-        check('a version-three store opens as version four with every task in place and its origin saying it was human',
-              version == 4 and lifted.status == 'queued' and lifted.origin == task.origin and lifted.origin.kind == 'human')
+        check('a version-three store opens as the current version with every task in place and its origin saying it was human',
+              version == 5 and lifted.status == 'queued' and lifted.origin == task.origin and lifted.origin.kind == 'human')
         same = await store.create(Origin(OWNER, 'request-1', 'voice', ingress_ids=('voice:1',)), child_spec(), LOOK, now=7001)
         check('a repeated request still finds its migrated task', same.id == task.id)
         grant, mandate = await activate(store, now=7002)
         check('a lifted store holds authority like a fresh one', mandate.status == 'active')
+        open_draft = await draft(store, 7003)
+    print('\nversion four is lifted, not reset')
+    db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
+    db.executescript('ALTER TABLE grant_drafts DROP COLUMN limits_json; ALTER TABLE grant_drafts DROP COLUMN outcome; '
+                     'ALTER TABLE grant_drafts DROP COLUMN namespace; PRAGMA user_version=4;')
+    db.commit()
+    db.close()
+    async with opened(root / 'schema') as store:
+        db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
+        version = db.execute('PRAGMA user_version').fetchone()[0]
+        db.close()
+        drafts = {d.id: d for d in await store.grant_drafts(OWNER)}
+        check('a version-four store opens as version five: the open draft is discarded, the activated one keeps its history, the grant stands',
+              version == 5 and drafts[open_draft.id].status == 'discarded' and drafts[open_draft.id].revision == open_draft.revision + 1
+              and any(d.status == 'activated' for d in drafts.values()) and (await store.mandates(OWNER))[0].status == 'active')
+        check('a lifted store takes a new draft with every field', (await draft(store, 7004)).status == 'draft')
 
 
 async def main() -> None:
@@ -343,6 +452,7 @@ async def main() -> None:
         await probe_derivation(root)
         await probe_allowances_and_controls(root)
         await probe_approval_path(root)
+        await probe_approval_surface(root)
         await probe_controller(root)
         await probe_migration(root)
     print(f'\nall {len(CHECKS)} checks passed')

@@ -377,8 +377,18 @@ class WebLink:
             operation = frame['operation']
             if operation in ('list', 'inspect'):
                 response['data'] = await controller.view(binding, frame.get('task_id') if operation == 'inspect' else None)
+            elif operation == 'grant_approve':
+                # The question goes to the one session that pressed Approve,
+                # never the room: a private frame, not a broadcast, and its
+                # answer rides back as any web answer does.
+                async def show(text: str) -> None:
+                    self._send_to(ws, {'type': 'confirm', 'text': text})
+                response['data'] = await controller.approve(binding, frame, show)
+                for peer in tuple(self._peers):
+                    if peer is not getattr(self, '_spoke', None):
+                        self._send_to(peer, {'type': 'task.changed'})
             else:
-                response['data'] = await controller.apply(binding, operation, frame, revision=frame['revision'])
+                response['data'] = await controller.apply(binding, operation, frame, revision=frame.get('revision'))
                 for peer in tuple(self._peers):
                     if peer is not getattr(self, '_spoke', None):
                         self._send_to(peer, {'type': 'task.changed'})

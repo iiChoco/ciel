@@ -93,6 +93,32 @@ async def main() -> None:
         verdict is False and sink.lines[-1] == ("Okay, skipping it.", False),
     )
 
+    print("\na question with no turn behind it, through one channel")
+    broker, rows = make_broker(timeout_s=5.0)
+    broker._config = replace(broker._config, discord=replace(broker._config.discord, confirm_timeout_s=1.0))
+    shown: list[str] = []
+
+    async def chart_send(text: str) -> None:
+        shown.append(text)
+
+    verdict, _ = await asyncio.gather(
+        broker.ask_through(chart_send, "web", "Approve a standing grant — okay?"), answer_soon(broker, "yes")
+    )
+    check(
+        "a yes over the channel approves, the question went through it, and the channel is gone again",
+        verdict is True and shown == ["Approve a standing grant — okay?"] and broker._remote_send is None and not broker.active,
+    )
+    check("the rows label the answer as remote", rows[-1] == ("you-confirm-remote", "yes"))
+    turn_sink = FakeSink()
+    with broker.remote(turn_sink, origin="spoke"):
+        verdict = await broker.ask_through(chart_send, "web", "Still there?")
+        check(
+            "while a turn has its channel installed, the question waits and then gives up rather than clobbering it",
+            verdict is False and len(shown) == 1 and broker._remote_send is turn_sink,
+        )
+    verdict = await broker.ask_through(chart_send, "web", "Approve — okay?")
+    check("no answer within the deadline is a no, and leaves the channel clear", verdict is False and broker._remote_send is None)
+
     broker, rows = make_broker()
     sink = FakeSink()
 

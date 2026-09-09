@@ -59,6 +59,20 @@
         "design/boards"
       ],
       "port": 8790
+    },
+    {
+      "name": "chart-fixture",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "--no-sync",
+        "python",
+        "scripts/probe_task_wire.py",
+        "--live",
+        "--port",
+        "8766"
+      ],
+      "port": 8766
     }
   ]
 }

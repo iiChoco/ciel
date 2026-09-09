@@ -1362,8 +1362,9 @@ Its first milestone, the runner, the ladder's task step, namespaced feature
 records, and the isolated extraction call, landed on 2026-09-08 and is
 described under durable tasks below. The second milestone's records, two
 kinds of origin, grant drafts, standing grants, mandates, and derived tasks,
-landed on 2026-09-09; the Chart grant form and the broker's approval surface
-are next, and nothing derives work under a grant until an adapter does. The revised plan specifies derived-task origins, a private Chart grant form,
+landed on 2026-09-09, and the Chart grant form with the broker's approval
+followed the same day; nothing derives work under a grant until an adapter
+offers one. The revised plan specifies derived-task origins, a private Chart grant form,
 versioned feature records, a grant-less preview task, one task per operation
 on a persistent event record with inert proposals for changes the grant does
 not cover, and an isolated extraction call sharing the ordinary model-turn
@@ -1438,8 +1439,29 @@ or revokes it, its grant expires, or its allowances run out; it is never run
 itself, and completing a child completes nothing above it. Revoking a grant
 ends its mandates at once, and an expired grant is marked so on the record
 the moment it is asked to derive. Config caps what a grant may hold and can
-never mint one. The Chart form that fills a draft and asks the yes is the
-next change; until then, nothing derives work under a grant.
+never mint one.
+
+**The form is in Chart; the yes is the broker's.** Under **Tasks**, a
+*Standing grants* section lists mandates with their grants, open drafts, and
+a form for every feature that offers one. An adapter offers a `GrantSetup`:
+its title, outcome, execution host, the operations and targets it can be
+granted with their labels, the accounts it would act as, and its limits. The
+owner narrows the operations and targets; everything else is shown, not
+chosen, and the saved draft carries the setup's host, account, outcome, and
+limits, so the draft holds nothing the owner did not see. Approve sends the
+revision and digest the page rendered. The controller refuses before any
+question when they are not the current draft, then asks through the
+pipeline's broker on that one private session: the question arrives as the
+ordinary confirm prompt on the socket that pressed Approve and on no other,
+and is answered the way every web question is. The broker takes the question
+only when it is idle and no turn has a channel installed, for exactly the
+ask's duration; a no, a timeout, a reload, or a draft edited while the
+question was open leaves the draft, never a grant. Activation rechecks the
+draft and the caps in its own transaction and journals the approval
+reference. Voice can say where the form is and can pause, resume, or revoke
+what was approved through `pause_mandate`, `resume_mandate`, and
+`revoke_grant`; it never fills the form or answers for the page. No feature
+offers a grant yet; the probes supply a synthetic one.
 
 **Derived work inherits, it never invents.** A task's origin now says which
 kind it is. A `HumanOrigin` is a live private owner turn, as before, and is
@@ -1583,9 +1605,10 @@ its wait/failure policy explicitly. The size limit bounds each serialized
 request, next step, observation batch, and private view. Enabling controls does
 not start scheduling; `runner` does.
 
-This is schema version four. Version-two and version-three stores are lifted
-at open with every task in place; version-one stores and newer stores are
-refused without migration or reset. Choose a fresh dedicated directory for these
+This is schema version five. Version-two, -three, and -four stores are lifted
+at open with every task in place, an open version-four draft discarded rather
+than guessed at; version-one stores and newer stores are refused without
+migration or reset. Choose a fresh dedicated directory for these
 controls; keep an existing store intact. The database, its full rollback-journal
 name `tasks.sqlite3-journal`, and `owner.lock` are forbidden to model file and
 shell tools, even in a broad workspace.
@@ -1908,9 +1931,9 @@ uv run scripts/probe_voice.py echo    # mic -> STT -> TTS, no model in the loop
 uv run --no-sync python scripts/probe_tasks.py       # records, owner controls, questions, retries, evidence, crash recovery, feature records, the v2→v3 lift
 uv run --no-sync python scripts/probe_task_runner.py # a synthetic adapter: one step, restart, fencing, giving up, human input wins, unsupported records
 uv run --no-sync python scripts/probe_extraction.py  # the isolated call: bounds, lease, timeout, cancellation, schema check, the client with nothing attached
-uv run --no-sync python scripts/probe_task_authority.py # drafts, grants, mandates, derived work: scope, dedupe, revision, allowances, revocation, expiry, approval, the v3→v4 lift
+uv run --no-sync python scripts/probe_task_authority.py # drafts, grants, mandates, derived work, the form's draft and the broker's yes, the v3 and v4 lifts
 uv run --no-sync python scripts/probe_task_tools.py  # real SDK dispatcher, turn authority, cancellation, drain debt
-uv run --no-sync python scripts/probe_task_wire.py   # two private Chart sockets, controls, conflicts, reconnect
+uv run --no-sync python scripts/probe_task_wire.py   # two private Chart sockets, controls, conflicts, reconnect, a draft and its private approval
 uv run --no-sync python scripts/probe_task_wire.py --live  # synthetic task states in Chart; temporary storage
 uv run --no-sync python scripts/probe_turns.py       # lane contract, trusted ingress, public/private clients
 uv run --no-sync python scripts/probe_hub_imports.py # Linux imports and temporary task-store lifecycle
@@ -1996,7 +2019,7 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `projects.py` | Atlas — durable working state per project |
 | `tasks.py` | Private task records, atomic owner controls, questions, evidence, recovery, eligibility, abandonment, namespaced feature records, grant drafts, standing grants, mandates, and derived work; the store dispatches nothing |
 | `task_context.py` | Turn authority captured by in-process tools and fenced through commit |
-| `task_controls.py` | Shared private owner controller, offline PR-watch validation, namespace registration, mandate and grant controls, the runtime-only derive path, and control journaling |
+| `task_controls.py` | Shared private owner controller, offline PR-watch validation, namespace registration, the grant form's drafts and approval, mandate and grant controls, the runtime-only derive path, and control journaling |
 | `task_runner.py` | The bounded runner: one read step for the oldest eligible task, the adapter contract, abandonment, and the human-input interrupt |
 | `brain/extract.py` | One isolated model call per extraction: a client with nothing attached, the turn lease, and the schema checked twice |
 | `transcript.py` | Trace — the record of the path actually taken |

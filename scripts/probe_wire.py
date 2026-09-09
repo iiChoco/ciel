@@ -101,6 +101,17 @@ def probe_codec() -> None:
     check('Chart controls need the revision they rendered', refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'pause', 'task_id': 't'}), 'c2h'))
     check('task request identities are bounded', refused(json.dumps({'type': 'task.request', 'request_id': 'r' * 257, 'operation': 'list'}), 'c2h'))
     check('task frame payloads are bounded', refused(json.dumps({'type': 'task.result', 'request_id': 'r', 'ok': True, 'data': {'text': 'x' * 65536}}), 'h2c'))
+    check('a new draft needs no revision but names its feature, operations, and targets',
+          not refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'grant_draft_save', 'namespace': 'n', 'operations': ['a'], 'targets': ['t']}), 'c2h')
+          and refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'grant_draft_save', 'namespace': 'n', 'operations': [1], 'targets': ['t']}), 'c2h'))
+    check('an edit of a saved draft carries its rendered revision', refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'grant_draft_save', 'namespace': 'n', 'operations': ['a'], 'targets': ['t'], 'draft_id': 'd'}), 'c2h'))
+    check('an approval names the draft, its revision, and its digest',
+          refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'grant_approve', 'draft_id': 'd', 'revision': 1}), 'c2h')
+          and not refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'grant_approve', 'draft_id': 'd', 'revision': 1, 'digest': 'x'}), 'c2h'))
+    check('mandate and grant controls name their record and revision',
+          refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'mandate_pause', 'revision': 1}), 'c2h')
+          and refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'grant_revoke', 'grant_id': 'g'}), 'c2h')
+          and not refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'grant_revoke', 'grant_id': 'g', 'revision': 2}), 'c2h'))
     check('Chart says retain a minted identity independently of their ack sequence', wire.decode(json.dumps({'type': 'say', 'text': 'watch', 'seq': 1, 'request_id': 'minted'}), 'c2h')['request_id'] == 'minted')
     print("\nthe codec")
     check(

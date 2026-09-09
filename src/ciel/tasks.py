@@ -95,7 +95,7 @@ Phase = Literal['prepared', 'dispatched', 'observed', 'checkpointed', 'verified'
 WaitReason = Literal['owner', 'external', 'resource', 'reconciliation']
 _TERMINAL = frozenset(('done', 'failed', 'cancelled'))
 _NOTICE = frozenset(('waiting', 'paused', 'done', 'failed', 'cancelled'))
-_SCHEMA = 4
+_SCHEMA = 5
 _POLICY = 1
 """What a grant's scope and limits mean; a grant records the version it was approved under."""
 GrantStatus = Literal['active', 'revoked', 'expired']
@@ -106,7 +106,8 @@ _AUTHORITY_TABLES = '''
                 id TEXT PRIMARY KEY, owner TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0),
                 host TEXT NOT NULL, scope_json TEXT NOT NULL, bindings_json TEXT NOT NULL, digest TEXT NOT NULL,
                 status TEXT NOT NULL CHECK(status IN ('draft','activated','discarded')),
-                created_at REAL NOT NULL, updated_at REAL NOT NULL
+                created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                namespace TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL DEFAULT '', limits_json TEXT NOT NULL DEFAULT '{}'
             );
             CREATE TABLE grants (
                 id TEXT PRIMARY KEY, owner TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0),
@@ -364,13 +365,37 @@ class GrantDraft:
     revision: int
     host: str
     """The execution host the bindings were resolved on."""
+    namespace: str
+    """The one registered adapter the mandate would derive through."""
+    outcome: str
     scope: Scope
+    limits: GrantLimits
     bindings: tuple[tuple[str, str], ...]
     """Resolved account and target identities, as the adapter's setup names them."""
     digest: str
+    """Over everything above but the identity: what the owner's yes is bound to."""
     status: DraftStatus
     created_at: float
     updated_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class GrantSetup:
+    """What an adapter offers the owner to approve: the fields of the Chart
+    form, resolved on the execution host in application code. The owner
+    narrows the operations and targets; the rest is shown, not chosen."""
+
+    namespace: str
+    title: str
+    outcome: str
+    host: str
+    operations: tuple[tuple[str, str], ...]
+    """(operation, label) for every operation the adapter can be granted."""
+    targets: tuple[tuple[str, str], ...]
+    """(target, label): resolved identities such as a calendar, never a free string."""
+    bindings: tuple[tuple[str, str], ...]
+    """Resolved accounts the grant would act as."""
+    limits: GrantLimits
 
 
 @dataclass(frozen=True, slots=True)
@@ -451,9 +476,10 @@ def _trigger(event_key: str, source_revision: str) -> str:
     return _json((event_key, source_revision))
 
 
-def _digest(host: str, scope: Scope, bindings: tuple[tuple[str, str], ...]) -> str:
+def _digest(host: str, namespace: str, outcome: str, scope: Scope, limits: GrantLimits, bindings: tuple[tuple[str, str], ...]) -> str:
     """What the owner approves: the normalized draft, byte for byte."""
-    return hashlib.sha256(_json({'host': host, 'scope': asdict(scope), 'bindings': bindings}).encode()).hexdigest()
+    return hashlib.sha256(_json({'host': host, 'namespace': namespace, 'outcome': outcome, 'scope': asdict(scope),
+                                 'limits': asdict(limits), 'bindings': bindings}).encode()).hexdigest()
 
 
 class TaskStore:
@@ -558,7 +584,7 @@ class TaskStore:
             if not fresh:
                 version = self._db.execute('PRAGMA user_version').fetchone()[0]
                 app = self._db.execute('PRAGMA application_id').fetchone()[0]
-                if app != _APPLICATION or version not in (2, 3, _SCHEMA):
+                if app != _APPLICATION or version not in (2, 3, 4, _SCHEMA):
                     raise TaskStoreError('unsupported task schema; no migration or downgrade was attempted')
                 if self._db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise TaskStoreError('task database failed its integrity check')
@@ -566,8 +592,10 @@ class TaskStore:
             self._db.execute('PRAGMA synchronous=EXTRA')
             if not fresh and version == 2:
                 self._migrate_from_2()
-            if not fresh and version < _SCHEMA:
+            if not fresh and version < 4:
                 self._migrate_from_3()
+            if not fresh and version < _SCHEMA:
+                self._migrate_from_4()
             if not fresh:
                 self._validate_rows()
             if fresh:
@@ -667,9 +695,31 @@ class TaskStore:
             request = json.loads(row['request_json'])
             request['origin'] = asdict(_origin(request['origin']))
             self._db.execute('UPDATE tasks SET request_json=? WHERE id=?', (_json(request), row['id']))
-        self._db.execute(f'PRAGMA user_version={_SCHEMA}')
+        self._db.execute('PRAGMA user_version=4')
         self._db.execute('COMMIT')
-        log.info('task store migrated from schema 3 to %d', _SCHEMA)
+        log.info('task store migrated from schema 3 to 4')
+
+    def _migrate_from_4(self) -> None:
+        """Version four's draft did not yet say which adapter, outcome, and
+        limits it was for. Nothing could have saved one but a probe, and a
+        draft is never executable, so an open one is discarded rather than
+        guessed at; activated and discarded ones keep their history."""
+        assert self._db is not None
+        # A store lifted from three in this same open already has the columns:
+        # the tables are created in their current shape, so only a store that
+        # actually ran as version four has anything to add.
+        present = {row['name'] for row in self._db.execute('PRAGMA table_info(grant_drafts)')}
+        additions = ''.join(f"ALTER TABLE grant_drafts ADD COLUMN {name} {kind};" for name, kind in (
+            ('namespace', "TEXT NOT NULL DEFAULT ''"), ('outcome', "TEXT NOT NULL DEFAULT ''"), ('limits_json', "TEXT NOT NULL DEFAULT '{}'"))
+            if name not in present)
+        self._db.executescript(f'''
+            BEGIN IMMEDIATE;
+            {additions}
+            UPDATE grant_drafts SET status='discarded',revision=revision+1 WHERE status='draft';
+            PRAGMA user_version={_SCHEMA};
+            COMMIT;
+        ''')
+        log.info('task store migrated from schema 4 to %d', _SCHEMA)
 
     def register(self, namespace: Namespace) -> None:
         """Application code announces an adapter's records before the store opens."""
@@ -885,7 +935,7 @@ class TaskStore:
             'ingress': 'owner ingress_id task_id',
             'questions': 'id task_id revision prompt choices_json step_json answer answered_revision',
             'bindings': 'attempt_id task_revision client_generation tool_use_id journal_ref',
-            'grant_drafts': 'id owner revision host scope_json bindings_json digest status created_at updated_at',
+            'grant_drafts': 'id owner revision host scope_json bindings_json digest status created_at updated_at namespace outcome limits_json',
             'grants': 'id owner revision status scope_json digest approval_ref policy_version limits_json approved_at expires_at revoked_at updated_at',
             'mandates': 'id owner revision status outcome namespace grant_id grant_revision children window_start window_count detail created_at updated_at',
             'derivations': 'owner mandate_id namespace event_key source_revision task_id created_at',
@@ -981,9 +1031,17 @@ class TaskStore:
                 raise TaskStoreError('feature record payload is not an object')
         for row in self._db.execute('SELECT * FROM grant_drafts'):
             draft = self._draft_from(row)
-            if (draft.digest != _digest(draft.host, self._validate_scope(draft.scope), self._validate_bindings(draft.bindings))
-                    or any(_clock(value) != value for value in (draft.created_at, draft.updated_at))):
-                raise TaskStoreError('grant draft does not match its digest')
+            if any(_clock(value) != value for value in (draft.created_at, draft.updated_at)):
+                raise TaskStoreError('grant draft has invalid timestamps')
+            # A draft that is still open is what the owner may yet approve, so
+            # its digest must be the one this runtime would compute; a closed
+            # one keeps the digest of the day it was approved or dropped.
+            if draft.status == 'draft':
+                _text(draft.namespace, 'namespace')
+                _text(draft.outcome, 'outcome')
+                if draft.digest != _digest(draft.host, draft.namespace, draft.outcome, self._validate_scope(draft.scope), draft.limits,
+                                           self._validate_bindings(draft.bindings)):
+                    raise TaskStoreError('grant draft does not match its digest')
         for row in self._db.execute('SELECT * FROM grants'):
             grant = self._grant_from(row)
             _text(grant.approval_ref, 'approval reference')
@@ -1391,7 +1449,9 @@ class TaskStore:
                           'mandates': [asdict(self._mandate_from(row)) for row in self._db.execute(
                               'SELECT * FROM mandates WHERE owner=? ORDER BY updated_at DESC,id LIMIT ?', (owner, self._config.max_active))],
                           'grants': [asdict(self._grant_from(row)) for row in self._db.execute(
-                              'SELECT * FROM grants WHERE owner=? ORDER BY updated_at DESC,id LIMIT ?', (owner, self._config.max_active))]}
+                              'SELECT * FROM grants WHERE owner=? ORDER BY updated_at DESC,id LIMIT ?', (owner, self._config.max_active))],
+                          'drafts': [asdict(self._draft_from(row)) for row in self._db.execute(
+                              "SELECT * FROM grant_drafts WHERE owner=? AND status='draft' ORDER BY updated_at DESC,id LIMIT ?", (owner, self._config.max_active))]}
             else:
                 task = self._get(owner, task_id)
                 questions = [dict(r) for r in self._db.execute('SELECT * FROM questions WHERE task_id=? ORDER BY revision DESC LIMIT 1', (task_id,))]
@@ -1471,7 +1531,9 @@ class TaskStore:
     # ── authority: drafts, grants, mandates, derived work ────────────────────
 
     def _draft_from(self, row: sqlite3.Row) -> GrantDraft:
-        return GrantDraft(row['id'], row['owner'], row['revision'], row['host'], _scope(json.loads(row['scope_json'])),
+        limits = json.loads(row['limits_json'])
+        return GrantDraft(row['id'], row['owner'], row['revision'], row['host'], row['namespace'], row['outcome'],
+                          _scope(json.loads(row['scope_json'])), GrantLimits(**limits) if limits else GrantLimits(1, 1.0, 1, 1.0),
                           tuple(tuple(pair) for pair in json.loads(row['bindings_json'])), row['digest'], row['status'],
                           row['created_at'], row['updated_at'])
 
@@ -1536,33 +1598,42 @@ class TaskStore:
             raise TaskLimit('grant limits exceed the configured caps')
         return limits
 
-    async def save_grant_draft(self, owner: str, host: str, scope: Scope, bindings: tuple[tuple[str, str], ...] = (), *,
-                               draft_id: str | None = None, expected_revision: int | None = None,
-                               now: float | None = None, fence: Fence | None = None) -> GrantDraft:
+    async def save_grant_draft(self, owner: str, host: str, namespace: str, outcome: str, scope: Scope, limits: GrantLimits,
+                               bindings: tuple[tuple[str, str], ...] = (), *, draft_id: str | None = None,
+                               expected_revision: int | None = None, now: float | None = None, fence: Fence | None = None) -> GrantDraft:
         """A draft is what the owner is looking at, never what anything may do.
         Editing it moves its revision, which is what makes a pending approval stale."""
         _text(owner, 'owner')
         _text(host, 'execution host')
+        _text(outcome, 'outcome')
+        spec = self._namespace(namespace)
         scope = self._validate_scope(scope)
+        limits = self._validate_limits(limits)
         bindings = self._validate_bindings(bindings)
-        digest = _digest(host, scope, bindings)
+        digest = _digest(host, spec.name, outcome, scope, limits, bindings)
         stamp = _clock(now)
         def write() -> GrantDraft:
             assert self._db is not None
             if draft_id is None:
                 new_id = uuid.uuid4().hex
-                self._db.execute('INSERT INTO grant_drafts VALUES(?,?,?,?,?,?,?,?,?,?)',
-                                 (new_id, owner, 1, host, self._bounded(asdict(scope)), self._bounded(bindings), digest, 'draft', stamp, stamp))
+                self._db.execute('INSERT INTO grant_drafts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                                 (new_id, owner, 1, host, self._bounded(asdict(scope)), self._bounded(bindings), digest, 'draft', stamp, stamp,
+                                  spec.name, outcome, self._bounded(asdict(limits))))
                 return self._draft(owner, new_id)
             draft = self._draft(owner, draft_id)
             if draft.status != 'draft':
                 raise TaskConflict('the draft is no longer editable')
             if expected_revision is not None and draft.revision != expected_revision:
                 raise TaskConflict('draft revision changed')
-            self._db.execute('UPDATE grant_drafts SET revision=revision+1,host=?,scope_json=?,bindings_json=?,digest=?,updated_at=? WHERE id=?',
-                             (host, self._bounded(asdict(scope)), self._bounded(bindings), digest, max(stamp, draft.updated_at), draft_id))
+            self._db.execute('UPDATE grant_drafts SET revision=revision+1,host=?,scope_json=?,bindings_json=?,digest=?,updated_at=?,'
+                             'namespace=?,outcome=?,limits_json=? WHERE id=?',
+                             (host, self._bounded(asdict(scope)), self._bounded(bindings), digest, max(stamp, draft.updated_at),
+                              spec.name, outcome, self._bounded(asdict(limits)), draft_id))
             return self._draft(owner, draft_id)
         return await self._run(lambda: self._transaction(write, fence))
+
+    async def grant_draft(self, owner: str, draft_id: str) -> GrantDraft:
+        return await self._run(lambda: self._transaction(lambda: self._draft(owner, draft_id)))
 
     async def discard_grant_draft(self, owner: str, draft_id: str, *, revision: int | None = None,
                                   now: float | None = None, fence: Fence | None = None) -> GrantDraft:
@@ -1577,33 +1648,33 @@ class TaskStore:
         return await self._run(lambda: self._transaction(write, fence))
 
     async def activate_grant(self, origin: HumanOrigin, draft_id: str, revision: int, digest: str, approval_ref: str, *,
-                             outcome: str, namespace: str, limits: GrantLimits, now: float | None = None,
-                             fence: Fence | None = None, record: Callable[[Mandate], None] | None = None) -> tuple[StandingGrant, Mandate]:
+                             now: float | None = None, fence: Fence | None = None,
+                             record: Callable[[Mandate], None] | None = None) -> tuple[StandingGrant, Mandate]:
         """The broker's yes, bound to the exact draft revision and digest the owner
         saw, becomes a grant and the standing mandate under it in one transaction.
-        The turn that carries the approval is admitted exactly as a create is."""
+        The turn that carries the approval is admitted exactly as a create is;
+        the draft's limits meet the caps again, in case config lowered them."""
         if not isinstance(origin, HumanOrigin) or origin.attended is not True or origin.private is not True:
             raise TaskConflict('only an attended private owner turn may activate a grant')
         _text(origin.owner, 'owner')
         _text(approval_ref, 'approval reference')
-        _text(outcome, 'outcome')
         _text(digest, 'digest')
         if type(revision) is not int:
             raise ValueError('a draft revision is an integer')
-        limits = self._validate_limits(limits)
-        spec = self._namespace(namespace)
         stamp = _clock(now)
         def write() -> tuple[StandingGrant, Mandate]:
             assert self._db is not None
             draft = self._draft(origin.owner, draft_id)
             if draft.status != 'draft' or draft.revision != revision or draft.digest != digest:
                 raise TaskConflict('the approval does not match the current draft')
+            limits = self._validate_limits(draft.limits)
+            spec = self._namespace(draft.namespace)
             grant_id, mandate_id = uuid.uuid4().hex, uuid.uuid4().hex
             self._db.execute('INSERT INTO grants VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
                              (grant_id, origin.owner, 1, 'active', self._bounded(asdict(draft.scope)), draft.digest, approval_ref, _POLICY,
                               self._bounded(asdict(limits)), stamp, stamp + limits.lifetime_s, None, stamp))
             self._db.execute('INSERT INTO mandates VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                             (mandate_id, origin.owner, 1, 'active', outcome, spec.name, grant_id, 1, 0, stamp, 0, 'activated', stamp, stamp))
+                             (mandate_id, origin.owner, 1, 'active', draft.outcome, spec.name, grant_id, 1, 0, stamp, 0, 'activated', stamp, stamp))
             self._db.execute("UPDATE grant_drafts SET status='activated',revision=revision+1,updated_at=? WHERE id=?", (stamp, draft_id))
             return self._grant(origin.owner, grant_id), self._mandate(origin.owner, mandate_id)
         def execute() -> tuple[StandingGrant, Mandate]:

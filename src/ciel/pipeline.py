@@ -992,7 +992,9 @@ class Pipeline:
         self._task_controller = TaskController(
             config.tasks, self._journal,
             namespaces=self._task_runner.namespaces if self._task_runner is not None else (),
+            setups=self._task_runner.setups if self._task_runner is not None else (),
         )
+        self._task_controller.bind_approval(self._approve_grant)
         bind_tasks(self._task_controller, self._brain._task_authority.capture)
         if self._web_link is not None:
             self._web_link.bind_tasks(self._task_controller)
@@ -2194,6 +2196,11 @@ class Pipeline:
             TurnRequest(lane="web", text=text, arrival_wall=time.time(), origin=origin),
             self._web_sink(),
         )
+
+    async def _approve_grant(self, question: str, send: Any) -> bool:
+        """The Chart's grant approval: the broker's question, shown on the one
+        private session that asked, answered the way every web question is."""
+        return await self._confirm.ask_through(send, "web", question)
 
     def _web_sink(self) -> TurnSink:
         """The Chart's delivery: the transcript tap alone, or — with the

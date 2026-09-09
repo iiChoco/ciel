@@ -27,10 +27,29 @@ from ciel.hub.server import HubServer
 from ciel.remote.web import Admission, WebLink, admit
 from ciel.task_context import TaskBinding
 from ciel.task_controls import TaskController
-from ciel.tasks import Criterion, Evidence, Origin, Scope, Specification, Step, TaskStore
+from ciel.tasks import Criterion, Evidence, GrantLimits, GrantSetup, Namespace, Origin, Scope, Specification, Step, TaskStore
 from ciel.turn import owner_origin
 
 CHECKS: list[str] = []
+NAMESPACE = Namespace('fixture-inbox', 1, lambda payload: None)
+SETUP = GrantSetup(NAMESPACE.name, 'Events from email', 'Confirmed dinners land on the calendar', 'hub',
+                   (('calendar.create', 'add an event'), ('inbox.read', 'read the inbox')),
+                   (('calendar:primary', 'Personal calendar'), ('inbox:main', 'Main inbox')),
+                   (('account', 'me@example.test'),), GrantLimits(10, 86400.0, 4, 30 * 86400.0))
+
+
+class FakeAsker:
+    """The pipeline's broker as the link sees it: the question goes through
+    the channel the link hands over, and the fixture decides the verdict."""
+
+    def __init__(self, verdict: bool) -> None:
+        self.verdict = verdict
+        self.questions: list[str] = []
+
+    async def __call__(self, question: str, send) -> bool:
+        self.questions.append(question)
+        await send(question)
+        return self.verdict
 
 
 def check(name: str, ok: bool) -> None:
@@ -53,21 +72,21 @@ async def request(ws: Any, identity: str, operation: str, **fields: Any) -> dict
     return await receive(ws, 'task.result')
 
 
-async def fixture(root: Path) -> tuple[TaskController, HubServer, str, dict[str, Any]]:
+async def fixture(root: Path, port: int = 0) -> tuple[TaskController, HubServer, str, dict[str, Any]]:
     cfg = TasksConfig(enabled=True, directory=root / 'tasks')
-    controller = TaskController(cfg)
+    controller = TaskController(cfg, namespaces=(NAMESPACE,), setups=(SETUP,))
     await controller.start()
     binding = TaskBinding(owner_origin(cfg.owner, 'web', 'seed', namespace='chart'), 1, 1)
     task = (await controller.apply(binding, 'create', {'repository': 'fixture/repository', 'pr': 12, 'checks': ['build', 'review']}))['task']
-    link = HubServer(WebConfig(enabled=True, port=0), HubConfig(token='fixture-token', token_file=root / 'hub.token'))
+    link = HubServer(WebConfig(enabled=True, port=port), HubConfig(token='fixture-token', token_file=root / 'hub.token'))
     link.bind_tasks(controller)
     await link.start()
     port = link._site._server.sockets[0].getsockname()[1]
     return controller, link, f'http://127.0.0.1:{port}', task
 
 
-async def run(root: Path, live: bool) -> None:
-    controller, link, url, task = await fixture(root)
+async def run(root: Path, live: bool, port: int = 0) -> None:
+    controller, link, url, task = await fixture(root, port if live else 0)
     assert controller.store is not None
     try:
         if live:
@@ -88,6 +107,11 @@ async def run(root: Path, live: bool) -> None:
                     await controller.store.complete(controller.config.owner, record.id, record.revision)
                 else:
                     await controller.store.wait(controller.config.owner, record.id, record.revision, 'resource', 'Saved; execution is unavailable.')
+            owner = controller.config.owner
+            await controller.store.save_grant_draft(owner, 'hub', NAMESPACE.name, SETUP.outcome, Scope(('calendar.create',), ('calendar:primary',)), SETUP.limits, SETUP.bindings)
+            approved = await controller.store.save_grant_draft(owner, 'hub', NAMESPACE.name, SETUP.outcome, Scope(('calendar.create', 'inbox.read'), ('calendar:primary', 'inbox:main')), SETUP.limits, SETUP.bindings)
+            await controller.store.activate_grant(Origin(owner, 'fixture-approval', 'web'), approved.id, approved.revision, approved.digest, 'chart:fixture')
+            controller.bind_approval(FakeAsker(True))
             print('CHART_FIXTURE_URL=' + url, flush=True)
             await asyncio.Event().wait()
             return
@@ -117,6 +141,36 @@ async def run(root: Path, live: bool) -> None:
                 repeated = await request(second, 'resume', 'resume', task_id=task['id'], revision=fresh['data']['task']['revision'])
                 check('a repeated socket control cannot silently repeat the transition', not repeated['ok'])
                 check('task frames do not enter the shared replay ring', link._ring.seq == 0)
+                listed = await request(first, 'setups', 'list')
+                check('the list view carries the form\'s setups and no drafts yet', listed['data']['setups'][0]['title'] == 'Events from email' and listed['data']['drafts'] == [])
+                saved = await request(first, 'draft', 'grant_draft_save', namespace=NAMESPACE.name, operations=['calendar.create'], targets=['calendar:primary'])
+                draft = saved['data']['draft']
+                check('a Chart draft is saved with the setup\'s account and limits and shows on the other view',
+                      saved['ok'] and draft['bindings'] == [['account', 'me@example.test']] and (await request(second, 'see-draft', 'list'))['data']['drafts'][0]['id'] == draft['id'])
+                refused = await request(first, 'no-broker', 'grant_approve', draft_id=draft['id'], revision=draft['revision'], digest=draft['digest'])
+                check('approval without a broker is an explicit refusal, not a grant', not refused['ok'] and 'broker' in refused['error'])
+                asker = FakeAsker(True)
+                controller.bind_approval(asker)
+                stale = await request(second, 'stale-approve', 'grant_approve', draft_id=draft['id'], revision=draft['revision'] + 1, digest=draft['digest'])
+                check('a stale approval is refused before any question is put', not stale['ok'] and asker.questions == [])
+                await first.send_json({'type': 'task.request', 'request_id': 'approve', 'operation': 'grant_approve', 'draft_id': draft['id'], 'revision': draft['revision'], 'digest': draft['digest']})
+                shown = await receive(first, 'confirm')
+                check('the question reaches the session that pressed Approve as a private confirm frame', 'add an event' in shown['text'] and 'Personal calendar' in shown['text'])
+                result = await receive(first, 'task.result')
+                await second.send_json({'type': 'ping'})
+                seen_by_second = []
+                async with asyncio.timeout(3):
+                    while True:
+                        message = await second.receive_json()
+                        seen_by_second.append(message.get('type'))
+                        if message.get('type') == 'pong':
+                            break
+                check('the other view saw the change but never the question', 'confirm' not in seen_by_second and 'task.changed' in seen_by_second)
+                check('a yes activates the grant and the mandate for every view',
+                      result['ok'] and result['data']['approved'] is True and (await request(second, 'see-grant', 'list'))['data']['mandates'][0]['status'] == 'active')
+                mandate = (await request(first, 'mandates', 'list'))['data']['mandates'][0]
+                paused = await request(first, 'pause-mandate', 'mandate_pause', mandate_id=mandate['id'], revision=mandate['revision'])
+                check('a Chart pause of the mandate commits through the shared controller', paused['ok'] and paused['data']['mandate']['status'] == 'paused')
             async with session.ws_connect(url + '/ws') as fresh_socket:
                 await fresh_socket.send_json({'type': 'hello', 'role': 'chart'})
                 await receive(fresh_socket, 'hello')
@@ -208,6 +262,7 @@ async def run(root: Path, live: bool) -> None:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--live', action='store_true')
+    parser.add_argument('--port', type=int, default=0, help='with --live: a fixed port for the browser to find')
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='ciel-task-wire-') as tmp:
-        asyncio.run(run(Path(tmp), args.live))
+        asyncio.run(run(Path(tmp), args.live, args.port))

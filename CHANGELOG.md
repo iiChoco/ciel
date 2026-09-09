@@ -2,6 +2,61 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — The form is in Chart; the yes is the broker's
+
+**Why.** The records could hold a grant, but nothing could ask for one: a
+draft had no surface, and the owner's yes had no path from a page to the
+broker. This is the second half of the independent-action plan's second
+milestone. With it, a feature that offers a grant can be approved end to end,
+and still nothing derives work until an adapter offers one.
+
+**What.**
+
+- *A draft holds nothing the owner did not see.* Schema five gives a draft
+  its adapter, outcome, and limits, all under the digest; an adapter offers
+  a `GrantSetup` with labelled operations and targets, resolved accounts,
+  host, and limits, and the runner exposes them. The controller's
+  `grant_draft_save` lets the owner narrow operations and targets only; the
+  rest is the setup's. A version-four store is lifted with its open draft
+  discarded rather than guessed at.
+- *The yes comes through the broker, on one session.* `grant_approve`
+  refuses before any question when the revision and digest are not the
+  current draft, then asks through the pipeline's broker. The web link
+  shows the question as a private confirm frame to the socket that pressed
+  Approve, never a broadcast, and the answer rides back as any web answer.
+  The broker's new `ask_through` takes a question with no turn behind it
+  only when idle and no turn has a channel installed, for exactly the ask's
+  duration. A no, a timeout, or an edit while the question is open leaves a
+  draft; a matching yes activates, journaled with its approval reference.
+- *The Chart shows it.* A *Standing grants* section under Tasks lists
+  mandates with pause, resume, and revoke, open drafts with approve, edit,
+  and discard, and the form for every offered feature. The wire catalog
+  names each new operation and the record it must carry.
+- *Voice opens the door and closes it.* `pause_mandate`, `resume_mandate`,
+  and `revoke_grant` join the task tools; `list_tasks` says where the form
+  lives. Nothing spoken fills a form or answers for the page.
+
+**Probes.** `probe_task_authority.py 71 → 93: the draft's adapter, outcome,
+and limits under its digest, a cap lowered after saving, the form's offered
+operations and targets, approval refused before any question for a stale
+draft or a runtime with no broker, a no that keeps the draft, an edit while
+the question is open that leaves a draft even after a yes, the matching yes
+and its journal line, discard, and the version-four lift. probe_task_wire.py
+20 → 28: setups on the list view, a draft saved from one view and seen from
+another, approval without a broker refused, a stale approval refused before
+the question, the question as a private confirm frame on the asking socket
+and a task.changed on the other, a yes that activates for every view, and a
+mandate paused from the Chart. probe_confirm_wire.py 14 → 17: the
+channel-scoped ask approves and clears its channel, waits behind a turn's
+channel and gives up rather than clobbering it, and treats no answer as no.
+probe_wire.py 76 → 80: the grant operations' required fields. probe_tasks.py
+202: the version-two lift now lands on five. Rerun unchanged:
+probe_task_runner.py 25, probe_task_tools.py 24, probe_hub_imports.py 6,
+probe_turns.py 78, probe_hub_arbiter.py 61, probe_ladder.py 25; hub import
+clean. Visual: the live fixture served the real Chart with a setup, a draft,
+and an active mandate; the section, its form, keyboard focus, and the narrow
+layout were checked in the browser.`
+
 ## 2026-09-09 — Permission has a precise scope
 
 **Why.** The runner could give a task a turn, but every task still began in

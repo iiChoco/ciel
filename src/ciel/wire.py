@@ -108,7 +108,9 @@ CATALOG: dict[str, FrameSpec] = {
         optional={"seq": "int", "lane": "str", "say_id": "str", "request_id": "str", "owner_input": "bool"},
     ),
     "task.request": FrameSpec("c2h", required={"request_id": "str", "operation": "str"},
-                              optional={"task_id": "str", "revision": "int", "question_id": "str", "answer": "str"}),
+                              optional={"task_id": "str", "revision": "int", "question_id": "str", "answer": "str",
+                                        "draft_id": "str", "digest": "str", "namespace": "str", "operations": "list", "targets": "list",
+                                        "mandate_id": "str", "grant_id": "str"}),
     "task.result": FrameSpec("h2c", required={"request_id": "str", "ok": "bool", "data": "dict"}, optional={"error": "str"}),
     "task.changed": FrameSpec("h2c"),
     "mute": FrameSpec("c2h", required={"muted": "bool"}),
@@ -237,6 +239,14 @@ CLOSE_HELLO_TIMEOUT = 4408
 CLOSE_VERSION = 4409
 
 
+_TASK_IDENTITY = {
+    'list': '', 'inspect': 'task_id', 'pause': 'task_id', 'resume': 'task_id', 'answer': 'task_id', 'cancel': 'task_id',
+    'grant_draft_save': '', 'grant_draft_discard': 'draft_id', 'grant_approve': 'draft_id',
+    'mandate_pause': 'mandate_id', 'mandate_resume': 'mandate_id', 'mandate_revoke': 'mandate_id', 'grant_revoke': 'grant_id',
+}
+"""Every Chart task operation and the record identity it must carry."""
+
+
 # ── codec ────────────────────────────────────────────────────────────────────
 
 
@@ -266,12 +276,22 @@ def validate(frame: Any, direction: Direction) -> dict[str, Any]:
         if 'request_id' in frame and not 0 < len(frame['request_id']) <= 256:
             raise WireError('task request identity is missing or too long')
         if kind == 'task.request':
-            if frame['operation'] not in ('list', 'inspect', 'pause', 'resume', 'answer', 'cancel'):
+            operation = frame['operation']
+            # Each operation names the record it acts on; a control that
+            # changes one carries the revision the Chart rendered.
+            identity = _TASK_IDENTITY.get(operation)
+            if identity is None:
                 raise WireError('unknown task operation')
-            if frame['operation'] != 'list' and not frame.get('task_id'):
-                raise WireError('task identity is required')
-            if frame['operation'] not in ('list', 'inspect') and (type(frame.get('revision')) is not int or frame['revision'] < 1):
+            if identity and not frame.get(identity):
+                raise WireError(f'{identity.replace("_", " ")} is required')
+            if operation == 'grant_draft_save':
+                if not all(isinstance(v, str) and v for v in (*frame.get('operations', []), *frame.get('targets', []))) or not frame.get('namespace'):
+                    raise WireError('a draft names its feature, operations, and targets')
+            needs_revision = operation not in ('list', 'inspect') and (operation != 'grant_draft_save' or frame.get('draft_id'))
+            if needs_revision and (type(frame.get('revision')) is not int or frame['revision'] < 1):
                 raise WireError('a Chart control needs its rendered revision')
+            if operation == 'grant_approve' and not frame.get('digest'):
+                raise WireError('an approval names the digest it approves')
     for name in ('say_id', 'request_id'):
         if kind == 'say' and name in frame and frame[name] is not None and not 0 < len(frame[name]) <= 256:
             raise WireError('message identity is missing or too long')

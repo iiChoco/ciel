@@ -292,6 +292,32 @@ class VoiceConfirmBroker:
             self._remote_send = None
             self._remote_origin = None
 
+    async def ask_through(
+        self, send: Callable[[str], Awaitable[None]], origin: str, question: str
+    ) -> bool:
+        """One question with no turn behind it, over one channel.
+
+        The Chart's grant approval: the owner has pressed Approve on a
+        private session, and the yes must come from that session, through
+        this broker, like every other yes. The channel is installed for
+        exactly the ask's duration, and only once the broker is idle and
+        no turn has a channel of its own installed — a turn's routing is
+        never clobbered, and a question is never stacked on another. The
+        wait is bounded by the same deadline the question would get.
+        """
+        deadline = time.monotonic() + self._config.discord.confirm_timeout_s
+        while self._remote_send is not None or self.active or self._lock.locked():
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
+        self._remote_send, self._remote_origin = send, origin
+        try:
+            return await self.ask(question)
+        finally:
+            if self._remote_send is send:
+                self._remote_send = None
+                self._remote_origin = None
+
     @property
     def remote_active(self) -> bool:
         """Whether a *remote-origin* question is awaiting an answer — the
