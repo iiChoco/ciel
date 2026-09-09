@@ -1941,10 +1941,10 @@ class UIConfig:
 class CommandsConfig:
     enabled: bool = True
     """Local commands: utterances the pipeline handles itself, brain never
-    involved — "ten minute timer", "cancel the timer", "reload". Zero model
-    latency and zero cost, at the price of fixed phrasing; anything the
-    grammar in commands.py doesn't recognize with certainty still goes to
-    the brain as before."""
+    involved — "ten minute timer", "cancel the timer", "reload", "act
+    without asking". Zero model latency and zero cost, at the price of
+    fixed phrasing; anything the grammar in commands.py doesn't recognize
+    with certainty still goes to the brain as before."""
 
 
 @dataclass(frozen=True, slots=True)

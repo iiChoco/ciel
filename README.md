@@ -540,7 +540,14 @@ your own word before it runs; the journal is what is left of that.
 It is meant to be flipped, not set: with granting on, *"act without
 asking"* is a capability in the catalog below — granted through the
 spoken gate once, revoked at once with *"ask before acting again"*, from
-voice, Discord, or Chart. Editing the config does the same by hand.
+voice, Discord, or Chart. The words are a local command, not a request
+the model interprets: *"act without asking"*, *"stop asking me"*, *"no
+more confirmations"* on their own put the one question — *"Act without
+asking from now on — okay?"* — over the lane they came in on, and *"ask
+before acting again"*, *"ask first"*, *"confirmations on"* put it back
+with no question. A sentence that says more ("act without asking on the
+report") is not the switch and goes to the model. Editing the config does
+the same by hand.
 
 ### macOS may block folders independently
 

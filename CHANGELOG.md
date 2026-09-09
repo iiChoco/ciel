@@ -2,6 +2,31 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — The asking switch answers to its own words
+
+**Why.** Naming the phrase in the prompt was not enough: a conversation
+in which the model had already read *"act without asking"* as a manner
+three times kept reading it that way on the fourth. A switch on Ciel's
+own behaviour should not depend on a model's reading of it at all.
+
+**What.**
+
+- *A local command.* "Act without asking", "stop asking me", "no more
+  confirmations" and their close kin, whole and alone, never reach the
+  brain: the pipeline puts the grant's question — *"Act without asking
+  from now on — okay?"* — through the broker over the lane the words came
+  in on, and a yes writes the config through the catalog, journaled as
+  the tool call would be. "Ask before acting again", "ask first",
+  "confirmations on" revoke at once. A sentence that says more is not
+  the switch. With granting off the words change nothing, as the catalog
+  is still the boundary.
+
+**Probes.** `probe_turns.py 88 → 96: the words never reach the brain,
+the question rides the lane's confirm route, a no changes nothing, a
+yes writes ask_first = false and trips the reload, already-off asks
+nothing, the revoke writes true with no question, granting off leaves
+the file alone.`
+
 ## 2026-09-09 — "Act without asking" is heard as the grant it is
 
 **Why.** With the switch live on the hub, *"Ciel, act without asking"*

@@ -2319,7 +2319,7 @@ class Pipeline:
             # takes the normal path, so a missed match costs nothing new.
             cmd = match_command(req.text) if self._config.commands.enabled else None
             if cmd is not None and (
-                cmd.kind in ("reload", "dismiss", "speak_back") or self._timers is not None
+                cmd.kind in ("reload", "dismiss", "speak_back", "ask_first") or self._timers is not None
             ):
                 await self._run_lane_command(cmd, req, spec, sink)
                 return
@@ -2473,7 +2473,10 @@ class Pipeline:
             log.info("local command: %s", cmd.kind)
         else:
             log.info("local command (%s): %s", spec.log_name, cmd.kind)
-        reply = self._apply_local_command(cmd)
+        if cmd.kind == "ask_first":
+            reply = await self._set_ask_first(cmd.on, spec, sink)
+        else:
+            reply = self._apply_local_command(cmd)
         if reply is None and cmd.kind == "reload" and spec.reload_ack is not None:
             reply = spec.reload_ack
         if reply is None:
@@ -2748,6 +2751,50 @@ class Pipeline:
         # and force a fresh wake — the one behavior this is meant to avoid.
         await player.play(self._tts.stream(reply))
         self._spoke = True
+
+    async def _set_ask_first(self, on: bool, spec, sink: TurnSink) -> str:
+        """The asking switch by its own words: "act without asking" is the
+        grant act_without_asking, put to the owner as the broker's question
+        over whichever lane the words came in on; "ask before acting again"
+        is its revoke, instant like every revoke. The catalog is still the
+        boundary — with granting off the words change nothing — and both
+        directions are journaled the way the tools' calls are."""
+        from ciel.brain.tools.grants import describe_grant, grant_capability, revoke_capability
+
+        if not self._config.grants.enabled:
+            return "Granting is off in my config, so that stays as it is."
+        name = "act_without_asking"
+        if not on:
+            if not self._config.confirm.ask_first:
+                return "I already act without asking."
+            question = f"{describe_grant({'name': name})} — okay?"
+            confirm_origin = spec.confirm_origin
+            if confirm_origin is None and self._role == "hub":
+                confirm_origin = "spoke"
+            if confirm_origin is not None:
+                with self._confirm.remote(sink.confirm_send, origin=confirm_origin):
+                    approved = await self._confirm.ask(question)
+            else:
+                approved = await self._confirm.ask(question)
+            if not approved:
+                return "Then I keep asking."
+            result = await grant_capability.handler({"name": name})
+            verb = "Acting without asking from now on"
+        else:
+            if self._config.confirm.ask_first:
+                return "I already ask first."
+            result = await revoke_capability.handler({"name": name})
+            verb = "Asking first again"
+        text = str(result.get("content", [{}])[0].get("text", ""))
+        if self._journal is not None:
+            self._journal.record(
+                tool="grant_capability" if not on else "revoke_capability",
+                args={"name": name}, response=text, note="local command",
+            )
+        if not text.startswith("Done:"):
+            return text
+        note = text.split(". ", 1)[1] if ". " in text else ""
+        return f"{verb}. {note}".strip()
 
     def _apply_local_command(self, cmd: Command) -> str | None:
         """Execute a local command and return what to say (None: stay quiet).

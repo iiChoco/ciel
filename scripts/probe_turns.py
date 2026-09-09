@@ -83,12 +83,18 @@ class FakeConfirm:
     def __init__(self):
         self.remotes: list[str] = []
         self.cancels: list[str] = []
+        self.asked: list[str] = []
+        self.answer = True
 
     def remote(self, send, *, origin):
         self.remotes.append(origin)
         import contextlib
 
         return contextlib.nullcontext()
+
+    async def ask(self, question):
+        self.asked.append(question)
+        return self.answer
 
     def cancel(self, reason=""):
         self.cancels.append(reason)
@@ -235,6 +241,7 @@ def make_pipeline(script, *, error=None, events=None, muted=False,
     p._pending_text = None
     p._continue_listening = False
     p._reload_pending = False
+    p._journal = None
     return p
 
 
@@ -846,6 +853,55 @@ async def probe_speak_back() -> None:
     check("...bracketed once", sum(f["type"] == "turn.end" for f in server.frames) == 1)
 
 
+async def probe_ask_first() -> None:
+    print("\nthe asking switch by its own words")
+    import tomllib
+    from ciel.brain.tools import grants
+    from ciel.config import ConfirmConfig, GrantsConfig
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "config.toml"
+        path.write_text("[confirm]\nask_first = true\n")
+        p = make_pipeline(STREAM)
+        p._config = replace(p._config, grants=GrantsConfig(enabled=True), state_dir=Path(tmp))
+        grants.bind_config(p._config, path)
+
+        p._confirm.answer = False
+        await p._run_turn(TurnRequest(lane="web", text="Ciel, act without asking"), _TextSink(p, confirm_send=None))
+        check("the words never reach the brain", p._brain.prompts == [])
+        check("the grant is the broker's question, over the lane the words came in on",
+              p._confirm.asked == ["Act without asking from now on — okay?"] and p._confirm.remotes == ["web"])
+        check("a no changes nothing",
+              rows(p)[-1] == ("ciel", "Then I keep asking.")
+              and tomllib.loads(path.read_text())["confirm"]["ask_first"] is True)
+
+        p._confirm.answer = True
+        await p._run_turn(TurnRequest(lane="typed", text="stop asking me"), _TextSink(p))
+        check("a yes writes ask_first = false and says so",
+              tomllib.loads(path.read_text())["confirm"]["ask_first"] is False
+              and rows(p)[-1][1].startswith("Acting without asking from now on."))
+        check("the reload sentinel is tripped", (Path(tmp) / "reload").exists())
+
+        p._config = replace(p._config, confirm=ConfirmConfig(ask_first=False))
+        grants.bind_config(p._config, path)
+        asked = len(p._confirm.asked)
+        await p._run_turn(TurnRequest(lane="typed", text="act without asking"), _TextSink(p))
+        check("already off: no question, nothing written",
+              len(p._confirm.asked) == asked and rows(p)[-1] == ("ciel", "I already act without asking."))
+        await p._run_turn(TurnRequest(lane="typed", text="ask before acting again"), _TextSink(p))
+        check("the revoke asks nothing and writes ask_first = true at once",
+              len(p._confirm.asked) == asked
+              and tomllib.loads(path.read_text())["confirm"]["ask_first"] is True
+              and rows(p)[-1][1].startswith("Asking first again."))
+
+        p._config = replace(p._config, confirm=ConfirmConfig(), grants=GrantsConfig(enabled=False))
+        grants.bind_config(p._config, path)
+        await p._run_turn(TurnRequest(lane="typed", text="act without asking"), _TextSink(p))
+        check("with granting off the words change nothing",
+              len(p._confirm.asked) == asked and rows(p)[-1][1].startswith("Granting is off")
+              and tomllib.loads(path.read_text())["confirm"]["ask_first"] is True)
+
+
 async def main() -> int:
     probe_registry()
     await probe_labels_and_rows()
@@ -860,6 +916,7 @@ async def main() -> int:
     await probe_attachments()
     await probe_keyboard()
     await probe_speak_back()
+    await probe_ask_first()
     print(f"\nall {len(CHECKS)} checks passed")
     return 0
 

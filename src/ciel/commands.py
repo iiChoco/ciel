@@ -93,14 +93,36 @@ _DISMISS = re.compile(
 # Leading address words the wake path lets through when spoken in one breath
 # — "jarvis" for the default wake phrase, and "seal", Whisper's favourite
 # mishearing of the name.
+# The asking switch (Proof Obligation's one setting, see [confirm] in
+# config.py): turning it off is the grant act_without_asking, and it is a
+# local command because the words are about Ciel, not about a task — a
+# model handed "act without asking" with nothing else in the sentence keeps
+# asking what to act on. Only whole sentences that can mean nothing else.
+_ASK_FIRST_OFF = re.compile(
+    r"^(?:from\s+now\s+on\s+)?"
+    r"(?:(?:act|do\s+things|do\s+it|just\s+do\s+things|go\s+ahead)\s+without\s+asking(?:\s+(?:me|first|me\s+first))?"
+    r"|stop\s+asking(?:\s+me)?(?:\s+(?:first|for\s+confirmations?|for\s+permission|before\s+acting))?"
+    r"|no\s+more\s+(?:confirmations?|asking|questions)"
+    r"|confirmations?\s+off"
+    r"|don\s*t\s+ask(?:\s+me)?(?:\s+(?:first|anymore|any\s+more))?)"
+    r"(?:\s+from\s+now\s+on)?$"
+)
+_ASK_FIRST_ON = re.compile(
+    r"^(?:ask\s+(?:me\s+)?(?:first|before\s+(?:you\s+)?act(?:ing)?|before\s+doing\s+things|for\s+confirmations?)(?:\s+again)?"
+    r"|start\s+asking(?:\s+me)?(?:\s+(?:first|again))?"
+    r"|confirmations?\s+(?:back\s+)?on"
+    r"|confirm\s+(?:things|actions)\s+again)"
+    r"(?:\s+from\s+now\s+on)?$"
+)
+
 _ADDRESS = frozenset({"hey", "okay", "ok", "ciel", "seal", "jarvis"})
 
 
 @dataclass(frozen=True, slots=True)
 class Command:
-    kind: str  # "reload" | "set_timer" | "cancel_timer" | "list_timers" | "dismiss" | "speak_back"
+    kind: str  # "reload" | "set_timer" | "cancel_timer" | "list_timers" | "dismiss" | "speak_back" | "ask_first"
     seconds: float = 0.0  # set_timer only
-    on: bool = False  # speak_back only
+    on: bool = False  # speak_back and ask_first
 
 
 def _seconds(m: re.Match[str]) -> float | None:
@@ -142,6 +164,10 @@ def match(text: str) -> Command | None:
     m = _SPEAK_BACK.fullmatch(s)
     if m:
         return Command("speak_back", on=m.group("on") == "on")
+    if _ASK_FIRST_OFF.fullmatch(s):
+        return Command("ask_first", on=False)
+    if _ASK_FIRST_ON.fullmatch(s):
+        return Command("ask_first", on=True)
     if _CANCEL_TIMER.fullmatch(s):
         return Command("cancel_timer")
     if _DISMISS.fullmatch(s):
