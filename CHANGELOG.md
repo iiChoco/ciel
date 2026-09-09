@@ -2,6 +2,72 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-08 — The plans say who may act and where
+
+**Why.** The independent-action and inbox plans left child origins, setup,
+model isolation, account placement, and feature storage to implementation.
+The [review response](reports/2026-09-08-independent-action-review-response.md)
+records the supplied critique and the resulting decisions.
+
+**What.**
+
+- *Responsibility has a record and a surface.* The foundation now names derived
+  origins, minimum records, a Chart grant flow, namespaced feature migrations,
+  the task's ladder position, and an isolated extraction call. Existing task
+  controls must reach an accepted baseline before runtime implementation.
+- *The inbox names its limits.* The feature requires execution-host account
+  readiness, remembers deleted calendar entries locally, uses gcal_adapter.py,
+  and defines a sender-scoped policy without claiming sender authentication.
+  The full source-policy limitation must be reviewed before automatic activation.
+- *A second pass keeps config in one place.* The feature borrows the existing
+  Gmail and Calendar connector-path fields instead of adding four more;
+  enrolling a sender from preview is a scope widening through the draft, never
+  a one-click allow; foundation milestone 2 lands as records first, Chart
+  surface second.
+- *A finished task stays finished.* The [second review](reports/2026-09-08-independent-action-second-review.md)
+  showed a completed task cannot be revised and that preview had no path
+  without a grant. The event is now a persistent feature record with one task
+  per operation, keyed by event, source revision, and operation.
+  Preview is a grant-less finite task with a human origin. The isolated
+  extraction call moves into foundation milestone 1, which live preview needs.
+  The Gmail credential paths are named on the config that owns them, the
+  section alarm's, and the task-controls precondition now points at 45e4fd7.
+- *Waiting is not authority.* The [third review](reports/2026-09-08-independent-action-third-review.md)
+  caught that a child outside the grant was being admitted by parking it in a
+  wait. A change the grant does not cover is now an inert proposal on the
+  event record; only the owner's approval of that exact proposal creates a
+  task, and derive_task keeps its containment check. In-place revision is
+  limited to children with no dispatch intent and unchanged scope, with the
+  older revision kept as a replay alias; once intent exists the attempt is
+  frozen and reconciled before anything new is proposed.
+
+**Probes.** Documentation only; the review reproduction checks static source
+contracts and plan links without importing Ciel or reading runtime data.
+Referenced commands and local links checked; `git diff --check` run.
+No runtime probes or account tests were run.
+
+## 2026-09-08 — Independence has a foundation and a first use
+
+**Why.** Email events are the first useful application of Ciel acting
+independently. Permissions, durable work, recovery, and verified reporting need
+a shared home so the next feature can use them too.
+
+**What.**
+
+- *Responsibility belongs to the runtime.* The
+  [independent-action plan](design/2026-09-08-independent-action-plan.md) owns
+  mandates, bounded scheduling, broker-owned grants, journal correlation,
+  reconciliation, and private receipts. A synthetic adapter proves its gates.
+- *The inbox supplies the first real work.* The
+  [email-to-calendar feature plan](design/2026-09-08-email-calendar-plan.md)
+  owns mail interpretation and calendar behavior, with explicit dependencies
+  on the foundation. Preview can come first; automatic writes wait for all
+  foundation gates. PR monitoring remains deferred.
+
+**Probes.** Documentation only; plan links and referenced commands checked,
+and `git diff --check` run. No runtime behavior, account access, or service
+configuration changed.
+
 ## 2026-09-08 — The canceller hears; the old speaker speaks
 
 **Why.** Ciel lisped whenever her voice went through Apple's engine, and the

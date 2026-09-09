@@ -1133,6 +1133,23 @@ refused recipient is a failed send.
 The section watcher's alarm borrows this relay and address when it has
 none of its own, so one token serves both.
 
+## Events from email (planned)
+
+The [email-to-calendar feature plan](design/2026-09-08-email-calendar-plan.md)
+is the first application of
+[independent action](design/2026-09-08-independent-action-plan.md).
+It supplies inbox reading, event interpretation, duplicate checks, and calendar
+operations to the shared task runtime. Confirmed appointments and bookings can
+be added under a create-only standing permission; unclear invitations,
+reschedules, and cancellations ask the owner. Preview comes first. This remains
+a plan: inbox access and calendar authority are not enabled by these words.
+
+The proposed Chart setup selects accounts and calendar scope on the execution
+host, then presents one broker-backed approval. Automatic mode uses an explicit
+sender list with a disclosed authenticity limitation; preview and per-event
+approval remain available. A locally remembered deletion prevents re-import
+even after the provider stops returning the deleted event.
+
 ## A spot in a section (the signup site)
 
 Off by default, and only useful with Vigil on. Berkeley courses fill
