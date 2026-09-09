@@ -117,5 +117,11 @@ async def preview_inbox(args: dict[str, Any]) -> dict[str, Any]:
     return await _call('inbox_preview', args)
 
 
+@tool('add_event_from_mail', 'Put one previewed candidate on the calendar, only when the owner explicitly asks: a finite task that checks the calendars for the event already present, asks the owner to approve the exact event once, adds it once under an id only Ciel would choose, and completes on a read-back. Use the candidate key from inspect_task on the preview. It never adds without that approval and never adds twice.',
+      {'type': 'object', 'properties': {'candidate': {'type': 'string'}}, 'required': ['candidate'], 'additionalProperties': False})
+async def add_event_from_mail(args: dict[str, Any]) -> dict[str, Any]:
+    return await _call('inbox_add', args)
+
+
 TASK_TOOLS = [create_task, list_tasks, inspect_task, pause_task, resume_task, answer_task, cancel_task, pause_mandate, resume_mandate, revoke_grant,
-              mute_task_notices, unmute_task_notices, preview_inbox]
+              mute_task_notices, unmute_task_notices, preview_inbox, add_event_from_mail]

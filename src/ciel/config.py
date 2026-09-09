@@ -2199,6 +2199,17 @@ class EmailCalendarConfig:
     max_extractions_per_day: int = 100
     """Isolated model calls the feature may spend in a day, across tasks."""
 
+    destination_calendar: str = ""
+    """The Google calendar id events are added to; empty means nothing can
+    be added, preview only. The writer borrows the calendar watcher's login
+    from ``[proactive].google_oauth_keys`` and ``google_token_file`` on the
+    execution host."""
+
+    check_calendars: tuple[str, ...] = ()
+    """Calendars searched for an event already present before one is added,
+    beside the destination; an unreadable one makes the check unreliable
+    and the adapter says so rather than adding."""
+
 
 @dataclass(frozen=True, slots=True)
 class TasksConfig:

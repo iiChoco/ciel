@@ -993,10 +993,13 @@ class Pipeline:
         if config.tasks.enabled and config.tasks.runner and config.email_calendar.enabled:
             # The inbox feature's adapter, over the connector's login on this
             # host; a login on another machine authorizes nothing here.
-            from ciel.email_calendar import EmailCalendarAdapter, GmailInbox
+            from ciel.email_calendar import EmailCalendarAdapter, GmailInbox, GoogleCalendar
             from ciel.gmail import GmailReader
+            calendar = (GoogleCalendar(config.proactive.google_oauth_keys, config.proactive.google_token_file)
+                        if config.email_calendar.destination_calendar.strip() else None)
             feature_adapters.append(EmailCalendarAdapter(
-                config.email_calendar, GmailInbox(GmailReader(config.sections.gmail_oauth_keys, config.sections.gmail_token_file))))
+                config.email_calendar, GmailInbox(GmailReader(config.sections.gmail_oauth_keys, config.sections.gmail_token_file)),
+                calendar=calendar))
         if config.tasks.enabled and config.tasks.runner:
             self._task_runner = TaskRunner(
                 config.tasks,
@@ -1013,13 +1016,21 @@ class Pipeline:
         )
         self._task_controller.bind_approval(self._approve_grant)
         for adapter in feature_adapters:
-            from ciel.email_calendar import EmailCalendarAdapter, preview_request
+            from ciel.email_calendar import EmailCalendarAdapter, add_request, preview_request
             if isinstance(adapter, EmailCalendarAdapter):
                 def ask_preview(args: dict[str, Any], _adapter: EmailCalendarAdapter = adapter) -> Any:
                     limit = args.get('max_messages')
                     return preview_request(config.email_calendar, _adapter.identity_for_scope(), str(args.get('since') or ''),
                                            str(args.get('until') or ''), limit if isinstance(limit, int) else None)
-                self._task_controller.bind_feature(adapter.namespace, adapter.operations, requests={'inbox_preview': ask_preview}, summary=adapter.summarize)
+                async def ask_add(args: dict[str, Any]) -> Any:
+                    store = self._task_controller.store
+                    if store is None:
+                        raise ValueError('Tasks are unavailable.')
+                    records = await store.records(config.tasks.owner, adapter.namespace.name)
+                    return add_request(config.email_calendar, str(args.get('candidate') or ''), records)
+                self._task_controller.bind_feature(adapter.namespace, adapter.operations,
+                                                   requests={'inbox_preview': ask_preview, 'inbox_add': ask_add},
+                                                   summary=adapter.summarize)
         # What the store owes the owner rides Vigil's queue; the notifier
         # exists even where the runner does not, since a hub with no runner
         # still owes the notices it holds.

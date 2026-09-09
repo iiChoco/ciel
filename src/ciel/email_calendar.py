@@ -28,8 +28,19 @@ and the preview says so.
 **Preview writes nothing.** A preview is an ordinary finite task from a
 private owner turn: it lists a bounded window of mail, extracts candidates
 under the task's own model-call allowance, records what it found in the
-feature's namespace, and completes with the roster. No calendar is touched;
-the standing mandate that may add events is a later milestone.
+feature's namespace, and completes with the roster. No calendar is touched
+by it.
+
+**An event is added once, under a name only Ciel would choose.** Adding a
+candidate is a second finite task the owner asks for: it checks the
+calendars for the event already there, plans one insertion under an event
+id derived from the message and the calendar, sends it once with Ciel's
+ownership written into the event's private properties, and completes only
+on a read-back that finds it. A lost answer is reconciled by that id, never
+resent blind; an id that exists but is not this event is an unknown the
+owner is asked about; an event the owner deleted afterwards is remembered
+as such and never recreated; an event the owner edited is theirs, left as
+it is. The foundation holds the approval, the intent, and the outcome.
 """
 
 from __future__ import annotations
@@ -48,15 +59,20 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import json
+import urllib.parse
+
 from ciel.config import EmailCalendarConfig
-from ciel.task_runner import Outcome, Preparation, StepContext
-from ciel.tasks import (Criterion, Evidence, FeatureRecord, Namespace, RecordSet, RecordWrite, Scope, Specification, Step, Task,
+from ciel.gmail import GmailClient
+from ciel.task_runner import MutationResult, Outcome, Plan, PreconditionFailed, Preparation, Reconciliation, StepContext
+from ciel.tasks import (Criterion, Evidence, FeatureRecord, Intent, Namespace, RecordSet, RecordWrite, Scope, Specification, Step, Task,
                         TaskLimit)
 
 log = logging.getLogger(__name__)
 
 NAMESPACE_NAME = 'email_calendar'
-OPERATIONS = frozenset({'inbox.read', 'inbox.extract'})
+OPERATIONS = frozenset({'inbox.read', 'inbox.extract', 'calendar.check', 'calendar.create', 'calendar.verify'})
+CALENDAR_OPERATIONS = frozenset({'calendar.check', 'calendar.create', 'calendar.verify'})
 _DATE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _WHEN = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$')
 
@@ -146,6 +162,142 @@ class GmailInbox:
         except (TypeError, ValueError):
             received_at = time.time()
         return RawMessage(message_id, str(meta.get('threadId') or ''), data, received_at)
+
+
+# ── the calendar ─────────────────────────────────────────────────────────────
+
+class CalendarUnavailable(RuntimeError):
+    """The calendar could not be reached or refused; nothing is known."""
+
+
+class CalendarConflict(CalendarUnavailable):
+    """An insertion was refused because the id already exists."""
+
+
+class CalendarSource(Protocol):
+    """One calendar account, read and one write: is it reachable, what is
+    in a window, what is at an id, and insert one event under an id."""
+
+    def available(self) -> bool: ...
+    def get(self, calendar: str, event_id: str) -> dict[str, Any] | None: ...
+    def find(self, calendar: str, time_min: str, time_max: str) -> list[dict[str, Any]]: ...
+    def insert(self, calendar: str, body: dict[str, Any]) -> dict[str, Any]: ...
+
+
+_CALENDAR_API = 'https://www.googleapis.com/calendar/v3'
+
+
+class GoogleCalendar(GmailClient):
+    """The real calendar over the Google login the calendar watcher uses:
+    the same refresh-token minting, read-only of the token file. ``get``
+    answers None for an id Google has never seen or has purged, and the
+    event with ``status: cancelled`` for one that was deleted; ``insert``
+    raises a conflict when the id exists."""
+
+    def get(self, calendar: str, event_id: str) -> dict[str, Any] | None:
+        from ciel.gmail import GmailUnavailable
+        url = f'{_CALENDAR_API}/calendars/{urllib.parse.quote(calendar, safe="")}/events/{urllib.parse.quote(event_id, safe="")}'
+        try:
+            return self._request('GET', url)
+        except GmailUnavailable as exc:
+            if 'answered 404' in str(exc) or 'answered 410' in str(exc):
+                return None
+            raise CalendarUnavailable(str(exc)) from exc
+
+    def find(self, calendar: str, time_min: str, time_max: str) -> list[dict[str, Any]]:
+        from ciel.gmail import GmailUnavailable
+        query = urllib.parse.urlencode({'timeMin': time_min, 'timeMax': time_max, 'singleEvents': 'true', 'maxResults': '50', 'showDeleted': 'false'})
+        url = f'{_CALENDAR_API}/calendars/{urllib.parse.quote(calendar, safe="")}/events?{query}'
+        try:
+            return list(self._request('GET', url).get('items') or [])
+        except GmailUnavailable as exc:
+            raise CalendarUnavailable(str(exc)) from exc
+
+    def insert(self, calendar: str, body: dict[str, Any]) -> dict[str, Any]:
+        from ciel.gmail import GmailUnavailable
+        url = f'{_CALENDAR_API}/calendars/{urllib.parse.quote(calendar, safe="")}/events'
+        try:
+            return self._request('POST', url, body)
+        except GmailUnavailable as exc:
+            if 'answered 409' in str(exc):
+                raise CalendarConflict(str(exc)) from exc
+            raise CalendarUnavailable(str(exc)) from exc
+
+
+def event_id_for(mailbox: str, message_id: str, index: int, calendar: str) -> str:
+    """Google's client-chosen id: base32hex, lowercase, from what identifies
+    this event to Ciel. The same candidate on the same calendar always gets
+    the same id, which is what makes a retry safe and a duplicate visible."""
+    digest = hashlib.sha256(f'{mailbox}\n{message_id}\n{index}\n{calendar}'.encode()).digest()
+    return 'ciel' + base64.b32hexencode(digest).decode('ascii').lower().rstrip('=')[:36]
+
+
+def _event_digest(body: dict[str, Any]) -> str:
+    """The fields that make the event what it is; not its bookkeeping."""
+    core = {key: body.get(key) for key in ('summary', 'location', 'start', 'end')}
+    return hashlib.sha256(json.dumps(core, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def calendar_body(candidate: dict[str, Any], event_id: str, candidate_key: str) -> dict[str, Any]:
+    """What is sent: title, place, times in the candidate's zone, and Ciel's
+    ownership in private properties. No mail text; the description says
+    where it came from and no more."""
+    body = {
+        'id': event_id,
+        'summary': str(candidate.get('title') or 'Event'),
+        'location': str(candidate.get('location') or ''),
+        'start': {'dateTime': f"{candidate['start']}:00", 'timeZone': candidate['timezone']},
+        'end': {'dateTime': f"{candidate['end']}:00", 'timeZone': candidate['timezone']},
+        'description': f"Added by Ciel from an email from {candidate.get('sender') or 'an unknown sender'}.",
+    }
+    body['extendedProperties'] = {'private': {'ciel_candidate': hashlib.sha256(candidate_key.encode()).hexdigest()[:32],
+                                              'ciel_digest': _event_digest(body)}}
+    return body
+
+
+def _owned(event: dict[str, Any] | None) -> str | None:
+    """Ciel's digest on an event, when the event is one Ciel made."""
+    if not event:
+        return None
+    private = (event.get('extendedProperties') or {}).get('private') or {}
+    digest = private.get('ciel_digest')
+    return str(digest) if digest else None
+
+
+def _wall(value: Any, zone: str) -> str:
+    """A Google start/end as YYYY-MM-DDTHH:MM in ``zone``, for comparing."""
+    if not isinstance(value, dict):
+        return ''
+    raw = value.get('dateTime') or value.get('date') or ''
+    try:
+        when = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+    except ValueError:
+        return ''
+    if when.tzinfo is not None and zone:
+        try:
+            when = when.astimezone(ZoneInfo(zone))
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return when.strftime('%Y-%m-%dT%H:%M')
+
+
+def _same_fields(event: dict[str, Any], body: dict[str, Any], zone: str) -> bool:
+    """Whether an event still says what Ciel sent: title, place, and the
+    times to the minute in the candidate's zone. Google restates times
+    with an offset, so they are compared as wall times, never as strings."""
+    return (str(event.get('summary') or '') == body['summary'] and str(event.get('location') or '') == body['location']
+            and _wall(event.get('start'), zone) == body['start']['dateTime'][:16] and _wall(event.get('end'), zone) == body['end']['dateTime'][:16])
+
+
+def _matches(event: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """An event already there for the same thing: the same start to the
+    minute, and a title that is the candidate's or contains it."""
+    if event.get('status') == 'cancelled':
+        return False
+    if _wall(event.get('start'), candidate['timezone']) != candidate['start']:
+        return False
+    mine, theirs = str(candidate.get('title') or '').casefold().strip(), str(event.get('summary') or '').casefold().strip()
+    return bool(mine) and (mine == theirs or mine in theirs or theirs in mine)
 
 
 # ── normalization: bytes to bounded text ─────────────────────────────────────
@@ -360,6 +512,12 @@ def _validate_record(payload: dict[str, Any]) -> None:
     elif kind == 'preview':
         if not isinstance(payload.get('task_id'), str) or not isinstance(payload.get('counts'), dict):
             raise ValueError('preview')
+    elif kind == 'event':
+        for name in ('candidate', 'calendar', 'event_id', 'digest', 'status'):
+            if not isinstance(payload.get(name), str):
+                raise ValueError(name)
+        if payload['status'] not in ('planned', 'adding', 'added', 'present', 'suppressed', 'conflict', 'missing'):
+            raise ValueError('status')
     else:
         raise ValueError('kind')
 
@@ -386,6 +544,25 @@ def preview_request(config: EmailCalendarConfig, identity: str, since: str, unti
     return spec, step
 
 
+def add_request(config: EmailCalendarConfig, candidate_key: str, records: tuple[FeatureRecord, ...]) -> tuple[Specification, Step]:
+    """The finite task that adds one candidate the owner chose: check the
+    calendars, create once under approval, verify by reading back."""
+    if not config.destination_calendar.strip():
+        raise ValueError('No destination calendar is configured; set [email_calendar].destination_calendar on the execution host.')
+    record = next((r for r in records if r.key == candidate_key and r.payload.get('kind') == 'candidate'), None)
+    if record is None:
+        raise ValueError('No such candidate; preview the inbox first and use a candidate key from the roster.')
+    candidate = record.payload
+    if candidate.get('decision') == 'ignored':
+        raise ValueError('That candidate was not a commitment; nothing to add.')
+    if not candidate.get('start') or not candidate.get('end') or not candidate.get('timezone') or candidate.get('unresolved'):
+        raise ValueError('The candidate is unresolved: ' + (', '.join(candidate.get('unresolved') or []) or 'no time') + '. Settle it first.')
+    target = f'calendar:{config.destination_calendar.strip()}'
+    spec = Specification(f'"{candidate.get("title") or "Event"}" is on the calendar', Scope(tuple(sorted(CALENDAR_OPERATIONS)), (target,)),
+                         (Criterion('placed', target, 'on the calendar'),))
+    return spec, Step('read', 'calendar.check', target, (('candidate', candidate_key),))
+
+
 # ── the adapter ──────────────────────────────────────────────────────────────
 
 class EmailCalendarAdapter:
@@ -405,9 +582,11 @@ class EmailCalendarAdapter:
     setup = None
     """No standing grant is offered yet: the calendar writer is a later milestone."""
 
-    def __init__(self, config: EmailCalendarConfig, source: InboxSource, *, clock: Any = time.time) -> None:
+    def __init__(self, config: EmailCalendarConfig, source: InboxSource, *, calendar: CalendarSource | None = None,
+                 clock: Any = time.time) -> None:
         self._config = config
         self._source = source
+        self._calendar = calendar
         self._clock = clock
 
     def identity_for_scope(self) -> str:
@@ -423,6 +602,10 @@ class EmailCalendarAdapter:
             return 'unknown'
 
     def prepare(self, task: Task, records: tuple[FeatureRecord, ...]) -> Preparation:
+        if task.next_step.operation in CALENDAR_OPERATIONS:
+            if self._calendar is None or not self._calendar.available():
+                return Preparation(wait=('resource', 'Connect Google Calendar on the execution host; nothing can be added until then.'))
+            return Preparation()
         if not self._source.available():
             return Preparation(wait=('resource', 'Connect Gmail on the execution host; the inbox cannot be read until then.'))
         return Preparation()
@@ -432,7 +615,141 @@ class EmailCalendarAdapter:
         target = step.target
         if step.operation == 'inbox.read':
             return self._list(ctx, target)
+        if step.operation == 'calendar.check':
+            return self._check(ctx, target)
+        if step.operation == 'calendar.verify':
+            return self._verify(ctx, target)
         return await self._extract(ctx, target)
+
+    # ── adding one event ─────────────────────────────────────────────────────
+
+    def _event_context(self, ctx: StepContext) -> tuple[str, dict[str, Any], str, str, dict[str, Any], FeatureRecord | None]:
+        """The candidate a calendar step is about, its calendar, its id, its
+        body, and the event record so far."""
+        arguments = dict(ctx.task.next_step.arguments)
+        key = arguments.get('candidate', '')
+        record = next((r for r in ctx.records if r.key == key and r.payload.get('kind') == 'candidate'), None)
+        if record is None:
+            raise ValueError('the candidate is gone from the records')
+        candidate = record.payload
+        calendar = ctx.task.next_step.target.removeprefix('calendar:')
+        mailbox = self._config.mailbox.strip().lower() or 'unknown'
+        index = int(key.rsplit(':', 1)[-1]) if key.rsplit(':', 1)[-1].isdigit() else 0
+        event_id = event_id_for(mailbox, str(candidate['message_id']), index, calendar)
+        body = calendar_body(candidate, event_id, key)
+        existing = next((r for r in ctx.records if r.key == f'event:{key}'), None)
+        return key, candidate, calendar, event_id, body, existing
+
+    def _event_write(self, key: str, calendar: str, event_id: str, digest: str, status: str, existing: FeatureRecord | None,
+                     task_id: str, etag: str = '', note: str = '') -> RecordWrite:
+        return RecordWrite(f'event:{key}', {'kind': 'event', 'candidate': key, 'calendar': calendar, 'event_id': event_id, 'digest': digest,
+                                            'status': status, 'etag': etag, 'task_id': task_id, 'note': note}, None)
+
+    def _check(self, ctx: StepContext, target: str) -> Outcome:
+        """Before anything is planned: is it there already, ours or anyone's?"""
+        assert self._calendar is not None
+        key, candidate, calendar, event_id, body, existing = self._event_context(ctx)
+        digest = _owned(body) or ''
+        if existing is not None and existing.payload.get('status') == 'suppressed':
+            return Outcome(evidence=(Evidence('placed', target, 'deleted after adding', 'calendar', ctx.now),),
+                           wait=('external', 'This event was deleted on the calendar after Ciel added it; it is not added again.'))
+        ours = self._calendar.get(calendar, event_id)
+        if ours is not None and ours.get('status') == 'cancelled':
+            records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'suppressed', existing, ctx.task.id, note='deleted on the calendar'),))
+            return Outcome(evidence=(Evidence('placed', target, 'deleted after adding', 'calendar', ctx.now),),
+                           wait=('external', 'This event was deleted on the calendar; it is not added again.'), records=records)
+        if ours is not None and _owned(ours):
+            return Outcome(evidence=(Evidence('placed', target, 'in progress', 'calendar', ctx.now),),
+                           next_step=Step('read', 'calendar.verify', target, ctx.task.next_step.arguments), delay_s=0.0,
+                           records=RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'added', existing, ctx.task.id, str(ours.get('etag') or '')),)))
+        if ours is not None:
+            records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'conflict', existing, ctx.task.id, note='not Ciel\'s event'),))
+            return Outcome(evidence=(Evidence('placed', target, 'another event under the id', 'calendar', ctx.now),),
+                           wait=('external', 'An event that is not this one sits under the id Ciel would choose; nothing is added or overwritten.'), records=records)
+        window_start = (datetime.fromisoformat(candidate['start']) - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%S')
+        window_end = (datetime.fromisoformat(candidate['end']) + timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%S')
+        zone = candidate['timezone']
+        try:
+            offset = datetime.fromisoformat(candidate['start']).replace(tzinfo=ZoneInfo(zone)).strftime('%z')
+            offset = offset[:3] + ':' + offset[3:]
+        except (ZoneInfoNotFoundError, ValueError):
+            offset = 'Z'
+        for other in (calendar, *self._config.check_calendars):
+            found = self._calendar.find(other, window_start + offset, window_end + offset)
+            match = next((e for e in found if _matches(e, candidate)), None)
+            if match is not None:
+                status = 'added' if _owned(match) else 'present'
+                records = RecordSet(NAMESPACE_NAME, (self._event_write(key, other, str(match.get('id') or ''), digest, status, existing, ctx.task.id,
+                                                                       str(match.get('etag') or ''), note='found before adding'),))
+                return Outcome(evidence=(Evidence('placed', target, 'on the calendar', 'calendar', ctx.now),), records=records)
+        return Outcome(evidence=(Evidence('placed', target, 'in progress', 'calendar', ctx.now),),
+                       next_step=Step('mutation', 'calendar.create', target, ctx.task.next_step.arguments), delay_s=0.0,
+                       records=RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'planned', existing, ctx.task.id),)))
+
+    async def plan(self, ctx: StepContext) -> Plan:
+        assert self._calendar is not None
+        key, candidate, calendar, event_id, body, existing = self._event_context(ctx)
+        current = self._calendar.get(calendar, event_id)
+        state = 'absent' if current is None else ('cancelled' if current.get('status') == 'cancelled' else ('ours' if _owned(current) else 'foreign'))
+        if state != 'absent':
+            raise PreconditionFailed(f'the event id is {state} on the calendar')
+        verify = Step('read', 'calendar.verify', ctx.task.next_step.target, ctx.task.next_step.arguments)
+        return Plan(payload=body, preconditions={'event_id': event_id, 'existing': state},
+                    recipe={'calendar': calendar, 'event_id': event_id, 'digest': _owned(body) or '', 'candidate': key}, verify=verify)
+
+    async def mutate(self, ctx: StepContext, intent: Intent, plan: Plan) -> MutationResult:
+        """Send once. A conflict on the id is success only if what is there is
+        this event; anything else is an outcome nobody can vouch for."""
+        assert self._calendar is not None
+        calendar, event_id, digest, key = intent.recipe['calendar'], intent.recipe['event_id'], intent.recipe['digest'], intent.recipe['candidate']
+        existing = next((r for r in ctx.records if r.key == f'event:{key}'), None)
+        try:
+            created = self._calendar.insert(calendar, plan.payload)
+        except CalendarConflict:
+            current = self._calendar.get(calendar, event_id)
+            if current is None or current.get('status') == 'cancelled' or _owned(current) != digest:
+                raise
+            created = current
+        return MutationResult(records=RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'adding', existing, ctx.task.id, str(created.get('etag') or '')),)))
+
+    async def reconcile(self, ctx: StepContext, intent: Intent) -> Reconciliation:
+        """What became of a send nobody saw answered, read by the id it chose."""
+        assert self._calendar is not None
+        calendar, event_id, digest, key = intent.recipe['calendar'], intent.recipe['event_id'], intent.recipe['digest'], intent.recipe['candidate']
+        existing = next((r for r in ctx.records if r.key == f'event:{key}'), None)
+        current = self._calendar.get(calendar, event_id)
+        if current is None:
+            return Reconciliation('not_applied', detail='no event under the id; it never landed')
+        if current.get('status') == 'cancelled':
+            # It landed, then someone deleted it: applied, and the verifying
+            # read that follows records the deletion and never recreates it.
+            return Reconciliation('applied', detail='the event was created and since deleted on the calendar')
+        if _owned(current) == digest:
+            return Reconciliation('applied', detail='the event is on the calendar')
+        return Reconciliation('unknown', detail='an event exists under the id but it is not this one')
+
+    def _verify(self, ctx: StepContext, target: str) -> Outcome:
+        """The read-back that completes the task, or says why it cannot."""
+        assert self._calendar is not None
+        key, candidate, calendar, event_id, body, existing = self._event_context(ctx)
+        digest = _owned(body) or ''
+        current = self._calendar.get(calendar, event_id)
+        if current is None:
+            records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'missing', existing, ctx.task.id, note='not found after adding'),))
+            return Outcome(evidence=(Evidence('placed', target, 'missing after adding', 'calendar', ctx.now),),
+                           wait=('external', 'The event is not on the calendar after Ciel added it; it is not added again without you.'), records=records)
+        if current.get('status') == 'cancelled':
+            records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'suppressed', existing, ctx.task.id, note='deleted on the calendar'),))
+            return Outcome(evidence=(Evidence('placed', target, 'deleted after adding', 'calendar', ctx.now),),
+                           wait=('external', 'This event was deleted on the calendar after Ciel added it; it is not added again.'), records=records)
+        owned = _owned(current)
+        if owned is None:
+            records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'conflict', existing, ctx.task.id, note='not Ciel\'s event'),))
+            return Outcome(evidence=(Evidence('placed', target, 'another event under the id', 'calendar', ctx.now),),
+                           wait=('external', 'An event that is not this one sits under the id Ciel chose; nothing is overwritten.'), records=records)
+        note = '' if _same_fields(current, body, candidate['timezone']) else 'edited on the calendar since'
+        records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'added', existing, ctx.task.id, str(current.get('etag') or ''), note),))
+        return Outcome(evidence=(Evidence('placed', target, 'on the calendar', 'calendar', ctx.now),), records=records)
 
     def _list(self, ctx: StepContext, target: str) -> Outcome:
         arguments = dict(ctx.task.next_step.arguments)
@@ -518,7 +835,10 @@ class EmailCalendarAdapter:
     @staticmethod
     def summarize(task: Task, records: tuple[FeatureRecord, ...]) -> str:
         """What the owner reads about a preview: the roster, in the words of
-        the messages themselves, quoted. Nothing here is an instruction."""
+        the messages themselves, quoted. Nothing here is an instruction. An
+        add task reads as its one event and where it stands."""
+        if task.next_step.operation in CALENDAR_OPERATIONS:
+            return EmailCalendarAdapter.summarize_add(task, records)
         mine = [r for r in records if r.payload.get('task_id') == task.id and r.payload.get('kind') == 'message']
         if not mine:
             return 'No messages recorded for this preview yet.'
@@ -526,6 +846,7 @@ class EmailCalendarAdapter:
         for r in records:
             if r.payload.get('kind') == 'candidate' and r.payload.get('message_id') in candidates:
                 candidates[r.payload['message_id']].append(r.payload)
+        events = {r.payload['candidate']: r.payload for r in records if r.payload.get('kind') == 'event'}
         lines = []
         for r in sorted(mine, key=lambda r: r.key):
             payload = r.payload
@@ -540,6 +861,19 @@ class EmailCalendarAdapter:
             lines.append(line)
         return '\n'.join(lines)
 
+    @staticmethod
+    def summarize_add(task: Task, records: tuple[FeatureRecord, ...]) -> str:
+        key = dict(task.next_step.arguments).get('candidate', '')
+        event = next((r.payload for r in records if r.key == f'event:{key}'), None)
+        candidate = next((r.payload for r in records if r.key == key), None)
+        if candidate is None:
+            return 'The candidate is no longer on record.'
+        line = f"{candidate.get('title')!r} {candidate.get('start')}–{candidate.get('end')} {candidate.get('timezone')}"
+        if event is None:
+            return line + ' — not yet checked against the calendar.'
+        return line + f" — {event['status']} on {event['calendar']} as {event['event_id']}" + (f" ({event['note']})" if event.get('note') else '')
+
 
 __all__ = ['CANDIDATE_SCHEMA', 'Candidate', 'EmailCalendarAdapter', 'EXTRACTION_PROMPT', 'GmailInbox', 'InboxSource', 'NAMESPACE',
-           'Normalized', 'RawMessage', 'extraction_payload', 'interpret', 'normalize', 'preview_request']
+           'CalendarConflict', 'CalendarSource', 'CalendarUnavailable', 'GoogleCalendar', 'Normalized', 'RawMessage', 'add_request',
+           'calendar_body', 'event_id_for', 'extraction_payload', 'interpret', 'normalize', 'preview_request']

@@ -38,9 +38,10 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from ciel.brain.extract import ExtractionLimits
-from ciel.config import EmailCalendarConfig, TasksConfig
-from ciel.email_calendar import (CANDIDATE_SCHEMA, EmailCalendarAdapter, NAMESPACE, RawMessage, extraction_payload, interpret, normalize,
-                                 preview_request)
+from ciel.config import EmailCalendarConfig, JournalConfig, TasksConfig
+from ciel.email_calendar import (CANDIDATE_SCHEMA, CalendarConflict, CalendarUnavailable, EmailCalendarAdapter, NAMESPACE, RawMessage,
+                                 add_request, calendar_body, event_id_for, extraction_payload, interpret, normalize, preview_request)
+from ciel.journal import ActionJournal
 from ciel.task_context import TaskBinding
 from ciel.task_controls import TaskController
 from ciel.task_runner import TaskRunner
@@ -142,16 +143,75 @@ class ScriptedBackend:
         return {'category': 'other', 'commitment': 'none', 'events': []}
 
 
+class FakeCalendar:
+    """Google's calendar as the adapter sees it: events by id, a window
+    search, an insert that refuses an id already there. ``lose_next``
+    stores the event and then raises, the lost answer."""
+
+    def __init__(self, connected: bool = True) -> None:
+        self.connected = connected
+        self.events: dict[tuple[str, str], dict[str, Any]] = {}
+        self.inserts = 0
+        self.lose_next = False
+        self.etags = 0
+
+    def available(self) -> bool:
+        return self.connected
+
+    def get(self, calendar: str, event_id: str) -> dict[str, Any] | None:
+        if not self.connected:
+            raise CalendarUnavailable('no calendar')
+        event = self.events.get((calendar, event_id))
+        return dict(event) if event is not None else None
+
+    def find(self, calendar: str, time_min: str, time_max: str) -> list[dict[str, Any]]:
+        if not self.connected:
+            raise CalendarUnavailable('no calendar')
+        return [dict(e) for (cal, _), e in self.events.items() if cal == calendar and e.get('status') != 'cancelled'
+                and time_min[:16] <= str(e['start'].get('dateTime', ''))[:16] <= time_max[:16]]
+
+    def insert(self, calendar: str, body: dict[str, Any]) -> dict[str, Any]:
+        if not self.connected:
+            raise CalendarUnavailable('no calendar')
+        key = (calendar, body['id'])
+        if key in self.events:
+            raise CalendarConflict('answered 409')
+        self.inserts += 1
+        self.etags += 1
+        self.events[key] = {**body, 'status': 'confirmed', 'etag': f'"{self.etags}"'}
+        if self.lose_next:
+            self.lose_next = False
+            raise CalendarUnavailable('the answer was lost')
+        return dict(self.events[key])
+
+    def seed(self, calendar: str, event_id: str, summary: str, start: str, end: str, zone: str = 'America/Los_Angeles', owned: dict | None = None) -> None:
+        self.etags += 1
+        event = {'id': event_id, 'summary': summary, 'start': {'dateTime': f'{start}:00', 'timeZone': zone}, 'end': {'dateTime': f'{end}:00', 'timeZone': zone},
+                 'status': 'confirmed', 'etag': f'"{self.etags}"'}
+        if owned:
+            event['extendedProperties'] = {'private': owned}
+        self.events[(calendar, event_id)] = event
+
+    def cancel(self, calendar: str, event_id: str) -> None:
+        self.events[(calendar, event_id)]['status'] = 'cancelled'
+
+
+ADD_CONFIG = replace(CONFIG, destination_calendar='primary', check_calendars=('work',), mailbox='me@example.test')
+
+
 class Fixture:
     def __init__(self, root: Path, name: str, messages: list[RawMessage], *, connected: bool = True, backend: Any = None,
-                 config: EmailCalendarConfig = CONFIG, **tasks: Any) -> None:
+                 config: EmailCalendarConfig = CONFIG, calendar: Any = None, **tasks: Any) -> None:
         self.tasks = replace(TasksConfig(), directory=root / name, owner=OWNER, **tasks)
         self.inbox = FakeInbox(messages, connected=connected)
-        self.adapter = EmailCalendarAdapter(config, self.inbox, clock=lambda: 1000.0)
+        self.calendar = calendar
+        self.adapter = EmailCalendarAdapter(config, self.inbox, calendar=calendar, clock=lambda: 1000.0)
         self.backend = backend
         self.store: TaskStore | None = None
         self.lock = asyncio.Lock()
-        self.runner = TaskRunner(self.tasks, lambda: self.store, (self.adapter,), lease=self.lease, backend=backend, clock=lambda: 1000.0)
+        self.journal = ActionJournal(JournalConfig(dir=root / f'{name}-journal'))
+        self.runner = TaskRunner(self.tasks, lambda: self.store, (self.adapter,), lease=self.lease, backend=backend, journal=self.journal,
+                                 clock=lambda: 1000.0)
         self.config = config
 
     @asynccontextmanager
@@ -349,6 +409,173 @@ async def _raise(fn: Any) -> None:
     fn()
 
 
+async def add_task(f: Fixture, key: str, name: str) -> Any:
+    assert f.store is not None
+    records = await f.store.records(OWNER, NAMESPACE.name)
+    spec, step = add_request(f.config, key, records)
+    return await f.store.create(Origin(OWNER, name, 'voice'), spec, step, now=1000)
+
+
+async def approve(f: Fixture, task_id: str, answer: str = 'approve') -> None:
+    assert f.store is not None
+    view = await f.store.owner_view(OWNER, task_id)
+    await f.store.owner_control(OWNER, task_id, 'answer', question_id=view['question']['id'], answer=answer, execution=True, now=1000)
+
+
+async def previewed(f: Fixture) -> str:
+    task = await f.preview()
+    await f.run(task.id)
+    return 'candidate:m1:0'
+
+
+async def probe_add_event(root: Path) -> None:
+    print('\nan event is added once, under a name only Ciel would choose')
+    calendar = FakeCalendar()
+    f = Fixture(root, 'add', [CONFIRMATION], backend=ScriptedBackend({'Your appointment is confirmed': CONFIRMED_ANSWER}), config=ADD_CONFIG, calendar=calendar)
+    store = await f.open()
+    key = await previewed(f)
+    records = await store.records(OWNER, NAMESPACE.name)
+    await refused('adding needs a destination calendar', _raise(lambda: add_request(CONFIG, key, records)), ValueError)
+    await refused('adding needs a candidate on record', _raise(lambda: add_request(ADD_CONFIG, 'candidate:none', records)), ValueError)
+    event_id = event_id_for('me@example.test', 'm1', 0, 'primary')
+    check('the event id is Google-shaped and the same every time',
+          event_id == event_id_for('me@example.test', 'm1', 0, 'primary') and event_id != event_id_for('me@example.test', 'm1', 0, 'work')
+          and all(c in '0123456789abcdefghijklmnopqrstuv' for c in event_id) and 5 <= len(event_id) <= 1024)
+    candidate = next(r.payload for r in records if r.key == key)
+    body = calendar_body(candidate, event_id, key)
+    check('the body carries title, times in the zone, and ownership, and no mail text',
+          body['summary'] == 'Appointment with Dr. Lee' and body['start'] == {'dateTime': '2026-09-15T14:00:00', 'timeZone': 'America/Los_Angeles'}
+          and body['extendedProperties']['private']['ciel_digest'] and 'Dr. Lee' not in body['description'] and 'confirmed for' not in str(body))
+    task = await add_task(f, key, 'add-1')
+    check('the add task names the destination and completes only on the calendar',
+          task.specification.scope.targets == ('calendar:primary',) and task.specification.criteria[0].expected == 'on the calendar')
+    results = await f.run(task.id)
+    check('the check finds nothing there and hands the create to the owner for approval, sending nothing',
+          results == ['checkpointed', 'asked'] and calendar.inserts == 0
+          and (await store.owner_view(OWNER, task.id))['question']['choices'] == ['approve', 'cancel'])
+    await approve(f, task.id)
+    results = await f.run(task.id)
+    done = await store.get(OWNER, task.id)
+    stored = calendar.events[('primary', event_id)]
+    record = next(r.payload for r in await store.records(OWNER, NAMESPACE.name) if r.key == f'event:{key}')
+    check('approved, it is sent once, read back, and done; the event carries Ciel\'s ownership and the record says added',
+          results == ['dispatched', 'done'] and done.status == 'done' and calendar.inserts == 1 and stored['summary'] == 'Appointment with Dr. Lee'
+          and stored['extendedProperties']['private']['ciel_digest'] and record['status'] == 'added' and record['event_id'] == event_id
+          and record['etag'] == stored['etag'])
+    check('the owner reads the add as its one event and where it stands',
+          'added on primary' in f.adapter.summarize(done, await store.records(OWNER, NAMESPACE.name)))
+    again = await add_task(f, key, 'add-2')
+    results = await f.run(again.id)
+    check('asking again finds Ciel\'s own event by its id and completes without sending', results == ['checkpointed', 'done'] and calendar.inserts == 1)
+    calendar.events[('primary', event_id)]['summary'] = 'Appointment with Dr. Lee (moved rooms)'
+    edited = await add_task(f, key, 'add-3')
+    await f.run(edited.id)
+    record = next(r.payload for r in await store.records(OWNER, NAMESPACE.name) if r.key == f'event:{key}')
+    check('an event the owner edited is theirs: still placed, noted as edited, never overwritten',
+          (await store.get(OWNER, edited.id)).status == 'done' and record['note'] == 'edited on the calendar since' and calendar.inserts == 1)
+    calendar.cancel('primary', event_id)
+    gone = await add_task(f, key, 'add-4')
+    results = await f.run(gone.id)
+    record = next(r.payload for r in await store.records(OWNER, NAMESPACE.name) if r.key == f'event:{key}')
+    check('an event the owner deleted is remembered as such and never recreated',
+          results == ['waiting'] and record['status'] == 'suppressed' and calendar.inserts == 1
+          and 'deleted' in (await store.get(OWNER, gone.id)).detail)
+    del calendar.events[('primary', event_id)]
+    later = await add_task(f, key, 'add-5')
+    results = await f.run(later.id)
+    check('a 404 after the deletion stays suppressed', results == ['waiting'] and calendar.inserts == 1)
+    await f.close()
+
+    print('\nwhat is already there, and what is not this event')
+    calendar = FakeCalendar()
+    calendar.seed('work', 'someone-else', 'Appointment with Dr. Lee', '2026-09-15T14:00', '2026-09-15T15:00')
+    f = Fixture(root, 'present', [CONFIRMATION], backend=ScriptedBackend({'Your appointment is confirmed': CONFIRMED_ANSWER}), config=ADD_CONFIG, calendar=calendar)
+    store = await f.open()
+    key = await previewed(f)
+    task = await add_task(f, key, 'add-1')
+    results = await f.run(task.id)
+    record = next(r.payload for r in await store.records(OWNER, NAMESPACE.name) if r.key == f'event:{key}')
+    check('an independently created match on a checked calendar means present: done, nothing sent',
+          results == ['done'] and calendar.inserts == 0 and record['status'] == 'present' and record['calendar'] == 'work')
+    await f.close()
+    calendar = FakeCalendar()
+    calendar.seed('primary', event_id_for('me@example.test', 'm1', 0, 'primary'), 'Something else entirely', '2026-10-01T09:00', '2026-10-01T10:00')
+    f = Fixture(root, 'foreign', [CONFIRMATION], backend=ScriptedBackend({'Your appointment is confirmed': CONFIRMED_ANSWER}), config=ADD_CONFIG, calendar=calendar)
+    store = await f.open()
+    key = await previewed(f)
+    task = await add_task(f, key, 'add-1')
+    results = await f.run(task.id)
+    record = next(r.payload for r in await store.records(OWNER, NAMESPACE.name) if r.key == f'event:{key}')
+    check('an event that is not this one under Ciel\'s id is a conflict: waits, nothing added or overwritten',
+          results == ['waiting'] and record['status'] == 'conflict' and calendar.inserts == 0 and calendar.events[('primary', record['event_id'])]['summary'] == 'Something else entirely')
+    await f.close()
+
+    print('\na lost answer is reconciled by the id, never resent blind')
+    calendar = FakeCalendar()
+    f = Fixture(root, 'lost', [CONFIRMATION], backend=ScriptedBackend({'Your appointment is confirmed': CONFIRMED_ANSWER}), config=ADD_CONFIG, calendar=calendar)
+    store = await f.open()
+    key = await previewed(f)
+    task = await add_task(f, key, 'add-1')
+    await f.run(task.id)
+    await approve(f, task.id)
+    calendar.lose_next = True
+    results = await f.run(task.id)
+    waiting = await store.get(OWNER, task.id)
+    check('the send lands but its answer is lost: the outcome is unknown and the task waits for reconciliation',
+          results == ['abandoned'] and waiting.status == 'waiting' and waiting.wait_reason == 'reconciliation' and calendar.inserts == 1)
+    results = await f.run(task.id)
+    check('reconciliation reads the id, finds the event, and the read-back completes it; nothing was sent again',
+          results == ['reconciled', 'done'] and (await store.get(OWNER, task.id)).status == 'done' and calendar.inserts == 1)
+    await f.close()
+    calendar = FakeCalendar()
+    f = Fixture(root, 'never', [CONFIRMATION], backend=ScriptedBackend({'Your appointment is confirmed': CONFIRMED_ANSWER}), config=ADD_CONFIG, calendar=calendar)
+    store = await f.open()
+    key = await previewed(f)
+    task = await add_task(f, key, 'add-1')
+    await f.run(task.id)
+    await approve(f, task.id)
+    original = calendar.insert
+    def vanish(cal: str, body: dict[str, Any]) -> dict[str, Any]:
+        raise CalendarUnavailable('the request never arrived')
+    calendar.insert = vanish  # type: ignore[method-assign]
+    results = await f.run(task.id)
+    calendar.insert = original  # type: ignore[method-assign]
+    results += await f.run(task.id)
+    check('a send that never landed reconciles as not applied and is planned again under fresh approval',
+          results[:2] == ['abandoned', 'reconciled'] and calendar.inserts == 0 and 'asked' in results)
+    await f.close()
+
+    print('\nthe owner, the calendar, and a restart')
+    calendar = FakeCalendar()
+    f = Fixture(root, 'decline', [CONFIRMATION], backend=ScriptedBackend({'Your appointment is confirmed': CONFIRMED_ANSWER}), config=ADD_CONFIG, calendar=calendar)
+    store = await f.open()
+    key = await previewed(f)
+    task = await add_task(f, key, 'add-1')
+    await f.run(task.id)
+    await approve(f, task.id, 'cancel')
+    check('a declined approval cancels the add and nothing is sent', (await store.get(OWNER, task.id)).status == 'cancelled' and calendar.inserts == 0)
+    await f.close()
+    f = Fixture(root, 'nocal', [CONFIRMATION], backend=ScriptedBackend({'Your appointment is confirmed': CONFIRMED_ANSWER}), config=ADD_CONFIG, calendar=FakeCalendar(connected=False))
+    store = await f.open()
+    key = await previewed(f)
+    task = await add_task(f, key, 'add-1')
+    results = await f.run(task.id)
+    check('no calendar access is a resource wait that names what to connect', results == ['refused'] and 'Google Calendar' in (await store.get(OWNER, task.id)).detail)
+    await f.close()
+    calendar = FakeCalendar()
+    f = Fixture(root, 'restart', [CONFIRMATION], backend=ScriptedBackend({'Your appointment is confirmed': CONFIRMED_ANSWER}), config=ADD_CONFIG, calendar=calendar)
+    store = await f.open()
+    key = await previewed(f)
+    task = await add_task(f, key, 'add-1')
+    await f.run(task.id)
+    await f.close()
+    store = await f.open()
+    await approve(f, task.id)
+    results = await f.run(task.id)
+    check('an approval question survives a restart and the add completes after it', results == ['dispatched', 'done'] and calendar.inserts == 1)
+    await f.close()
+
+
 async def main() -> None:
     probe_normalization()
     probe_interpretation()
@@ -356,6 +583,7 @@ async def main() -> None:
         root = Path(tmp)
         await probe_preview(root)
         await probe_controller(root)
+        await probe_add_event(root)
     print(f'\nall {len(CHECKS)} checks passed')
 
 
