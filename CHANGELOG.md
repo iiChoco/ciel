@@ -2,150 +2,6 @@
 
 Notable changes to Ciel. Newest first.
 
-## 2026-09-08 — Shift belongs to the keyboard
-
-**Why.** Keyboard clicks were being heard as snaps again. Investigation found
-that the keyboard veto watched ordinary key-down and key-up events but omitted
-modifier changes: a lone Shift or Command could sound like a snap without the
-keyboard owning up to it. `reports/2026-09-08-modifier-snap-veto.md` reproduces
-that hole; it does not attribute every reported false wake to a modifier.
-
-**What.**
-
-- *A modifier is a key too.* The existing timestamp-only veto includes modifier
-  and status-key changes on press and release. Its 300 ms window, mouse checks,
-  and gesture thresholds stay the same. Echo cancellation remains enabled.
-- *An expired veto leaves a reason to investigate.* The existing
-  `log_candidates` switch also shows key/click event ages and the veto window.
-  It records no key identity and opens no event tap.
-
-**Probes.** `probe_gestures.py 138 → 146`: modifier-only clicks cannot wake or
-complete a clap action; releases refresh the veto, expiry admits a snap again,
-and candidate timing diagnostics follow the existing switch.
-
-## 2026-09-08 — The room keeps its volume
-
-**Why.** The split pair fixed Ciel's lisp but left Apple's voice processing
-running between turns. Nearby speech could turn the Mac's music down even when
-Ciel never woke. `reports/2026-09-08-audio-ducking.md` traced that behavior to
-advanced ducking and showed why Stop and mute could not release it.
-
-**What.**
-
-- *The reference listens without touching the speaker.* An opt-in `webrtc`
-  backend uses a private, nonmuting Core Audio tap and the approved, pinned
-  `pywebrtc-audio` AEC3 dependency. Ciel retains the ordinary PortAudio speaker.
-  Apple's voice-processing unit and its ducking are absent from this route.
-- *One clock for what played and what returned.* A native aggregate synchronizes
-  the mic and stereo reference with drift compensation, resamples them together,
-  and detects lost frames. A configurable 40 ms capture hold covers late device
-  references. A zero-filled ordinary output stream starts the reference clock
-  even in an idle room. The adaptive filter survives turn boundaries and Stop; only
-  processed microphone frames leave the audio boundary.
-- *A missed callback does not restart the room.* Live use exposed a regression:
-  timing gaps and callback lock contention killed the helper, and launchd kept
-  relaunching the spoke. Paired drops now reset the resampler and echo filter,
-  clear delayed and queued mic audio, and resume in the same process. The ring
-  copies outside its lock while retaining ownership of the occupied slot.
-  Echo protection stays enabled; adaptation restarts and a word can be interrupted.
-- *A missing reference closes the room.* Startup, permissions, malformed frames,
-  stalls, helper death, and route changes fail visibly. Private builds are
-  atomic and retain the last working helper. The infrastructure launcher's
-  purpose string now includes system-audio capture: macOS checks the responsible
-  app as well as the helper. Startup timeouts name the permission to check.
-  Audio stays in memory. The existing
-  Apple and raw backends remain selectable; there is no silent fallback.
-- *The measurement has a boundary.* The live Mac comparison found +0.21 dB of
-  playback amplitude change and 18.5 dB echo reduction. Synthetic double talk
-  preserved voiced speech above the echo; whispered speech under loud media
-  and the owner's gestures still need room checks. Barge-in stays off.
-
-**Probes.** `probe_webrtc_audio.py 0 → 47`: actual AEC3, speech retention,
-paired resampling, framing, private builds, protocol failures, and cleanup.
-The recovery correction adds 7 checks (40 → 47), including forced native
-contention/overflow and clearing pre-gap audio without restarting capture.
-`probe_apple_audio.py 81 → 81` and `probe_input.py 9 → 9` passed. The explicit
-initial live comparison passed 4 checks. The expanded recovery comparison
-passed 6 on repeat (+0.38 dB playback change, 16.9 dB echo reduction); its first
-run failed the volume tolerance at −2.88 dB, retained in the report. Neither
-run retained recordings. `probe_hub_imports.py` passed 6 checks; the infrastructure launcher
-suite passed 9 tests.
-
-## 2026-09-08 — A place to catch a thought
-
-**Why.** A passing idea needed a whole conversation to reach Ciel's memory.
-By the time there was room to say it, the thought could be gone.
-
-**What.**
-
-- *A blank page at a key.* Command–backslash and a quick backslash pair open
-  a native floating Instrument window. Enter makes a paragraph; Shift–Enter
-  saves; Escape tucks the draft away. Both gestures are configurable under
-  `[notes]`, independent of the voice controls, using the same passive Mac
-  listener and its Input Monitoring permission. The pair still reaches the
-  foreground app. The hub starts no keyboard listener.
-- *The receipt belongs to memory.* A note enters Invariant as a reference,
-  with its wording and note provenance preserved, without a model turn.
-  The split spoke sends a private `note.save` and waits for `note.result`;
-  the local process uses the same writer. Only the seated spoke can use
-  this path, and nothing enters the conversation queue or the broadcast ring.
-- *A draft survives the interruption.* Owner-only drafts reopen after Escape
-  or restart. A failed save keeps the text and offers retry; a stable id
-  absorbs a lost receipt, while a second note with the same opening gets
-  its own file. The note and human index are owner-only, and memory recall
-  and prompt summaries quote notes as data, never instructions to execute.
-
-**Probes.** `probe_notes.py 34 (new): draft recovery and permissions, wording,
-provenance, idempotency, bounds, disk failure, quoted recall, offline and timed
-out saves, private seated-spoke routing, and local/spoke integration.
-probe_note_window.py 19 (new): native focus, Enter, one Shift–Enter save,
-in-flight editing, retry identity, visible errors and success, Escape,
-restart, Tab focus, a 400-point window, and native process start/reuse/exit. probe_shortcuts.py 55 → 66:
-command chord, timed pair, repeats, intervening keys, independent settings,
-conflicts, and configuration. probe_wire.py 75 → 76: note frames round-trip
-and stay out of the replay ring.` Existing spoke (56), hub arbiter (61),
-hub imports (6), turns (78), Vigil (173), and Closure (56) probes also pass.
-Native renders reviewed at 620 and 400 points, including draft, error,
-saving, and saved states. No new dependency or hub deployment.
-
-## 2026-09-08 — Nobody spoke, so nothing was heard
-
-**Why.** An afternoon of typing produced a run of turns nobody had spoken,
-answered in full. Three layers let each one through. The snap ear woke on
-impulses a fiftieth as loud as a snap — bright, solitary, and owned up to by
-no keystroke, the signature of a mouse button. The endpointer, whose
-webrtcvad calls a run of keys speech, handed the clatter to Whisper. And
-Whisper, which never says "nothing", invented a sentence; its own no-speech
-probability could not be asked, since on large-v3-turbo it reads 0.000 on
-pure silence. The stock-phrase filter caught none of it, because the
-sentences invented over a keyboard are not stock. The investigation and
-the calibration are in
-[reports/2026-09-08-sentences-nobody-said.md](reports/2026-09-08-sentences-nobody-said.md).
-
-**What.**
-
-- *A sentence needs a voice behind it.* Before Whisper is asked, Silero VAD
-  — the speech model openWakeWord already carries — scores the utterance
-  frame by frame, and its most confident 30 ms frame must reach
-  `speech_threshold` (0.5). Measured on synthesized speech and synthetic
-  rooms: silence, noise, clatter, and breath never peaked above 0.23; speech
-  peaked at 0.65 and up at every level down to a whisper. One frame is
-  enough, so "Yes." survives. The gate wraps the transcriber, not the turn,
-  so turns, held thoughts, and confirmation answers are gated alike on either
-  engine, and the runtime fallback to faster-whisper stays behind it. It
-  fails open without the model and says so. `stt/gate.py`.
-- *The keyboard's own word covers the mouse.* macOS reports the time since a
-  mouse button went down or up as readily as a key, so a snap or a clap
-  inside `keyboard_veto_ms` of either is rejected as that keystroke or that
-  click, and the log names which. A fixture that supplies one clock is never
-  answered by the Mac's other one.
-
-**Probes.** `probe_stt.py 21 → 33: the gate keeps silence and noise from the
-engine and speech untouched, the threshold edge, off at zero and on by
-default, warm-up and close pass through, fail-open without the model, and
-Silero's own word on silence and hiss. probe_gestures.py 134 → 138: the click
-veto, the more recent of key and click named, and a fixture's clock alone.`
-
 ## 2026-09-09 — The result reaches the owner
 
 **Why.** A task could finish, fail, or ask, and write its notice; nothing
@@ -356,6 +212,112 @@ lifted store lists no mandates or grants. Rerun unchanged: probe_task_runner.py
 25, probe_task_wire.py 20, probe_task_tools.py 24, probe_hub_imports.py 6,
 probe_turns.py 78; hub import clean; the spoke reloaded to ready.`
 
+## 2026-09-08 — Shift belongs to the keyboard
+
+**Why.** Keyboard clicks were being heard as snaps again. Investigation found
+that the keyboard veto watched ordinary key-down and key-up events but omitted
+modifier changes: a lone Shift or Command could sound like a snap without the
+keyboard owning up to it. `reports/2026-09-08-modifier-snap-veto.md` reproduces
+that hole; it does not attribute every reported false wake to a modifier.
+
+**What.**
+
+- *A modifier is a key too.* The existing timestamp-only veto includes modifier
+  and status-key changes on press and release. Its 300 ms window, mouse checks,
+  and gesture thresholds stay the same. Echo cancellation remains enabled.
+- *An expired veto leaves a reason to investigate.* The existing
+  `log_candidates` switch also shows key/click event ages and the veto window.
+  It records no key identity and opens no event tap.
+
+**Probes.** `probe_gestures.py 138 → 146`: modifier-only clicks cannot wake or
+complete a clap action; releases refresh the veto, expiry admits a snap again,
+and candidate timing diagnostics follow the existing switch.
+
+## 2026-09-08 — The room keeps its volume
+
+**Why.** The split pair fixed Ciel's lisp but left Apple's voice processing
+running between turns. Nearby speech could turn the Mac's music down even when
+Ciel never woke. `reports/2026-09-08-audio-ducking.md` traced that behavior to
+advanced ducking and showed why Stop and mute could not release it.
+
+**What.**
+
+- *The reference listens without touching the speaker.* An opt-in `webrtc`
+  backend uses a private, nonmuting Core Audio tap and the approved, pinned
+  `pywebrtc-audio` AEC3 dependency. Ciel retains the ordinary PortAudio speaker.
+  Apple's voice-processing unit and its ducking are absent from this route.
+- *One clock for what played and what returned.* A native aggregate synchronizes
+  the mic and stereo reference with drift compensation, resamples them together,
+  and detects lost frames. A configurable 40 ms capture hold covers late device
+  references. A zero-filled ordinary output stream starts the reference clock
+  even in an idle room. The adaptive filter survives turn boundaries and Stop; only
+  processed microphone frames leave the audio boundary.
+- *A missed callback does not restart the room.* Live use exposed a regression:
+  timing gaps and callback lock contention killed the helper, and launchd kept
+  relaunching the spoke. Paired drops now reset the resampler and echo filter,
+  clear delayed and queued mic audio, and resume in the same process. The ring
+  copies outside its lock while retaining ownership of the occupied slot.
+  Echo protection stays enabled; adaptation restarts and a word can be interrupted.
+- *A missing reference closes the room.* Startup, permissions, malformed frames,
+  stalls, helper death, and route changes fail visibly. Private builds are
+  atomic and retain the last working helper. The infrastructure launcher's
+  purpose string now includes system-audio capture: macOS checks the responsible
+  app as well as the helper. Startup timeouts name the permission to check.
+  Audio stays in memory. The existing
+  Apple and raw backends remain selectable; there is no silent fallback.
+- *The measurement has a boundary.* The live Mac comparison found +0.21 dB of
+  playback amplitude change and 18.5 dB echo reduction. Synthetic double talk
+  preserved voiced speech above the echo; whispered speech under loud media
+  and the owner's gestures still need room checks. Barge-in stays off.
+
+**Probes.** `probe_webrtc_audio.py 0 → 47`: actual AEC3, speech retention,
+paired resampling, framing, private builds, protocol failures, and cleanup.
+The recovery correction adds 7 checks (40 → 47), including forced native
+contention/overflow and clearing pre-gap audio without restarting capture.
+`probe_apple_audio.py 81 → 81` and `probe_input.py 9 → 9` passed. The explicit
+initial live comparison passed 4 checks. The expanded recovery comparison
+passed 6 on repeat (+0.38 dB playback change, 16.9 dB echo reduction); its first
+run failed the volume tolerance at −2.88 dB, retained in the report. Neither
+run retained recordings. `probe_hub_imports.py` passed 6 checks; the infrastructure launcher
+suite passed 9 tests.
+
+## 2026-09-08 — A place to catch a thought
+
+**Why.** A passing idea needed a whole conversation to reach Ciel's memory.
+By the time there was room to say it, the thought could be gone.
+
+**What.**
+
+- *A blank page at a key.* Command–backslash and a quick backslash pair open
+  a native floating Instrument window. Enter makes a paragraph; Shift–Enter
+  saves; Escape tucks the draft away. Both gestures are configurable under
+  `[notes]`, independent of the voice controls, using the same passive Mac
+  listener and its Input Monitoring permission. The pair still reaches the
+  foreground app. The hub starts no keyboard listener.
+- *The receipt belongs to memory.* A note enters Invariant as a reference,
+  with its wording and note provenance preserved, without a model turn.
+  The split spoke sends a private `note.save` and waits for `note.result`;
+  the local process uses the same writer. Only the seated spoke can use
+  this path, and nothing enters the conversation queue or the broadcast ring.
+- *A draft survives the interruption.* Owner-only drafts reopen after Escape
+  or restart. A failed save keeps the text and offers retry; a stable id
+  absorbs a lost receipt, while a second note with the same opening gets
+  its own file. The note and human index are owner-only, and memory recall
+  and prompt summaries quote notes as data, never instructions to execute.
+
+**Probes.** `probe_notes.py 34 (new): draft recovery and permissions, wording,
+provenance, idempotency, bounds, disk failure, quoted recall, offline and timed
+out saves, private seated-spoke routing, and local/spoke integration.
+probe_note_window.py 19 (new): native focus, Enter, one Shift–Enter save,
+in-flight editing, retry identity, visible errors and success, Escape,
+restart, Tab focus, a 400-point window, and native process start/reuse/exit. probe_shortcuts.py 55 → 66:
+command chord, timed pair, repeats, intervening keys, independent settings,
+conflicts, and configuration. probe_wire.py 75 → 76: note frames round-trip
+and stay out of the replay ring.` Existing spoke (56), hub arbiter (61),
+hub imports (6), turns (78), Vigil (173), and Closure (56) probes also pass.
+Native renders reviewed at 620 and 400 points, including draft, error,
+saving, and saved states. No new dependency or hub deployment.
+
 ## 2026-09-08 — A task gets another turn
 
 **Why.** The store remembered what the owner asked for and the controller let
@@ -409,6 +371,44 @@ six refusals, and the client's options against a fake SDK. probe_ladder.py
 pick. Rerun unchanged: probe_turns.py 78, probe_task_tools.py 24,
 probe_task_wire.py 20, probe_hub_imports.py 6; hub import clean; the spoke
 reloaded to ready.`
+
+## 2026-09-08 — Nobody spoke, so nothing was heard
+
+**Why.** An afternoon of typing produced a run of turns nobody had spoken,
+answered in full. Three layers let each one through. The snap ear woke on
+impulses a fiftieth as loud as a snap — bright, solitary, and owned up to by
+no keystroke, the signature of a mouse button. The endpointer, whose
+webrtcvad calls a run of keys speech, handed the clatter to Whisper. And
+Whisper, which never says "nothing", invented a sentence; its own no-speech
+probability could not be asked, since on large-v3-turbo it reads 0.000 on
+pure silence. The stock-phrase filter caught none of it, because the
+sentences invented over a keyboard are not stock. The investigation and
+the calibration are in
+[reports/2026-09-08-sentences-nobody-said.md](reports/2026-09-08-sentences-nobody-said.md).
+
+**What.**
+
+- *A sentence needs a voice behind it.* Before Whisper is asked, Silero VAD
+  — the speech model openWakeWord already carries — scores the utterance
+  frame by frame, and its most confident 30 ms frame must reach
+  `speech_threshold` (0.5). Measured on synthesized speech and synthetic
+  rooms: silence, noise, clatter, and breath never peaked above 0.23; speech
+  peaked at 0.65 and up at every level down to a whisper. One frame is
+  enough, so "Yes." survives. The gate wraps the transcriber, not the turn,
+  so turns, held thoughts, and confirmation answers are gated alike on either
+  engine, and the runtime fallback to faster-whisper stays behind it. It
+  fails open without the model and says so. `stt/gate.py`.
+- *The keyboard's own word covers the mouse.* macOS reports the time since a
+  mouse button went down or up as readily as a key, so a snap or a clap
+  inside `keyboard_veto_ms` of either is rejected as that keystroke or that
+  click, and the log names which. A fixture that supplies one clock is never
+  answered by the Mac's other one.
+
+**Probes.** `probe_stt.py 21 → 33: the gate keeps silence and noise from the
+engine and speech untouched, the threshold edge, off at zero and on by
+default, warm-up and close pass through, fail-open without the model, and
+Silero's own word on silence and hiss. probe_gestures.py 134 → 138: the click
+veto, the more recent of key and click named, and a fixture's clock alone.`
 
 ## 2026-09-08 — The plans say who may act and where
 
