@@ -31,6 +31,7 @@ while a form is being filled in.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -59,8 +60,9 @@ class TaskController:
         self.setups = setups
         """What the adapters offer the owner to approve; the Chart form's fields."""
         self._asker: Asker | None = None
-        self._requests: dict[str, Callable[[dict[str, Any]], tuple[Specification, Step]]] = {}
-        """Finite tasks a feature lets an owner turn ask for, by operation name."""
+        self._requests: dict[str, Callable[[dict[str, Any]], Any]] = {}
+        """Finite tasks a feature lets an owner turn ask for, by operation name;
+        a builder returns the specification and first step, or an awaitable of them."""
         self._summaries: dict[str, tuple[frozenset[str], Callable[[Task, tuple[FeatureRecord, ...]], str]]] = {}
         """How a feature describes a task's records to the owner: by namespace,
         the operations that mark a task as its own and the words."""
@@ -114,7 +116,7 @@ class TaskController:
         self._asker = asker
 
     def bind_feature(self, namespace: Namespace, operations: frozenset[str], *,
-                     requests: dict[str, Callable[[dict[str, Any]], tuple[Specification, Step]]] | None = None,
+                     requests: dict[str, Callable[[dict[str, Any]], Any]] | None = None,
                      summary: Callable[[Task, tuple[FeatureRecord, ...]], str] | None = None) -> None:
         """A registered feature's own doors: the finite tasks an owner turn may
         ask for (each builds a specification from the owner's arguments, in
@@ -257,7 +259,8 @@ class TaskController:
                                       resource_wait=True, fence=binding.fence, record=lambda t: self._record(operation, t))
         elif operation in self._requests:
             try:
-                spec, step = self._requests[operation](args)
+                built = self._requests[operation](args)
+                spec, step = await built if inspect.isawaitable(built) else built
             except ValueError as exc:
                 raise ValueError(str(exc)) from exc
             task = await store.create(binding.origin, spec, step, fence=binding.fence, record=lambda t: self._record(operation, t))

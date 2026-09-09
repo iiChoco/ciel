@@ -2,6 +2,54 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — An event is added once, under a name only Ciel would choose
+
+**Why.** The preview could say what the inbox held and nothing could act on
+it. The plan's third milestone is one approved event on the calendar,
+through the foundation's guarded dispatch: check first, send once, read
+back, and never guess about an answer that never came.
+
+**What.**
+
+- *A calendar the writer can read and insert into.* A `CalendarSource`
+  protocol and `GoogleCalendar` over the same login plumbing the sender
+  uses, borrowing the calendar watcher's token files read-only: get by id,
+  find in a window, insert under a client-chosen id; a 404 is None, a
+  deletion is a cancelled event, a 409 is a conflict.
+- *A name only Ciel would choose.* The event id is derived from the mailbox,
+  the message, the candidate, and the calendar, so a retry is safe and a
+  duplicate is visible; the body carries title, place, and times in the
+  candidate's zone, Ciel's ownership in the private properties, and no mail
+  text. `add_event_from_mail` makes the finite task from a preview's
+  candidate; an unresolved candidate is refused with what to settle.
+- *Check, create, verify.* The check finds Ciel's own event by id, an
+  independent match by start and title across the destination and
+  `check_calendars` (present, done, nothing sent), a foreign event under the
+  id (a recorded conflict that waits), or a deletion since (suppressed,
+  never recreated). The create plans one insertion, the foundation asks the
+  owner to approve that payload once, and the send treats a conflict as
+  success only when what is there is this event. The read-back completes
+  the task, or records missing, deleted, conflicting, or edited and waits.
+- *Reconciled by the id.* A lost answer resolves applied or not applied by
+  reading the id; an event that landed and was since deleted is applied and
+  then suppressed; a foreign event under the id is an unknown the owner is
+  asked about. Nothing is resent blind.
+
+**Probes.** `probe_email_calendar.py 34 → 54: the id's shape and constancy,
+the body's fields and ownership, the add task's scope, the check that sends
+nothing and the approval it asks for, one send with ownership read back and
+recorded, a second ask finding the event by id, an owner's edit left as it
+is, a deletion suppressed and a later 404 still suppressed, an independent
+match present without a send, a foreign event under the id as a conflict, a
+lost answer reconciled without resending, a send that never landed planned
+again under fresh approval, a declined approval, a calendar that is not
+connected, and an approval that survives a restart.` Rerun unchanged:
+probe_task_authority.py 93, probe_task_notices.py 23, probe_task_wire.py 28,
+probe_task_tools.py 24, probe_task_dispatch.py 37, probe_turns.py 88,
+probe_hub_arbiter.py 61, probe_hub_imports.py 6; hub import clean; the
+spoke reloaded to ready. The real Google calendar is not exercised by the
+probes; a live run against a test calendar is separate acceptance.
+
 ## 2026-09-09 — A file can come with the words
 
 **Why.** The Chart could carry words and nothing else. A screenshot, a

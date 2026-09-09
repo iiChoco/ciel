@@ -1182,8 +1182,9 @@ is the first application of
 [independent action](design/2026-09-08-independent-action-plan.md): the inbox
 read as a source of dated commitments, previewed first and, later, added to a
 calendar under a scope the owner approves in Chart. Its first milestone, the
-preview, landed on 2026-09-09 in `email_calendar.py`; no calendar is touched,
-no standing grant is offered yet, and the calendar writer is the next milestone.
+preview, landed on 2026-09-09 in `email_calendar.py`, and the calendar writer
+followed the same day: one previewed candidate can be added under the owner's
+approval of that exact event. No standing grant is offered yet.
 
 **A preview is an ordinary finite task, and it writes nothing.** With
 `[email_calendar].enabled = true` beside a running task runner, a private
@@ -1210,6 +1211,24 @@ sender match filters scope and certifies nothing: a display name, a matching
 address, or a header the message carries about itself is not proof it is
 genuine, and the ready reason says so.
 
+**An event is added once, under a name only Ciel would choose.** With a
+`destination_calendar` configured, `add_event_from_mail` takes a candidate
+key from a preview and makes a second finite task: `calendar.check` looks
+for the event already there, first under the id Ciel would give it and then
+across the destination and `check_calendars` by start time and title; an
+independent match is *present* and the task completes without sending, a
+foreign event under Ciel's id is a recorded *conflict* that waits and
+overwrites nothing, an event Ciel added and the owner then deleted is
+*suppressed* and never recreated. Otherwise `calendar.create` plans one
+insertion, the owner is asked to approve that exact payload once, and it is
+sent once under an id derived from the mailbox, the message, and the
+calendar, with Ciel's ownership in the event's private properties and no
+mail text anywhere on it. `calendar.verify` reads it back and completes the
+task only when it is there. A lost answer is reconciled by the id, applied
+or not, never resent blind; an id that exists but holds another event is an
+unknown the owner is asked about; an event the owner edited afterwards is
+theirs, placed and noted as edited, never overwritten.
+
 **What runs out is said.** A window larger than the task's model calls
 leaves the rest recorded as unread with the reason; a runtime with no
 extraction backend records the same; a mailbox that is not connected is a
@@ -1227,12 +1246,16 @@ allowed_senders = []         # exact addresses whose confirmed commitments are r
 max_messages_per_preview = 25
 max_body_chars = 32000       # of one message's text, to the extraction call
 max_extractions_per_day = 100
+destination_calendar = ""    # the Google calendar id events are added to; empty means preview only
+check_calendars = []         # calendars also searched for an event already present
 ```
 
 The reader borrows `[sections].gmail_oauth_keys` and `gmail_token_file`,
-read-only, exactly as the section alarm's sender does. Nothing here grants
-anything: the standing grant, duplicate checks against the chosen calendars,
-the guarded create with read-back and reconciliation, and proposals for
+read-only, exactly as the section alarm's sender does; the writer borrows
+`[proactive].google_oauth_keys` and `google_token_file` the same way. Both
+must be authorized on the execution host. Nothing here grants anything
+standing: the grant setup that lets the Chart form activate automatic
+additions, inbox checkpoints that survive a restart, and proposals for
 reschedules and cancellations are the plan's later milestones.
 
 ## A spot in a section (the signup site)
