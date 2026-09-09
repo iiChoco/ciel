@@ -515,6 +515,33 @@ can't see through — redirections, substitutions, backgrounding — always land
 in the confirm tier. `scripts/probe_shellguard.py` drives the whole
 choreography with fakes.
 
+### Acting without asking
+
+The question is a switch of its own, and it is off by turning `ask_first`
+off:
+
+```toml
+[confirm]
+ask_first = true             # false: every confirm-tier question is a yes, at once
+```
+
+With it off, Ciel answers its own questions. Every confirm-tier action —
+a shell command, a connector write, a mail send, a standing grant's
+activation — runs the moment it is proposed, and the transcript shows the
+question and the answer it gave itself (`you (confirm, off): yes`), so a
+scrollback still reads as what happened. The journal records each one as
+it would have. What does not change: the deny tier is not a question and
+still refuses, an unattended turn (reflection, Vigil) still cannot act
+because nobody is there to answer, and the Discord lane's own gate still
+decides who may speak. What you have given up is the one moment where a
+misheard sentence, or a line planted in a web page or an email, meets
+your own word before it runs; the journal is what is left of that.
+
+It is meant to be flipped, not set: with granting on, *"act without
+asking"* is a capability in the catalog below — granted through the
+spoken gate once, revoked at once with *"ask before acting again"*, from
+voice, Discord, or Chart. Editing the config does the same by hand.
+
 ### macOS may block folders independently
 
 `~/Desktop`, `~/Documents`, and `~/Downloads` are TCC-protected. Whether Ciel
@@ -1487,7 +1514,8 @@ capability switches — but only when you ask, and never quietly:
   friction; it's the one-way valve's philosophy applied to permissions.
 - The catalog in `brain/tools/grants.py` is the boundary: files, shell,
   screen, iMessage read/send, Vigil, barge-in, the morning brief, Discord
-  away texts. What's *not* in it is the point — the pinned Discord
+  away texts, and acting without asking (`act_without_asking`, the one
+  switch whose grant turns a value *off*). What's *not* in it is the point — the pinned Discord
   account and token, the voice gate, connector tool tiers, and the
   workspace path cannot be reached by any phrasing, from anywhere.
 - Unattended turns (reflection, Vigil) are denied both tools outright by

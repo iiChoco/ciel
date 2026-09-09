@@ -1731,6 +1731,33 @@ class MCPServerConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfirmConfig:
+    """Proof Obligation's one switch (``confirm.py``): whether a confirm-tier
+    action asks at all.
+
+    Every guard sorts an action into a tier: hard-denied, quiet, or
+    confirmed. The confirmed tier is the broker's question, spoken at home
+    or texted away, and the action waits for the yes. Turning ``ask_first``
+    off makes the broker answer yes to itself, at once, for every question
+    it would have put: shell commands, the Mac's shell, connector writes,
+    mail, a standing grant's activation. Each one is still read into the
+    transcript as what it was about to do and still journaled, so the
+    record shows what ran; nothing else changes. The deny tier is not a
+    confirmation and stays as it is, and an unattended turn still cannot
+    act, because there the answer would come from nobody at all.
+
+    This is the owner choosing to trust Ciel's hearing and reading over
+    their own word. A misheard sentence, or a line planted in a page or an
+    email, then runs with no one to stop it; the journal is what is left.
+    It is a capability like the others: "act without asking" is granted
+    through the spoken gate, once, and revoked at once, from any lane.
+    """
+
+    ask_first: bool = True
+    """Ask before a confirm-tier action. Off: every such question is a yes."""
+
+
+@dataclass(frozen=True, slots=True)
 class GrantsConfig:
     """Remote capability granting — changing what Ciel may do, by asking.
 
@@ -2362,6 +2389,7 @@ class Config:
     mail: MailConfig = field(default_factory=MailConfig)
     location: LocationConfig = field(default_factory=LocationConfig)
     grants: GrantsConfig = field(default_factory=GrantsConfig)
+    confirm: ConfirmConfig = field(default_factory=ConfirmConfig)
     commands: CommandsConfig = field(default_factory=CommandsConfig)
     screen: ScreenConfig = field(default_factory=ScreenConfig)
     timers: TimersConfig = field(default_factory=TimersConfig)
@@ -2418,6 +2446,7 @@ _SECTIONS = {
     "mail": MailConfig,
     "location": LocationConfig,
     "grants": GrantsConfig,
+    "confirm": ConfirmConfig,
     "commands": CommandsConfig,
     "screen": ScreenConfig,
     "timers": TimersConfig,

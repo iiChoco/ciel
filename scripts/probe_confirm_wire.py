@@ -93,6 +93,24 @@ async def main() -> None:
         verdict is False and sink.lines[-1] == ("Okay, skipping it.", False),
     )
 
+    print("\nasking turned off")
+    from ciel.config import ConfirmConfig
+    broker, rows = make_broker()
+    broker._config = replace(broker._config, confirm=ConfirmConfig(ask_first=False))
+    sink = FakeSink()
+    with broker.remote(sink, origin="spoke"):
+        verdict = await broker.ask("Run: rm -rf build — okay?")
+    check("with asking off, a confirm-tier question is a yes at once, and nothing goes to the room", verdict is True and sink.lines == [])
+    check("the record still shows the question and who answered it",
+          rows == [("ciel-confirm", "Run: rm -rf build — okay?"), ("you-confirm", "yes — confirmations are off")])
+    shown: list[str] = []
+    async def chart(text: str) -> None:
+        shown.append(text)
+    check("a grant's approval through the Chart is a yes the same way", await broker.ask_through(chart, "web", "Approve — okay?") is True and shown == [])
+    with broker.suppress():
+        check("an unattended turn still cannot act: nobody would have answered", await broker.ask("Send it — okay?") is False)
+    check("the broker is idle throughout", not broker.active and broker.asked_at is None)
+
     print("\na question with no turn behind it, through one channel")
     broker, rows = make_broker(timeout_s=5.0)
     broker._config = replace(broker._config, discord=replace(broker._config.discord, confirm_timeout_s=1.0))

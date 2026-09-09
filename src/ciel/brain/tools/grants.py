@@ -59,6 +59,9 @@ class Capability:
     kind: str  # "bool" | "time"
     label: str  # how list_capabilities describes it
     grant_phrase: str  # the confirmation question's verb phrase
+    inverted: bool = False
+    """The capability is *on* when the config value is False: a switch
+    whose safe setting is True, granted by turning it off."""
 
 
 CAPABILITIES: dict[str, Capability] = {
@@ -106,6 +109,12 @@ CAPABILITIES: dict[str, Capability] = {
         "discord", "proactive", "bool",
         "urgent away texts over the Discord link",
         "Enable Discord away texts",
+    ),
+    "act_without_asking": Capability(
+        "confirm", "ask_first", "bool",
+        "acting without asking first: every confirm-tier question answers itself yes; the journal still records",
+        "Act without asking from now on",
+        inverted=True,
     ),
 }
 """Everything grantable, and therefore the complete list of what is not:
@@ -262,7 +271,7 @@ async def list_capabilities(args: dict[str, Any]) -> dict[str, Any]:
         value = current_value(_config, cap)
         state = (
             (value or "off") if cap.kind == "time"
-            else ("on" if value else "off")
+            else ("on" if bool(value) != cap.inverted else "off")
         )
         rows.append(f"{name}: {state} — {cap.label}")
     rows.append(
@@ -302,8 +311,8 @@ async def grant_capability(args: dict[str, Any]) -> dict[str, Any]:
         if not _TIME_RE.match(value):
             return _text("Pass `value` as 24-hour HH:MM, like 07:45.")
     else:
-        value = True
-        if current_value(_config, cap):
+        value = not cap.inverted
+        if bool(current_value(_config, cap)) == value:
             return _text(f"{name} is already enabled — nothing to change.")
     note = _apply_and_reload(cap, value)
     if note is None:
@@ -334,7 +343,7 @@ async def revoke_capability(args: dict[str, Any]) -> dict[str, Any]:
     if cap is None:
         options = ", ".join(sorted(CAPABILITIES))
         return _text(f"{name!r} is not a known capability. Known: {options}.")
-    value: Any = "" if cap.kind == "time" else False
+    value: Any = "" if cap.kind == "time" else cap.inverted
     if current_value(_config, cap) == value:
         return _text(f"{name} is already off — nothing to change.")
     note = _apply_and_reload(cap, value)

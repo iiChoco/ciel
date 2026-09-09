@@ -305,6 +305,8 @@ class VoiceConfirmBroker:
         never clobbered, and a question is never stacked on another. The
         wait is bounded by the same deadline the question would get.
         """
+        if not self._config.confirm.ask_first:
+            return self._answer_myself(question)
         deadline = time.monotonic() + self._config.discord.confirm_timeout_s
         while self._remote_send is not None or self.active or self._lock.locked():
             if time.monotonic() >= deadline:
@@ -317,6 +319,19 @@ class VoiceConfirmBroker:
             if self._remote_send is send:
                 self._remote_send = None
                 self._remote_origin = None
+
+    def _answer_myself(self, question: str) -> bool:
+        """The owner turned asking off: the question is still read into the
+        record as what is about to happen, and the answer is yes. Not a
+        silent path on purpose; the transcript is what stands in for the
+        person who would have said it."""
+        print(f"\n  ciel (confirm, off): {question}", flush=True)
+        print("  you (confirm, off): yes — confirmations are off", flush=True)
+        if self._record is not None:
+            self._record("ciel-confirm", question)
+            self._record("you-confirm", "yes — confirmations are off")
+        log.info("confirmation answered yes by configuration: %s", question)
+        return True
 
     @property
     def remote_active(self) -> bool:
@@ -376,6 +391,8 @@ class VoiceConfirmBroker:
         if self._suppressed:
             log.info("confirmation suppressed (nobody listening): %s", question)
             return False
+        if not self._config.confirm.ask_first:
+            return self._answer_myself(question)
         if self._lock.locked():
             # A second question while one is pending. Deny rather than queue:
             # stacked spoken questions are unanswerable ("yes" to which?).

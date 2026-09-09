@@ -16,7 +16,7 @@ import tomllib
 from dataclasses import replace
 from pathlib import Path
 
-from ciel.config import Config, GrantsConfig
+from ciel.config import ConfirmConfig, Config, GrantsConfig
 from ciel.brain.tools import grants
 from ciel.brain.tools.grants import (
     CAPABILITIES,
@@ -130,6 +130,19 @@ async def tool_checks(tmp: Path) -> None:
     check("a valid brief time lands",
           "brief set to 07:45" in text_of(
               await grant_capability.handler({"name": "brief", "value": "07:45"})))
+
+    check("acting without asking lists as off while asking is on", "act_without_asking: off" in listing)
+    result = text_of(await grant_capability.handler({"name": "act_without_asking"}))
+    check("granting it turns the switch off in config, through the same gate as every grant",
+          "act_without_asking enabled" in result and tomllib.loads(path.read_text())["confirm"]["ask_first"] is False)
+    grants.bind_config(replace(config, confirm=ConfirmConfig(ask_first=False)), path)
+    check("with asking off the listing says on, and granting again is a no-op",
+          "act_without_asking: on" in text_of(await list_capabilities.handler({}))
+          and "already enabled" in text_of(await grant_capability.handler({"name": "act_without_asking"})))
+    result = text_of(await revoke_capability.handler({"name": "act_without_asking"}))
+    check("revoking it puts asking back on at once",
+          "act_without_asking" in result and tomllib.loads(path.read_text())["confirm"]["ask_first"] is True)
+    grants.bind_config(config, path)
 
     check("a revoke edits immediately",
           "proactive disabled" in text_of(

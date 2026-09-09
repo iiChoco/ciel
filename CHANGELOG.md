@@ -2,6 +2,35 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — Asking first is a switch
+
+**Why.** The owner wanted to let Ciel act on their Mac without answering
+a question for every command, and wanted that to be something they could
+turn on and off, not a permanent surrender. The confirm tier was the one
+gate with no switch: every other power had a config field and an entry in
+the grant catalog, and confirmation was simply always on.
+
+**What.**
+
+- *One field, `[confirm] ask_first`.* Off, the broker answers yes to
+  itself for every confirm-tier question, at once, on both the spoken
+  path and the away lane. The question and its answer are still printed
+  into the transcript and recorded, so scrollback and journal show what
+  ran. The deny tier, the unattended-turn rule, and a suppressed broker
+  are untouched: those are not questions.
+- *Granted, not set.* `act_without_asking` joins the catalog as the first
+  inverted capability — its grant writes the value `false`, its revoke
+  writes `true` — so turning it on goes through the spoken gate once and
+  turning it off is instant, from any lane. The README says what is
+  given up.
+
+**Probes.** `probe_confirm_wire.py 18 → 22: with asking off the answer is
+yes with nothing sent to the room or the lane, the record rows carry the
+self-answer, and a suppressed broker still refuses. probe_grants.py
+32 → 36: the inverted capability lists as off under the default config,
+its grant writes ask_first = false and reports enabled, a second grant is
+a no-op, its revoke writes true.`
+
 ## 2026-09-09 — The calendar's login is read the way its connector wrote it
 
 **Why.** The live check on the hub found the calendar login present and
