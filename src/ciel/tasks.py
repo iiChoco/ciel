@@ -32,6 +32,20 @@ entry, without changing the original request, scope, or expected values.
 It commits completion and a durable notice together; reading a notice never
 re-executes work. More expressive verifiers and delivery belong to later stages.
 
+**A feature's records have a namespace, not a column.** An adapter registers
+a namespace with a version, a payload validator, and a migration; the store
+keeps that namespace's records owner-only, revisioned, bounded, and committed
+in the same transaction as the task transition they belong to. The store never
+reads inside a payload. A namespace it does not recognise, or one newer than
+its registration, is preserved untouched and reported unsupported: the tasks
+that need it wait, and everything else runs.
+
+**One step is one poll; one extraction is one model call.** The runner asks
+for the oldest eligible task, and an attempt it must give up on is spent, not
+forgotten: a read is requeued with backoff, a sent mutation waits for
+reconciliation, and an exhausted allowance fails the task visibly. Model calls
+have their own allowance, captured at creation like the others.
+
 Async cancellation does not roll back a worker transaction already submitted.
 Callers must reread state; originating request IDs deduplicate creation, and
 expected revisions make every later stale retry fail explicitly.
@@ -41,6 +55,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import json
+import logging
 import math
 import os
 import sqlite3
@@ -56,12 +71,27 @@ from typing import Any, Literal, TypeVar
 
 from ciel.config import TasksConfig
 
+log = logging.getLogger(__name__)
+
 Status = Literal['queued', 'running', 'verifying', 'waiting', 'paused', 'done', 'failed', 'cancelled']
 Phase = Literal['prepared', 'dispatched', 'observed', 'checkpointed', 'verified', 'interrupted', 'unknown']
 WaitReason = Literal['owner', 'external', 'resource', 'reconciliation']
 _TERMINAL = frozenset(('done', 'failed', 'cancelled'))
 _NOTICE = frozenset(('waiting', 'paused', 'done', 'failed', 'cancelled'))
-_SCHEMA = 2
+_SCHEMA = 3
+_FEATURE_TABLES = '''
+            CREATE TABLE feature_namespaces (
+                owner TEXT NOT NULL, namespace TEXT NOT NULL,
+                schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+                PRIMARY KEY(owner,namespace)
+            );
+            CREATE TABLE feature_records (
+                owner TEXT NOT NULL, namespace TEXT NOT NULL, record_key TEXT NOT NULL,
+                revision INTEGER NOT NULL CHECK(revision > 0), payload_json TEXT NOT NULL,
+                PRIMARY KEY(owner,namespace,record_key),
+                FOREIGN KEY(owner,namespace) REFERENCES feature_namespaces(owner,namespace)
+            );
+'''
 RESOURCE_WAIT = "Saved; execution is unavailable."
 Fence = Callable[[], AbstractContextManager[None]]
 _APPLICATION = 0x4349454C
@@ -157,6 +187,46 @@ class Task:
     eligible_at: float
     created_at: float
     updated_at: float
+    model_calls: int
+    """Isolated extraction calls made over the task's life."""
+    max_model_calls: int
+
+
+@dataclass(frozen=True, slots=True)
+class Namespace:
+    """What an adapter tells the store about its records, in application code."""
+
+    name: str
+    version: int
+    validate: Callable[[dict[str, Any]], None]
+    """Raises ValueError for a payload the adapter would not have written."""
+    migrate: Callable[[int, dict[str, Any]], dict[str, Any]] | None = None
+    """Lifts a payload from an older stored version; None means an older
+    store is unsupported rather than silently reinterpreted."""
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureRecord:
+    namespace: str
+    key: str
+    revision: int
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class RecordWrite:
+    """One record in a write-set. ``payload`` None deletes; ``expected_revision``
+    None skips the check, 0 requires that the record does not exist yet."""
+
+    key: str
+    payload: dict[str, Any] | None
+    expected_revision: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RecordSet:
+    namespace: str
+    writes: tuple[RecordWrite, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +297,10 @@ class TaskStore:
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
         self._poisoned = False
-        if any(type(n) is not int or n < 1 for n in (config.max_active, config.max_attempts, config.max_polls, config.max_record_chars)):
+        self._namespaces: dict[str, Namespace] = {}
+        self._unsupported: set[str] = set()
+        if any(type(n) is not int or n < 1 for n in (config.max_active, config.max_attempts, config.max_polls, config.max_record_chars,
+                                                      config.max_model_calls, config.max_feature_records)):
             raise ValueError('task limits must be positive integers')
         if _clock(config.evidence_max_age_s) <= 0:
             raise ValueError('evidence age must be positive')
@@ -313,18 +386,23 @@ class TaskStore:
             if not fresh:
                 version = self._db.execute('PRAGMA user_version').fetchone()[0]
                 app = self._db.execute('PRAGMA application_id').fetchone()[0]
-                if version != _SCHEMA or app != _APPLICATION:
+                if app != _APPLICATION or version not in (2, _SCHEMA):
                     raise TaskStoreError('unsupported task schema; no migration or downgrade was attempted')
                 if self._db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise TaskStoreError('task database failed its integrity check')
-            if not fresh:
-                self._validate_rows()
             self._db.execute('PRAGMA journal_mode=DELETE')
             self._db.execute('PRAGMA synchronous=EXTRA')
+            if not fresh and version == 2:
+                self._migrate_from_2()
+            if not fresh:
+                self._validate_rows()
             if fresh:
                 self._initialize()
                 self._validate_rows()
-            return self._transaction(lambda: self._recover(now))
+            def open_() -> tuple[Task, ...]:
+                self._reconcile_namespaces()
+                return self._recover(now)
+            return self._transaction(open_)
         except BaseException as exc:
             self._release()
             if isinstance(exc, (sqlite3.Error, OSError, KeyError, TypeError, ValueError)):
@@ -343,6 +421,7 @@ class TaskStore:
                 max_attempts INTEGER NOT NULL, polls INTEGER NOT NULL, max_polls INTEGER NOT NULL, evidence_max_age REAL NOT NULL,
                 current_attempt TEXT, wait_reason TEXT, detail TEXT NOT NULL,
                 eligible_at REAL NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                model_calls INTEGER NOT NULL DEFAULT 0, max_model_calls INTEGER NOT NULL DEFAULT {int(self._config.max_model_calls)},
                 UNIQUE(owner,request_id)
             );
             CREATE TABLE attempts (
@@ -379,10 +458,119 @@ class TaskStore:
                 client_generation TEXT NOT NULL, tool_use_id TEXT NOT NULL, journal_ref TEXT,
                 PRIMARY KEY(client_generation,tool_use_id)
             );
+            {_FEATURE_TABLES}
             PRAGMA application_id={_APPLICATION};
             PRAGMA user_version={_SCHEMA};
             COMMIT;
         ''')
+
+    def _migrate_from_2(self) -> None:
+        """Version two knew nothing of model calls or feature records. Both
+        arrive with defaults, so every existing task keeps its place and its
+        allowances; nothing is reinterpreted."""
+        assert self._db is not None
+        self._db.executescript(f'''
+            BEGIN IMMEDIATE;
+            ALTER TABLE tasks ADD COLUMN model_calls INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE tasks ADD COLUMN max_model_calls INTEGER NOT NULL DEFAULT {int(self._config.max_model_calls)};
+            {_FEATURE_TABLES}
+            PRAGMA user_version={_SCHEMA};
+            COMMIT;
+        ''')
+        log.info('task store migrated from schema 2 to %d', _SCHEMA)
+
+    def register(self, namespace: Namespace) -> None:
+        """Application code announces an adapter's records before the store opens."""
+        if self._db is not None:
+            raise TaskStoreError('namespaces are registered before the store opens')
+        _text(namespace.name, 'namespace')
+        if type(namespace.version) is not int or namespace.version < 1:
+            raise ValueError('a namespace version is a positive integer')
+        if namespace.name in self._namespaces:
+            raise ValueError('namespace is already registered')
+        self._namespaces[namespace.name] = namespace
+
+    def namespace_supported(self, name: str) -> bool:
+        return name in self._namespaces and name not in self._unsupported
+
+    def _reconcile_namespaces(self) -> None:
+        """Stored versions meet registered ones once, at open. Older records
+        are lifted by the adapter's own migration; anything the adapter cannot
+        lift, or does not know, is left exactly as it was and marked unsupported."""
+        assert self._db is not None
+        for row in self._db.execute('SELECT * FROM feature_namespaces').fetchall():
+            name, stored = row['namespace'], row['schema_version']
+            spec = self._namespaces.get(name)
+            if spec is None or stored > spec.version or (stored < spec.version and spec.migrate is None):
+                self._unsupported.add(name)
+                log.warning('feature namespace %r (stored version %d) is unsupported by this runtime', name, stored)
+                continue
+            if stored == spec.version:
+                continue
+            # A savepoint per namespace: one adapter's failed migration rolls
+            # back its own records only and leaves the rest of the open intact.
+            self._db.execute('SAVEPOINT namespace_migration')
+            try:
+                assert spec.migrate is not None
+                for record in self._db.execute('SELECT * FROM feature_records WHERE owner=? AND namespace=?', (row['owner'], name)).fetchall():
+                    payload = spec.migrate(stored, json.loads(record['payload_json']))
+                    if not isinstance(payload, dict):
+                        raise ValueError('a migrated payload is an object')
+                    spec.validate(payload)
+                    self._db.execute('UPDATE feature_records SET payload_json=?,revision=revision+1 WHERE owner=? AND namespace=? AND record_key=?',
+                                     (self._bounded(payload), row['owner'], name, record['record_key']))
+                self._db.execute('UPDATE feature_namespaces SET schema_version=? WHERE owner=? AND namespace=?', (spec.version, row['owner'], name))
+                self._db.execute('RELEASE namespace_migration')
+                log.info('feature namespace %r migrated from version %d to %d', name, stored, spec.version)
+            except Exception:  # noqa: BLE001 - the adapter's migration is its own; the records stay as they were
+                self._db.execute('ROLLBACK TO namespace_migration')
+                self._db.execute('RELEASE namespace_migration')
+                self._unsupported.add(name)
+                log.warning('feature namespace %r could not be migrated from version %d; its records are preserved', name, stored, exc_info=True)
+
+    def _namespace(self, name: str) -> Namespace:
+        spec = self._namespaces.get(name)
+        if spec is None or name in self._unsupported:
+            raise TaskStoreError(f'feature namespace {name!r} is unsupported by this runtime')
+        return spec
+
+    def _apply_records(self, owner: str, records: RecordSet) -> None:
+        assert self._db is not None
+        spec = self._namespace(records.namespace)
+        _text(owner, 'owner')
+        self._db.execute('INSERT OR IGNORE INTO feature_namespaces VALUES(?,?,?)', (owner, spec.name, spec.version))
+        seen: set[str] = set()
+        for write in records.writes:
+            _text(write.key, 'record key')
+            if write.key in seen:
+                raise ValueError('a write-set names each record once')
+            seen.add(write.key)
+            expected = write.expected_revision
+            if expected is not None and (type(expected) is not int or expected < 0):
+                raise ValueError('an expected record revision is a non-negative integer')
+            row = self._db.execute('SELECT revision FROM feature_records WHERE owner=? AND namespace=? AND record_key=?',
+                                   (owner, spec.name, write.key)).fetchone()
+            if write.payload is None:
+                if row is None or (expected is not None and row['revision'] != expected):
+                    raise TaskConflict('record revision changed or the record does not exist')
+                self._db.execute('DELETE FROM feature_records WHERE owner=? AND namespace=? AND record_key=?', (owner, spec.name, write.key))
+                continue
+            if not isinstance(write.payload, dict):
+                raise ValueError('a record payload is an object')
+            spec.validate(write.payload)
+            data = self._bounded(write.payload)
+            if row is None:
+                if expected not in (None, 0):
+                    raise TaskConflict('record revision changed or the record does not exist')
+                count = self._db.execute('SELECT count(*) FROM feature_records WHERE owner=? AND namespace=?', (owner, spec.name)).fetchone()[0]
+                if count >= self._config.max_feature_records:
+                    raise TaskLimit('feature record allowance exhausted')
+                self._db.execute('INSERT INTO feature_records VALUES(?,?,?,?,?)', (owner, spec.name, write.key, 1, data))
+            else:
+                if expected is not None and row['revision'] != expected:
+                    raise TaskConflict('record revision changed or the record does not exist')
+                self._db.execute('UPDATE feature_records SET revision=revision+1,payload_json=? WHERE owner=? AND namespace=? AND record_key=?',
+                                 (data, owner, spec.name, write.key))
 
     def _transaction(self, operation: Callable[[], _T], fence: Fence | None = None) -> _T:
         if self._db is None or self._poisoned:
@@ -462,7 +650,8 @@ class TaskStore:
         return Task(row['id'], Origin(**{**request['origin'], 'ingress_ids': tuple(request['origin'].get('ingress_ids', ()))}), _spec(json.loads(row['specification_json'])),
                     _step(json.loads(row['step_json'])), row['status'], row['revision'],
                     row['attempts'], row['max_attempts'], row['polls'], row['max_polls'], row['evidence_max_age'], row['current_attempt'],
-                    row['wait_reason'], row['detail'], row['eligible_at'], row['created_at'], row['updated_at'])
+                    row['wait_reason'], row['detail'], row['eligible_at'], row['created_at'], row['updated_at'],
+                    row['model_calls'], row['max_model_calls'])
 
     def _get(self, owner: str, task_id: str, revision: int | None = None) -> Task:
         assert self._db is not None
@@ -477,7 +666,9 @@ class TaskStore:
     def _validate_rows(self) -> None:
         assert self._db is not None
         columns = {
-            'tasks': 'id owner request_id request_json specification_json step_json status revision attempts max_attempts polls max_polls evidence_max_age current_attempt wait_reason detail eligible_at created_at updated_at',
+            'tasks': 'id owner request_id request_json specification_json step_json status revision attempts max_attempts polls max_polls evidence_max_age current_attempt wait_reason detail eligible_at created_at updated_at model_calls max_model_calls',
+            'feature_namespaces': 'owner namespace schema_version',
+            'feature_records': 'owner namespace record_key revision payload_json',
             'attempts': 'id task_id task_revision step_json phase created_at updated_at',
             'evidence': 'attempt_id criterion_id record_json',
             'transitions': 'task_id revision before_status after_status detail at',
@@ -505,6 +696,7 @@ class TaskStore:
                 raise TaskStoreError('a retarget cannot rewrite the originating mandate')
             if (task.attempts < 0 or task.max_attempts < 1 or task.attempts > task.max_attempts
                     or task.polls < task.attempts or task.max_polls < 1 or task.polls > task.max_polls
+                    or task.max_model_calls < 1 or not 0 <= task.model_calls <= task.max_model_calls
                     or _clock(task.evidence_max_age_s) <= 0
                     or any(_clock(value) != value for value in (task.created_at,task.updated_at,task.eligible_at))):
                 raise TaskStoreError('task has invalid durable limits or timestamps')
@@ -558,6 +750,13 @@ class TaskStore:
                 raise TaskStoreError('tool binding changed its attempt revision')
             _text(row['client_generation'], 'client generation')
             _text(row['tool_use_id'], 'tool-use identity')
+        for row in self._db.execute('SELECT * FROM feature_namespaces'):
+            _text(row['owner'], 'owner')
+            _text(row['namespace'], 'namespace')
+        for row in self._db.execute('SELECT * FROM feature_records'):
+            _text(row['record_key'], 'record key')
+            if not isinstance(json.loads(row['payload_json']), dict):
+                raise TaskStoreError('feature record payload is not an object')
 
     def _event(self, task: Task, before: str | None) -> None:
         assert self._db is not None
@@ -622,9 +821,10 @@ class TaskStore:
                 raise TaskLimit('active task allowance exhausted')
             applied = True
             task_id = uuid.uuid4().hex
-            self._db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            self._db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                              (task_id,origin.owner,origin.request_id,data,self._bounded(asdict(specification)),self._bounded(asdict(step)), 'queued',1,0,
-                              self._config.max_attempts,0,self._config.max_polls,self._config.evidence_max_age_s,None,None,'created',stamp,stamp,stamp))
+                              self._config.max_attempts,0,self._config.max_polls,self._config.evidence_max_age_s,None,None,'created',stamp,stamp,stamp,
+                              0,self._config.max_model_calls))
             task = self._get(origin.owner,task_id)
             self._event(task,None)
             for identity in origin.ingress_ids:
@@ -701,7 +901,8 @@ class TaskStore:
             return result
         return await self._run(lambda: self._transaction(write))
 
-    async def complete(self, owner: str, task_id: str, revision: int, *, now: float | None = None) -> Task:
+    async def complete(self, owner: str, task_id: str, revision: int, *, now: float | None = None,
+                       records: RecordSet | None = None) -> Task:
         stamp = _clock(now)
         def write() -> Task:
             assert self._db is not None
@@ -714,6 +915,8 @@ class TaskStore:
                 if item is None or item.target != criterion.target or item.observed != criterion.expected or item.target_revision != criterion.target_revision or not 0 <= stamp-item.observed_at <= task.evidence_max_age_s:
                     raise TaskConflict('completion criteria lack fresh matching evidence')
             self._db.execute("UPDATE attempts SET phase='verified',updated_at=? WHERE id=?",(stamp,task.current_attempt))
+            if records is not None:
+                self._apply_records(owner, records)
             return self._advance(task,'done',stamp,detail='completion criteria verified')
         return await self._run(lambda: self._transaction(write))
 
@@ -758,7 +961,8 @@ class TaskStore:
             return result
         return await self._run(lambda: self._transaction(write))
 
-    async def checkpoint(self, owner: str, task_id: str, revision: int, step: Step, *, eligible_at: float, now: float | None = None) -> Task:
+    async def checkpoint(self, owner: str, task_id: str, revision: int, step: Step, *, eligible_at: float, now: float | None = None,
+                         records: RecordSet | None = None) -> Task:
         stamp, eligible = _clock(now), _clock(eligible_at)
         self._bounded(asdict(step))
         def write() -> Task:
@@ -769,22 +973,33 @@ class TaskStore:
             if task.next_step.kind == 'mutation' and step.kind != 'read':
                 raise TaskConflict('a mutation must be verified by a read before planning another mutation')
             self._checkpoint_attempt(task, stamp)
+            if records is not None:
+                self._apply_records(owner, records)
             return self._advance(task,'queued',stamp,detail='next step saved',step=step,eligible_at=eligible)
         return await self._run(lambda: self._transaction(write))
 
-    async def wait(self, owner: str, task_id: str, revision: int, reason: WaitReason, detail: str, *, now: float | None = None) -> Task:
+    async def wait(self, owner: str, task_id: str, revision: int, reason: WaitReason, detail: str, *, now: float | None = None,
+                   step: Step | None = None, records: RecordSet | None = None) -> Task:
         stamp = _clock(now)
         if reason not in ('owner','external','resource'):
             raise ValueError('reconciliation waits belong to recovery')
         _text(detail,'wait explanation')
+        if step is not None:
+            self._bounded(asdict(step))
         def write() -> Task:
             task = self._get(owner,task_id,revision)
             if task.status not in ('queued','verifying'):
                 raise TaskConflict('task cannot enter a wait from this state')
             if task.status == 'verifying' and task.next_step.kind == 'mutation':
                 raise TaskConflict('checkpoint a scoped verification read before waiting after a mutation')
+            if step is not None:
+                self._validate_step(task.specification, step)
+                if task.next_step.kind == 'mutation' and step.kind != 'read':
+                    raise TaskConflict('a mutation must be verified by a read before planning another mutation')
             self._checkpoint_attempt(task, stamp)
-            return self._advance(task,'waiting',stamp,detail=detail,wait_reason=reason)
+            if records is not None:
+                self._apply_records(owner, records)
+            return self._advance(task,'waiting',stamp,detail=detail,wait_reason=reason,step=step)
         return await self._run(lambda: self._transaction(write))
 
     async def pause(self, owner: str, task_id: str, revision: int, *, now: float | None = None) -> Task:
@@ -983,3 +1198,83 @@ class TaskStore:
             assert self._db is not None
             return tuple(Notice(**dict(row)) for row in self._db.execute('SELECT o.* FROM outbox o JOIN tasks t ON o.task_id=t.id WHERE t.owner=? ORDER BY o.created_at,o.id',(owner,)))
         return await self._run(lambda: self._transaction(read))
+
+    # ── the runner's side ─────────────────────────────────────────────────────
+
+    async def eligible(self, owner: str, *, now: float | None = None, limit: int = 8) -> tuple[Task, ...]:
+        """The oldest queued tasks whose time has come and whose allowances remain."""
+        stamp = _clock(now)
+        if type(limit) is not int or limit < 1:
+            raise ValueError('limit must be a positive integer')
+        def read() -> tuple[Task, ...]:
+            assert self._db is not None
+            rows = self._db.execute(
+                "SELECT * FROM tasks WHERE owner=? AND status='queued' AND eligible_at<=? AND attempts<max_attempts AND polls<max_polls "
+                'ORDER BY eligible_at,created_at,id LIMIT ?', (owner, stamp, limit)).fetchall()
+            return tuple(self._task(row) for row in rows)
+        return await self._run(lambda: self._transaction(read))
+
+    def _live(self, owner: str, attempt: Attempt) -> tuple[Task, Attempt]:
+        """The attempt the runner holds, if the store still holds it too: running
+        or verifying, current, and not yet checkpointed, verified, or given up."""
+        task = self._get(owner, attempt.task_id)
+        stored = self._attempt(attempt.id)
+        if task.status not in ('running', 'verifying') or task.current_attempt != attempt.id or stored.phase not in ('prepared', 'dispatched', 'observed'):
+            raise TaskConflict('attempt is no longer current')
+        return task, stored
+
+    async def abandon(self, owner: str, attempt: Attempt, detail: str, *, eligible_at: float, now: float | None = None) -> Task:
+        """The runner gives an attempt up: a timeout, an adapter failure, the
+        owner's voice. The attempt is spent. A read is requeued with backoff,
+        a sent mutation waits for reconciliation, and an exhausted allowance
+        fails the task where the owner can see why."""
+        stamp, eligible = _clock(now), _clock(eligible_at)
+        _text(detail, 'abandonment explanation')
+        def write() -> Task:
+            assert self._db is not None
+            task, stored = self._live(owner, attempt)
+            uncertain = stored.phase == 'dispatched' and stored.step.kind == 'mutation'
+            self._db.execute('UPDATE attempts SET phase=?,updated_at=? WHERE id=?', ('unknown' if uncertain else 'interrupted', stamp, attempt.id))
+            self._db.execute('UPDATE tasks SET attempts=attempts+1 WHERE id=?', (task.id,))
+            task = self._get(owner, task.id)
+            if uncertain:
+                return self._advance(task, 'waiting', stamp, detail='dispatch outcome unknown', wait_reason='reconciliation')
+            if task.attempts >= task.max_attempts:
+                return self._advance(task, 'failed', stamp, detail=f'{detail}; attempt allowance exhausted')
+            return self._advance(task, 'queued', stamp, detail=detail, eligible_at=max(eligible, stamp))
+        return await self._run(lambda: self._transaction(write))
+
+    async def note_model_call(self, owner: str, attempt: Attempt, *, now: float | None = None) -> Task:
+        """Spend one model call before it is made; a spent call is never refunded."""
+        stamp = _clock(now)
+        def write() -> Task:
+            assert self._db is not None
+            task, _ = self._live(owner, attempt)
+            if task.model_calls >= task.max_model_calls:
+                raise TaskLimit('task model-call allowance exhausted')
+            self._db.execute('UPDATE tasks SET model_calls=model_calls+1,updated_at=? WHERE id=?', (max(stamp, task.updated_at), task.id))
+            return self._get(owner, task.id)
+        return await self._run(lambda: self._transaction(write))
+
+    async def records(self, owner: str, namespace: str, keys: tuple[str, ...] | None = None, *, limit: int = 256) -> tuple[FeatureRecord, ...]:
+        """An adapter's own records, by key or in key order, never another namespace's."""
+        spec = self._namespace(namespace)
+        if type(limit) is not int or limit < 1:
+            raise ValueError('limit must be a positive integer')
+        if keys is not None and (not isinstance(keys, tuple) or any(not isinstance(k, str) for k in keys)):
+            raise ValueError('record keys are a tuple of strings')
+        def read() -> tuple[FeatureRecord, ...]:
+            assert self._db is not None
+            if keys is None:
+                rows = self._db.execute('SELECT * FROM feature_records WHERE owner=? AND namespace=? ORDER BY record_key LIMIT ?',
+                                        (owner, spec.name, limit)).fetchall()
+            else:
+                rows = [r for r in (self._db.execute('SELECT * FROM feature_records WHERE owner=? AND namespace=? AND record_key=?',
+                                                     (owner, spec.name, key)).fetchone() for key in keys[:limit]) if r is not None]
+            return tuple(FeatureRecord(r['namespace'], r['record_key'], r['revision'], json.loads(r['payload_json'])) for r in rows)
+        return await self._run(lambda: self._transaction(read))
+
+    async def write_records(self, owner: str, records: RecordSet, *, fence: Fence | None = None) -> None:
+        """A write-set on its own, for work that has no task transition to ride on."""
+        self._namespace(records.namespace)
+        await self._run(lambda: self._transaction(lambda: self._apply_records(owner, records), fence))

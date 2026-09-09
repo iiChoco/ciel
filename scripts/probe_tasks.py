@@ -12,7 +12,14 @@ preserve request identity and scope, fence stale callbacks, and require matching
 fresh evidence for every criterion. Cancelled callers, cancelled shutdown,
 and failed writes cannot be confused with rolled-back or completed work. Real subprocess deaths pin rollback before
 commit, recovery before dispatch, retryable reads, uncertain external writes,
-and completion notices surviving independently of delivery. No actual tool,
+and completion notices surviving independently of delivery. The runner's side
+pins eligibility in age order, a model-call allowance spent before the call,
+abandonment that spends the attempt and requeues with backoff, waits for
+reconciliation, or fails the task, and feature records with a namespace:
+validated write-sets, expected revisions, a per-namespace allowance, write-sets
+riding a checkpoint, adapter-owned migration at open, unsupported and unknown
+namespaces preserved untouched, a failed migration rolled back, and a
+version-two store lifted to three with every task in place. No actual tool,
 model, mic, network, or user's runtime state is used.
 
     uv run --no-sync python scripts/probe_tasks.py
@@ -34,7 +41,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ciel.config import TasksConfig, load_config
-from ciel.tasks import Criterion, Evidence, Origin, Scope, Specification, Step, Task, TaskBusy, TaskConflict, TaskLimit, TaskStore, TaskStoreError
+from ciel.tasks import (Criterion, Evidence, Namespace, Origin, RecordSet, RecordWrite, Scope, Specification, Step, Task, TaskBusy,
+                        TaskConflict, TaskLimit, TaskStore, TaskStoreError)
 
 CHECKS: list[str] = []
 OWNER = 'fixture-owner'
@@ -587,6 +595,163 @@ async def probe_owner_controls(root: Path) -> None:
         check('an empty version-two bindings table validates', not await store.list(OWNER))
 
 
+def validate_record(payload: dict) -> None:
+    if not isinstance(payload.get('n'), int):
+        raise ValueError('n')
+
+
+async def probe_runner_side(root: Path) -> None:
+    print('\nthe runner\'s side of the store')
+    cfg = config(root / 'runner-side', max_attempts=2, max_model_calls=2)
+    async with TaskStore(cfg) as store:
+        task = await create(store)
+        later = await store.create(Origin(OWNER, 'later', 'voice'), SPEC, READ, now=101)
+        check('eligibility lists queued tasks whose time has come, oldest first',
+              [t.id for t in await store.eligible(OWNER, now=101)] == [task.id, later.id]
+              and [t.id for t in await store.eligible(OWNER, now=100)] == [task.id]
+              and not await store.eligible(OWNER, now=99) and not await store.eligible('someone-else', now=101))
+        attempt = await store.claim(OWNER, task.id, task.revision, now=101)
+        check('a running task is not eligible', task.id not in [t.id for t in await store.eligible(OWNER, now=200)])
+        counted = await store.note_model_call(OWNER, attempt, now=101)
+        counted = await store.note_model_call(OWNER, attempt, now=101)
+        await refused('a model-call allowance is spent before the call and runs out', store.note_model_call(OWNER, attempt, now=101), TaskLimit)
+        check('model calls are counted on the task', counted.model_calls == 2 and counted.max_model_calls == 2)
+        abandoned = await store.abandon(OWNER, attempt, 'the read failed', eligible_at=150, now=102)
+        check('an abandoned read is spent and requeued with backoff',
+              abandoned.status == 'queued' and abandoned.attempts == 1 and abandoned.polls == 1 and abandoned.eligible_at == 150
+              and abandoned.detail == 'the read failed' and (await store.attempts(OWNER, task.id))[0].phase == 'interrupted')
+        await refused('an abandoned attempt cannot be abandoned twice', store.abandon(OWNER, attempt, 'again', eligible_at=150, now=103))
+        check('backoff keeps the task out of eligibility until its time', task.id not in [t.id for t in await store.eligible(OWNER, now=149)]
+              and task.id in [t.id for t in await store.eligible(OWNER, now=150)])
+        attempt = await store.claim(OWNER, task.id, abandoned.revision, now=150)
+        attempt = await store.mark_dispatched(OWNER, attempt, now=151)
+        observed = await store.observe(OWNER, attempt, (Evidence('checks', 'fixture:pr', 'pending', 'fixture', 152, 'head-1'),), now=152)
+        failed = await store.abandon(OWNER, attempt, 'the outcome was refused', eligible_at=200, now=153)
+        check('an observed attempt can still be given up, and an exhausted allowance fails the task visibly',
+              observed.status == 'verifying' and failed.status == 'failed' and failed.attempts == 2
+              and 'attempt allowance exhausted' in failed.detail)
+        write = await create(store, 'write', WRITE)
+        attempt = await store.claim(OWNER, write.id, write.revision, now=160)
+        attempt = await store.mark_dispatched(OWNER, attempt, now=161)
+        uncertain = await store.abandon(OWNER, attempt, 'lost the response', eligible_at=200, now=162)
+        check('a sent mutation given up on waits for reconciliation, never a retry',
+              uncertain.status == 'waiting' and uncertain.wait_reason == 'reconciliation'
+              and (await store.attempts(OWNER, write.id))[0].phase == 'unknown')
+    async with TaskStore(cfg) as store:
+        check('model calls and spent attempts survive reopening',
+              (await store.get(OWNER, task.id)).model_calls == 2 and (await store.get(OWNER, task.id)).attempts == 2)
+
+
+async def probe_feature_records(root: Path) -> None:
+    print('\nfeature records have a namespace, not a column')
+    cfg = config(root / 'feature-records', max_feature_records=2)
+    spec = Namespace('fixture', 1, validate_record)
+    store = TaskStore(cfg)
+    store.register(spec)
+    try:
+        store.register(spec)
+    except ValueError:
+        check('a namespace is registered once', True)
+    else:
+        check('a namespace is registered once', False)
+    async with store:
+        try:
+            store.register(Namespace('late', 1, validate_record))
+        except TaskStoreError:
+            check('namespaces are registered before the store opens', True)
+        else:
+            check('namespaces are registered before the store opens', False)
+        await store.write_records(OWNER, RecordSet('fixture', (RecordWrite('a', {'n': 1}, 0), RecordWrite('b', {'n': 2}))))
+        rows = await store.records(OWNER, 'fixture')
+        check('records are written with revision one and read back in key order',
+              [(r.key, r.revision, r.payload) for r in rows] == [('a', 1, {'n': 1}), ('b', 1, {'n': 2})])
+        await refused('a write-set the validator rejects is refused whole', store.write_records(OWNER, RecordSet('fixture', (RecordWrite('a', {'n': 5}), RecordWrite('c', {'n': 'x'})))), ValueError)
+        check('a refused write-set changed nothing', (await store.records(OWNER, 'fixture', ('a',)))[0].payload == {'n': 1})
+        await refused('an expected revision that no longer matches refuses the write', store.write_records(OWNER, RecordSet('fixture', (RecordWrite('a', {'n': 5}, 2),))))
+        await refused('a record expected to be new cannot overwrite one that exists', store.write_records(OWNER, RecordSet('fixture', (RecordWrite('a', {'n': 5}, 0),))))
+        await refused('a namespace fills up at its allowance', store.write_records(OWNER, RecordSet('fixture', (RecordWrite('c', {'n': 3}),))), TaskLimit)
+        await store.write_records(OWNER, RecordSet('fixture', (RecordWrite('a', {'n': 9}, 1), RecordWrite('b', None, 1))))
+        rows = await store.records(OWNER, 'fixture')
+        check('an update bumps the revision and a delete removes the record', [(r.key, r.revision, r.payload) for r in rows] == [('a', 2, {'n': 9})])
+        check('another owner sees no records', not await store.records('someone-else', 'fixture'))
+        await refused('an unregistered namespace is unsupported', store.records(OWNER, 'unknown'), TaskStoreError)
+        task = await create(store)
+        seen = await observed(store, task, 'pending')
+        saved = await store.checkpoint(OWNER, task.id, seen.revision, READ, eligible_at=200, now=105,
+                                       records=RecordSet('fixture', (RecordWrite('cursor', {'n': 1}),)))
+        check('a write-set rides the checkpoint it belongs to', saved.status == 'queued'
+              and any(r.key == 'cursor' for r in await store.records(OWNER, 'fixture')))
+        await refused('a checkpoint whose write-set is refused is not a checkpoint',
+                      store.checkpoint(OWNER, task.id, saved.revision, READ, eligible_at=200, now=106,
+                                       records=RecordSet('fixture', (RecordWrite('cursor', {'n': 2}, 7),))))
+        check('the refused checkpoint changed neither the task nor the records',
+              (await store.get(OWNER, task.id)).revision == saved.revision
+              and (await store.records(OWNER, 'fixture', ('cursor',)))[0].revision == 1)
+
+    lifted = TaskStore(cfg)
+    lifted.register(Namespace('fixture', 2, lambda p: validate_record({'n': p['count']}), lambda v, p: {'count': p['n']}))
+    async with lifted as store:
+        rows = await store.records(OWNER, 'fixture')
+        check('an older namespace is lifted by the adapter\'s own migration at open',
+              store.namespace_supported('fixture') and [(r.key, r.revision, r.payload) for r in rows] == [('a', 3, {'count': 9}), ('cursor', 2, {'count': 1})])
+    newer = TaskStore(cfg)
+    newer.register(Namespace('fixture', 1, validate_record))
+    async with newer as store:
+        check('a namespace newer than the runtime is unsupported and untouched', not store.namespace_supported('fixture'))
+        await refused('unsupported records cannot be read or written', store.records(OWNER, 'fixture'), TaskStoreError)
+        await refused('unsupported records cannot be read or written', store.write_records(OWNER, RecordSet('fixture', (RecordWrite('z', {'n': 1}),))), TaskStoreError)
+    unknown = TaskStore(cfg)
+    async with unknown as store:
+        check('an unregistered namespace is preserved and reported unsupported', not store.namespace_supported('fixture'))
+    def bad_migrate(version: int, payload: dict) -> dict:
+        raise RuntimeError('cannot lift')
+    broken = TaskStore(cfg)
+    broken.register(Namespace('fixture', 3, validate_record, bad_migrate))
+    async with broken as store:
+        check('a failing migration marks the namespace unsupported and the store still opens', not store.namespace_supported('fixture'))
+    again = TaskStore(cfg)
+    again.register(Namespace('fixture', 2, lambda p: validate_record({'n': p['count']})))
+    async with again as store:
+        rows = await store.records(OWNER, 'fixture')
+        check('the failed migration rolled back to the records as they were',
+              [(r.key, r.revision, r.payload) for r in rows] == [('a', 3, {'count': 9}), ('cursor', 2, {'count': 1})])
+
+
+async def probe_migration(root: Path) -> None:
+    print('\nversion two is lifted, not reset')
+    cfg = config(root / 'schema-migration')
+    async with TaskStore(cfg) as store:
+        task = await create(store)
+        seen = await observed(store, task, 'pending')
+        await store.checkpoint(OWNER, task.id, seen.revision, READ, eligible_at=200, now=105)
+    check('this SQLite can build a version-two fixture', sqlite3.sqlite_version_info >= (3, 35))
+    db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
+    db.executescript('''
+        DROP TABLE feature_records; DROP TABLE feature_namespaces;
+        ALTER TABLE tasks DROP COLUMN max_model_calls; ALTER TABLE tasks DROP COLUMN model_calls;
+        PRAGMA user_version=2;
+    ''')
+    db.close()
+    async with TaskStore(config(root / 'schema-migration', max_model_calls=5)) as store:
+        lifted = await store.get(OWNER, task.id)
+        db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
+        version = db.execute('PRAGMA user_version').fetchone()[0]
+        db.close()
+        check('a version-two store opens as version three with every task in place and the new allowance at its configured value',
+              version == 3 and lifted.status == 'queued' and lifted.next_step == READ and lifted.polls == 1
+              and lifted.model_calls == 0 and lifted.max_model_calls == 5)
+    db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
+    db.execute('PRAGMA user_version=4')
+    db.close()
+    try:
+        async with TaskStore(cfg):
+            pass
+    except TaskStoreError:
+        check('a store newer than the runtime is still refused, not downgraded', True)
+    else:
+        check('a store newer than the runtime is still refused, not downgraded', False)
+
+
 async def main() -> None:
     with tempfile.TemporaryDirectory(prefix='ciel-task-probe-') as tmp:
         root = Path(tmp)
@@ -609,6 +774,9 @@ async def main() -> None:
         await probe_polling(root)
         await probe_retarget(root)
         await probe_owner_controls(root)
+        await probe_runner_side(root)
+        await probe_feature_records(root)
+        await probe_migration(root)
     print(f'\nall {len(CHECKS)} checks passed')
 
 

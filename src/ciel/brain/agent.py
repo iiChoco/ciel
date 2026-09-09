@@ -26,7 +26,7 @@ import logging
 import re
 import sys
 import time
-from contextlib import aclosing
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import replace
 from types import TracebackType
 from typing import AsyncIterator, Awaitable, Callable, Self
@@ -855,6 +855,19 @@ class Brain:
                 await self._task_authority.clear()
             finally:
                 self._turn_lock.release()
+
+    @asynccontextmanager
+    async def lease(self) -> AsyncIterator[None]:
+        """Hold the model turn without asking anything of the conversation.
+
+        The isolated extraction call runs on a client of its own, but it
+        is still a model turn, and two at once is what the turn lock
+        exists to prevent. Holding the lock is the whole of the lease: the
+        conversational client is untouched, no authority is installed, and
+        a user turn that arrives waits exactly as it would behind reflection.
+        """
+        async with self._turn_lock:
+            yield
 
     def unattended(self, label: str = "unattended"):
         """Engage the Witness rule for the enclosing block.

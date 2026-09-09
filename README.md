@@ -1355,13 +1355,62 @@ or cancel them. For example: “Save a watch for the build and unit-test checks 
 repo-owner/repo PR 12.” The repository, PR, and exact check names are required;
 missing targets or a request for several watches need clarification first.
 
-**Saved is not started.** There is no task runner, GitHub observation, credential
-setup, automatic task notification, or external action in this stage. Creation
-commits directly into a resource wait. Resume and accepted owner answers also
-remain waiting while execution is unavailable. Ciel says it saved the request;
-it does not claim to be watching. The hub owns one asynchronous store in split
-mode, standalone owns its local store, and the spoke owns neither. Failure to
-open storage disables task controls while ordinary conversation continues.
+**Saved is not started.** Creation commits directly into a resource wait, and
+with `[tasks].runner = false` (the default) nothing ever moves a task: no
+observation, no credential setup, no automatic notification, no external
+action. Resume and accepted owner answers also remain waiting while execution
+is unavailable. Ciel says it saved the request; it does not claim to be
+watching. The hub owns one asynchronous store in split mode, standalone owns
+its local store, and the spoke owns neither. Failure to open storage disables
+task controls while ordinary conversation continues.
+
+**A task gets another turn.** With `runner = true`, the bounded runner in
+`task_runner.py` takes the bottom rung of the ladder: from an idle room, after
+every human lane and after Vigil, it claims the oldest queued task whose time
+has come and gives it exactly one step. An adapter serves a set of operations;
+its `prepare` is pure and may say wait, its `read` observes the target and
+returns evidence and what should happen next: completion when the evidence
+matches the criteria, a checkpoint with a delay, an external or resource wait,
+or a question for the owner. A mutation step is not dispatched by this runner
+at all; it waits, visibly, for the authorized dispatch phase that arrives with
+the foundation's third milestone. An operation no adapter serves waits the
+same way. No adapter ships yet: the probes supply a synthetic one, and the
+first real ones belong to the inbox feature.
+
+One exception keeps a task from starving: one that has waited longer than
+`task_aging_s` moves ahead of a *nonurgent* Vigil nudge. An urgent one, the
+kind the policy would message the owner about, stays ahead, as does every
+human lane. Human input wins outright: if a step is holding the model turn
+when the owner speaks, the pipeline interrupts it, the attempt is spent, and
+the task is requeued with `retry_backoff_s`. A plain read holds nothing anyone
+is waiting for and is left to finish. Every write the runner makes names the
+attempt it holds; the store refuses one for an attempt that is no longer
+current, so a step that outlives the owner's cancellation or a restart writes
+nothing. Giving up is recorded, never retried blindly: a timeout, an adapter's
+exception, or an outcome the store refuses abandons the attempt through the
+store, which requeues a read with backoff, holds a sent mutation for
+reconciliation, or fails the task where the owner can see why.
+
+**A feature's records have a namespace, not a column.** An adapter registers a
+namespace with a version, a payload validator, and a migration; the store
+keeps that namespace's records owner-only, revisioned, bounded by
+`max_feature_records`, and committed in the same transaction as the checkpoint,
+wait, or completion they belong to. The store never reads inside a payload. A
+namespace it does not recognise, or one newer than its registration, is
+preserved untouched and reported unsupported: the tasks that need it wait,
+everything else runs. A store from schema version two is lifted to three at
+open with every task in place; a newer store is still refused.
+
+**One model call has one bounded context.** When a read needs a model to say
+what it saw, `brain/extract.py` runs a client of its own: a fresh SDK session
+with a fixed system prompt, no tools, no MCP servers, none of the owner's
+settings, an empty private working directory, and a JSON schema for its
+answer, checked again in runtime code before anyone acts on a field. It sees
+the bounded payload and the context the adapter declares, never the world's
+chips, the notebook, or the conversation. It holds the Brain's turn lease, so
+it never overlaps a conversational turn, and it spends one of the task's
+`max_model_calls` before it is made. There is no fallback: a failed extraction
+is an abandoned attempt, never a prompt to the conversational client.
 
 The implementation follows the [stage-two plan](design/2026-09-07-task-controls-plan.md)
 and its [review](reports/2026-09-07-task-controls-plan-review.md). Task attendance
@@ -1430,7 +1479,26 @@ max_polls = 288
 busy_timeout_s = 5.0
 evidence_max_age_s = 300.0
 max_record_chars = 16000
+runner = false              # give eligible tasks a step at the bottom of the ladder
+task_aging_s = 300.0        # after this long waiting, a task passes a nonurgent nudge
+step_timeout_s = 60.0       # the longest one adapter read may take
+retry_backoff_s = 30.0      # how long an abandoned attempt waits before retrying
+max_model_calls = 16        # isolated extraction calls per task, captured at creation
+max_feature_records = 4096  # records one adapter namespace may hold per owner
+extraction_model = ""       # empty: the brain's model
+extraction_timeout_s = 90.0
+extraction_max_chars = 32000
+extraction_max_budget_usd = 0.25
 ```
+
+`runner` starts execution of read steps only; it is separate from `enabled`
+so a store can be inspected and steered without anything moving. The runner
+lives where the Brain lives: the hub in split mode, the one process otherwise.
+`task_aging_s` is the only way a task passes Vigil, and never an urgent nudge.
+`max_model_calls` is captured per task like the other allowances; a spent call
+is never refunded, an interrupted one included. `extraction_model` empty means
+`[brain].model`; the extraction budget and timeout bound one call, and the
+turn lease bounds concurrency to one.
 
 These fields also accept `CIEL_TASKS_*` environment overrides. `max_active`
 bounds non-terminal records and the bounded recent task view.
@@ -1446,7 +1514,7 @@ them. Attempt history retains every round and records clean checkpoints.
 A rejected claim reports an exhausted allowance; a later runner must persist
 its wait/failure policy explicitly. The size limit bounds each serialized
 request, next step, observation batch, and private view. Enabling controls does
-not start scheduling.
+not start scheduling; `runner` does.
 
 This is schema version two. Version-one stores and newer stores are refused
 without migration or reset. Choose a fresh dedicated directory for these
@@ -1769,7 +1837,9 @@ uv run scripts/probe_audio.py mic     # live capture -> /tmp/ciel_capture.wav
 uv run scripts/probe_voice.py speak   # TTS + playback only
 uv run scripts/probe_voice.py barge   # interrupt path
 uv run scripts/probe_voice.py echo    # mic -> STT -> TTS, no model in the loop
-uv run --no-sync python scripts/probe_tasks.py       # records, owner controls, questions, retries, evidence, crash recovery
+uv run --no-sync python scripts/probe_tasks.py       # records, owner controls, questions, retries, evidence, crash recovery, feature records, the v2→v3 lift
+uv run --no-sync python scripts/probe_task_runner.py # a synthetic adapter: one step, restart, fencing, giving up, human input wins, unsupported records
+uv run --no-sync python scripts/probe_extraction.py  # the isolated call: bounds, lease, timeout, cancellation, schema check, the client with nothing attached
 uv run --no-sync python scripts/probe_task_tools.py  # real SDK dispatcher, turn authority, cancellation, drain debt
 uv run --no-sync python scripts/probe_task_wire.py   # two private Chart sockets, controls, conflicts, reconnect
 uv run --no-sync python scripts/probe_task_wire.py --live  # synthetic task states in Chart; temporary storage
@@ -1855,9 +1925,11 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `music.py` | Spotify on the Mac, through one narrow AppleScript door |
 | `spotify.py` | Spotify Web API — browser login, search and Connect playback from the brain's host |
 | `projects.py` | Atlas — durable working state per project |
-| `tasks.py` | Private task records, atomic owner controls, questions, evidence, and recovery; no executor |
+| `tasks.py` | Private task records, atomic owner controls, questions, evidence, recovery, eligibility, abandonment, and namespaced feature records; the store dispatches nothing |
 | `task_context.py` | Turn authority captured by in-process tools and fenced through commit |
-| `task_controls.py` | Shared private owner controller, offline PR-watch validation, and control journaling |
+| `task_controls.py` | Shared private owner controller, offline PR-watch validation, namespace registration, and control journaling |
+| `task_runner.py` | The bounded runner: one read step for the oldest eligible task, the adapter contract, abandonment, and the human-input interrupt |
+| `brain/extract.py` | One isolated model call per extraction: a client with nothing attached, the turn lease, and the schema checked twice |
 | `transcript.py` | Trace — the record of the path actually taken |
 | `reload.py` | Analytic Continuation — watch the source, re-exec, resume |
 | `oura.py` | The Oura client — sleep, readiness, activity; read-only |

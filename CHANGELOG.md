@@ -2,6 +2,60 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-08 — A task gets another turn
+
+**Why.** The store remembered what the owner asked for and the controller let
+them steer it, but nothing ever moved a task forward: every saved
+responsibility sat in a resource wait by design. The
+[independent-action plan](design/2026-09-08-independent-action-plan.md)'s
+first milestone is the executor that plan deferred, built against a synthetic
+adapter so the mechanism is proven before any inbox touches it.
+
+**What.**
+
+- *One bounded step, at the bottom of the ladder.* `task_runner.py` takes the
+  oldest eligible task and gives it one step: prepare (pure), claim, dispatch,
+  observe, then complete, checkpoint, wait, or ask. The ladder in `schedule.py`
+  gains a TASK source after Vigil, from WAITING only; a task that has waited
+  past `task_aging_s` passes a nonurgent nudge and never an urgent one or a
+  human lane. Human input interrupts a step holding the model turn; a plain
+  read is left to finish. Mutation steps and unserved operations wait visibly.
+  Off by default: `[tasks].runner`.
+- *Giving up is recorded.* The store gains `eligible`, `abandon`, and
+  `note_model_call`: an abandoned attempt is spent, a read is requeued with
+  `retry_backoff_s`, a sent mutation waits for reconciliation, and an exhausted
+  allowance fails the task with the reason in its detail. A model-call
+  allowance is captured at creation like the others.
+- *A feature's records have a namespace, not a column.* Schema three adds
+  `feature_namespaces` and `feature_records`; adapters register a namespace
+  with a validator and a migration through the controller before the store
+  opens, and write-sets ride the checkpoint, wait, or completion they belong
+  to. Unknown and newer namespaces are preserved untouched and reported
+  unsupported. A version-two store is lifted in place; a newer one is refused.
+- *One model call has one bounded context.* `brain/extract.py` runs a fresh
+  SDK client per call with no tools, no MCP servers, no settings, one turn, a
+  private empty working directory, and the schema as its output format, checked
+  again in runtime code. It holds the Brain's new turn lease and never falls
+  back to the conversational client.
+
+**Probes.** `probe_tasks.py 166 → 200: eligibility in age order, the
+model-call allowance, abandonment in each of its three endings, validated
+write-sets and expected revisions, write-sets riding a checkpoint, adapter
+migration at open with a failed one rolled back, unknown and newer namespaces
+preserved, and the version-two lift. probe_task_runner.py 25 (new): one step
+observed and saved, restart resumes, a late result after cancellation writes
+nothing, mutation and unserved steps wait, exceptions and timeouts spend the
+attempt, the owner's voice cancels an extraction and frees the lease, a
+question and an external wait, a refused outcome abandoned, unsupported
+records, no fallback without a backend. probe_extraction.py 27 (new): bounds,
+the lease held and released on timeout and cancellation, the schema check's
+six refusals, and the client's options against a fake SDK. probe_ladder.py
+19 → 25: the task step's rank and its one exception. probe_hub_arbiter.py
+54 → 61: the snapshot's task fields, enacting a step, the interrupt on a human
+pick. Rerun unchanged: probe_turns.py 78, probe_task_tools.py 24,
+probe_task_wire.py 20, probe_hub_imports.py 6; hub import clean; the spoke
+reloaded to ready.`
+
 ## 2026-09-08 — The plans say who may act and where
 
 **Why.** The independent-action and inbox plans left child origins, setup,

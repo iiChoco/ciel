@@ -2094,10 +2094,46 @@ class WorldConfig:
 
 @dataclass(frozen=True, slots=True)
 class TasksConfig:
-    """Private owner task controls and durable records; no executor."""
+    """Private owner task controls, durable records, and the bounded runner."""
 
     enabled: bool = False
     """Open task storage and enable private owner controls; never starts execution."""
+
+    runner: bool = False
+    """Give eligible tasks a turn at the bottom of the ladder. Read steps
+    only; a mutation step waits for the dispatch phase that does not exist
+    yet. The spoke never runs one: the hub owns execution in split mode."""
+
+    task_aging_s: float = 300.0
+    """How long an eligible task may wait behind Vigil before it moves ahead
+    of a nonurgent nudge. Urgent nudges and every human lane stay ahead."""
+
+    step_timeout_s: float = 60.0
+    """The longest one adapter read may take before the attempt is abandoned
+    and the task requeued with backoff."""
+
+    retry_backoff_s: float = 30.0
+    """How long an abandoned attempt waits before the task is eligible again."""
+
+    max_model_calls: int = 16
+    """Isolated extraction calls one task may make over its life; captured at
+    creation, never refilled."""
+
+    max_feature_records: int = 4096
+    """Records one adapter namespace may hold for one owner."""
+
+    extraction_model: str = ""
+    """The model the isolated extraction call uses; empty means the brain's."""
+
+    extraction_timeout_s: float = 90.0
+    """How long one extraction may hold the model turn before it is cancelled
+    and the attempt spent."""
+
+    extraction_max_chars: int = 32000
+    """The largest payload one extraction call may carry."""
+
+    extraction_max_budget_usd: float = 0.25
+    """The SDK's spend ceiling for one extraction call."""
 
     max_pending_controls: int = 32
     """Maximum in-flight Chart task requests; excess requests fail visibly."""

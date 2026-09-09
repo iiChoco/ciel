@@ -31,6 +31,12 @@ The order, and why (each entry outranks everything below it):
    from WAITING: whoever is in the room speaking or mid-follow-up
    outranks the phone, and a text tolerates the seconds that costs.
 5. **Vigil** — the machine's own initiative queues behind every human.
+6. **A task step** — a responsibility the owner handed over earlier gets
+   one bounded turn, from WAITING only, after everyone. One exception
+   keeps it from starving: a task that has waited past its aging bound
+   moves ahead of a *nonurgent* Vigil nudge. An urgent one — the kind
+   the policy would message the owner about — stays ahead of it, as
+   does every human lane, always.
 
 Nothing here *consumes* anything: a claimed source is popped by the
 dispatch code, so an un-enacted pick (a busy maintenance slot, a hold
@@ -63,6 +69,7 @@ class Source(Enum):
     WEB = auto()
     REMOTE = auto()
     VIGIL = auto()
+    TASK = auto()
     NONE = auto()
 
 
@@ -87,6 +94,14 @@ class Snapshot:
     web_pending: bool = False
     remote_pending: bool = False
     vigil_ready: bool = False
+    vigil_urgent: bool = False
+    """The nudge at the head of the queue is one the policy would message
+    the owner about; aging never lets a task ahead of it."""
+    task_ready: bool = False
+    """An eligible task exists and no step is running."""
+    task_aged: bool = False
+    """That task has waited past the aging bound, already compared by the
+    caller — the snapshot holds no clock."""
 
 
 def pick_next(s: Snapshot) -> Source:
@@ -115,7 +130,13 @@ def pick_next(s: Snapshot) -> Source:
         return Source.WEB
     if s.remote_pending and s.state is State.WAITING:
         return Source.REMOTE
-    if s.vigil_ready and s.state is State.WAITING:
+    if s.state is not State.WAITING:
+        return Source.NONE
+    if s.vigil_ready and not (s.task_ready and s.task_aged and not s.vigil_urgent):
+        return Source.VIGIL
+    if s.task_ready:
+        return Source.TASK
+    if s.vigil_ready:
         return Source.VIGIL
     return Source.NONE
 

@@ -89,6 +89,8 @@ from ciel.transcript import Transcript
 from ciel.turn import TurnRequest, TurnSink, lane_spec, prompt_note, owner_origin
 from ciel.tasks import Origin
 from ciel.task_controls import TaskController
+from ciel.task_runner import TaskRunner
+from ciel.brain.extract import AgentSdkExtractor
 from ciel.brain.tools.tasks import bind_tasks
 from ciel.ui.indicator import Indicator, TeeIndicator, build_indicator
 
@@ -106,6 +108,12 @@ if TYPE_CHECKING:
     from ciel.tts.base import TextToSpeech
 
 log = logging.getLogger(__name__)
+
+_HUMAN_SOURCES = frozenset((
+    Source.CONFIRM, Source.TIMERS, Source.VOICE, Source.TYPED, Source.WEB, Source.REMOTE,
+))
+"""The picks that interrupt a task step holding the model turn: every
+human lane, the confirmation gate, and the clocks. Vigil is not among them."""
 
 _SLEEP_GAP_S = 30.0
 """A wall-clock jump between frames larger than this means the machine slept
@@ -969,7 +977,22 @@ class Pipeline:
             and (config.shell.enabled or config.files.enabled),
             mac_snapshot=self._remote.mac.snapshot_file if self._remote is not None else None,
         )
-        self._task_controller = TaskController(config.tasks, self._journal)
+        # The runner exists only where execution belongs — the hub in split
+        # mode, the one process otherwise; the spoke is a different program
+        # and never builds a Pipeline. Its adapters' namespaces are registered
+        # with the store before it opens, through the controller.
+        self._task_runner: TaskRunner | None = None
+        if config.tasks.enabled and config.tasks.runner:
+            self._task_runner = TaskRunner(
+                config.tasks,
+                lambda: self._task_controller.store,
+                lease=self._brain.lease,
+                backend=AgentSdkExtractor(config.tasks.extraction_model or config.brain.model),
+            )
+        self._task_controller = TaskController(
+            config.tasks, self._journal,
+            namespaces=self._task_runner.namespaces if self._task_runner is not None else (),
+        )
         bind_tasks(self._task_controller, self._brain._task_authority.capture)
         if self._web_link is not None:
             self._web_link.bind_tasks(self._task_controller)
@@ -1227,6 +1250,21 @@ class Pipeline:
             vigil_ready=self._events is not None
             and self._events.pending
             and time.monotonic() >= self._next_policy_check,
+            vigil_urgent=self._vigil_urgent(),
+            task_ready=self._task_runner is not None and self._task_runner.ready,
+            task_aged=self._task_runner is not None
+            and self._task_runner.aged(time.time(), self._config.tasks.task_aging_s),
+        )
+
+    def _vigil_urgent(self) -> bool:
+        """Whether the nudge at the head of the queue is one the policy would
+        message the owner about — the line an aged task never crosses."""
+        if self._events is None or not self._events.pending:
+            return False
+        event = self._events.peek_next(time.time())
+        return (
+            event is not None
+            and event.importance >= self._config.proactive.min_importance_to_message
         )
 
     async def run(self) -> None:
@@ -1323,6 +1361,8 @@ class Pipeline:
                     if now_wall >= self._next_world_push:
                         self._next_world_push = now_wall + 1.0
                         self._world_tick()
+                    if self._task_runner is not None:
+                        self._task_runner.refresh(now_wall)
 
                     # The turn-slot arbitration: one frozen snapshot, one
                     # pure pick (the ladder lives in ciel.schedule — the
@@ -1427,6 +1467,17 @@ class Pipeline:
         this round — the caller skips its state machine — False for NONE.
         ``frame`` is the mic frame a pending confirmation is fed; the hub
         has none, its confirmations listen through the spoke."""
+
+        if self._task_runner is not None:
+            if source is Source.TASK:
+                # The bottom of the ladder: one bounded step, in the
+                # background, and the slot is free again at once.
+                return self._task_runner.start_step(time.time())
+            if source in _HUMAN_SOURCES:
+                # Human input wins: a step holding the model turn yields
+                # it. Vigil is not human input; it waits behind the lease
+                # exactly as it waits behind reflection.
+                self._task_runner.interrupt()
 
         # Enacted above the state dispatch, not inside BUSY: a
         # turn abandoned by barge-in leaves BUSY while its hook
@@ -1792,6 +1843,8 @@ class Pipeline:
                 if now_wall >= self._next_world_push:
                     self._next_world_push = now_wall + 1.0
                     self._world_tick()
+                if self._task_runner is not None:
+                    self._task_runner.refresh(now_wall)
 
                 source = pick_next(self._loop_snapshot())
                 if await self._enact(source, None):
@@ -3771,6 +3824,8 @@ class Pipeline:
             self._agenda_task.cancel()
             closers.append(asyncio.gather(self._agenda_task, return_exceptions=True))
         await asyncio.gather(*closers, return_exceptions=True)
+        if self._task_runner is not None:
+            await self._task_runner.close()
         await self._task_controller.close()
         bind_tasks(None, lambda: None)
         if self._world is not None:

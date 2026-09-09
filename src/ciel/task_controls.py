@@ -24,15 +24,18 @@ from typing import Any
 from ciel.config import TasksConfig
 from ciel.journal import ActionJournal
 from ciel.task_context import TaskBinding
-from ciel.tasks import Criterion, Scope, Specification, Step, Task, TaskConflict, TaskStore, TaskStoreError
+from ciel.tasks import Criterion, Namespace, Scope, Specification, Step, Task, TaskConflict, TaskStore, TaskStoreError
 
 log = logging.getLogger(__name__)
 
 
 class TaskController:
-    def __init__(self, config: TasksConfig, journal: ActionJournal | None = None) -> None:
+    def __init__(self, config: TasksConfig, journal: ActionJournal | None = None,
+                 namespaces: tuple[Namespace, ...] = ()) -> None:
         self.config = config
         self.journal = journal
+        self.namespaces = namespaces
+        """The adapters' record namespaces, registered before the store opens."""
         self.store: TaskStore | None = None
         self.unavailable = 'Tasks are disabled.' if not config.enabled else 'Task storage is starting.'
 
@@ -46,6 +49,8 @@ class TaskController:
             if type(self.config.max_pending_controls) is not int or self.config.max_pending_controls < 1:
                 raise ValueError('pending task controls must have a positive bound')
             store = TaskStore(self.config)
+            for namespace in self.namespaces:
+                store.register(namespace)
             await store.start()
         except asyncio.CancelledError:
             if store is not None:

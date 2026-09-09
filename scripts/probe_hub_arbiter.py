@@ -192,6 +192,7 @@ def make_hub(script, *, speak_timeout=2.0):
     p._followup_until = None
     p._work_watcher = None
     p._schedule = None
+    p._task_runner = None
     return p, server
 
 
@@ -455,6 +456,67 @@ async def probe_spoke_leaves() -> None:
     )
 
 
+class FakeRunner:
+    """What the ladder reads and enacts, and nothing of what a step does."""
+
+    def __init__(self, ready=True, aged=False):
+        self._ready, self._aged = ready, aged
+        self.started = 0
+        self.interrupted = 0
+        self.refreshed: list[float] = []
+
+    @property
+    def ready(self):
+        return self._ready
+
+    def aged(self, now, aging_s):
+        return self._aged
+
+    def refresh(self, now):
+        self.refreshed.append(now)
+
+    def start_step(self, now):
+        if not self._ready:
+            return False
+        self.started += 1
+        self._ready = False
+        return True
+
+    def interrupt(self):
+        self.interrupted += 1
+
+
+async def probe_task_slot() -> None:
+    print("\nthe task slot")
+    p, server = make_hub(STREAM)
+    p._task_runner = FakeRunner()
+    p._next_policy_check = 0.0
+    snap = p._loop_snapshot()
+    check("an eligible task shows in the snapshot and is picked from an idle hub",
+          snap.task_ready and not snap.task_aged and not snap.vigil_urgent and pick_next(snap) is Source.TASK)
+    claimed = await p._enact(Source.TASK, None)
+    check("enacting TASK starts one step and leaves the room free",
+          claimed and p._task_runner.started == 1 and p._state is State.WAITING and not p._loop_snapshot().task_ready)
+    check("a second pick while the step runs claims nothing", not await p._enact(Source.TASK, None))
+    p._task_runner = FakeRunner()
+    p._typed.append((0.0, "typed line"))
+    check("the keyboard outranks a ready task", pick_next(p._loop_snapshot()) is Source.TYPED)
+    p._typed.clear()
+    q = seat_spoke(server)
+    server._on_frame(json.dumps({"type": "say", "text": "hi"}), "spoke")
+    await p._enact(Source.VOICE, None)
+    check("a human pick tells the runner to yield the model turn", p._task_runner.interrupted == 1)
+    r = asyncio.create_task(responder(server, q))
+    await p._turn
+    r.cancel()
+    p._task_runner = FakeRunner()
+    await p._enact(Source.NONE, None)
+    check("an empty round interrupts nothing", p._task_runner.interrupted == 0)
+    p._task_runner = None
+    check("no runner: the snapshot says no task and TASK is never picked",
+          not p._loop_snapshot().task_ready and pick_next(p._loop_snapshot()) is Source.NONE)
+
+
 async def probe_confirm_sink() -> None:
     print("\nconfirm requests through the sink")
     p, server = make_hub(STREAM)
@@ -618,6 +680,7 @@ async def main() -> None:
     await probe_voice_turn()
     await probe_barge_in()
     await probe_spoke_leaves()
+    await probe_task_slot()
     await probe_confirm_sink()
     await probe_deliveries()
     await probe_loop()

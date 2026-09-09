@@ -142,6 +142,36 @@ def main() -> int:
                            confirm_active=True)) is Source.CONFIRM,
     )
 
+    print("\nthe task step (last, with one exception)")
+    check(
+        "a task step goes after everyone, from WAITING only",
+        pick_next(Snapshot(state=W, task_ready=True)) is Source.TASK
+        and pick_next(Snapshot(state=L, task_ready=True)) is Source.NONE
+        and pick_next(Snapshot(state=B, task_ready=True)) is Source.NONE,
+    )
+    check(
+        "the machine's own nudge outranks a task that has not aged",
+        pick_next(Snapshot(state=W, vigil_ready=True, task_ready=True)) is Source.VIGIL,
+    )
+    check(
+        "an aged task moves ahead of a nonurgent nudge",
+        pick_next(Snapshot(state=W, vigil_ready=True, task_ready=True, task_aged=True)) is Source.TASK,
+    )
+    check(
+        "but never ahead of an urgent one",
+        pick_next(Snapshot(state=W, vigil_ready=True, vigil_urgent=True,
+                           task_ready=True, task_aged=True)) is Source.VIGIL,
+    )
+    check(
+        "and never ahead of a human lane, aged or not",
+        all(pick_next(Snapshot(state=W, task_ready=True, task_aged=True, **{lane: True})) is not Source.TASK
+            for lane in ("typed_pending", "web_pending", "remote_pending", "voice_pending", "timers_due")),
+    )
+    check(
+        "aging without a task pending picks nothing",
+        pick_next(Snapshot(state=W, task_aged=True)) is Source.NONE,
+    )
+
     print(f"\nall {len(CHECKS)} checks passed")
     return 0
 
