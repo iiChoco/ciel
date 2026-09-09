@@ -12,6 +12,13 @@ runtime-defined option; they never rewrite scope or refill allowances.
 **History survives the caller.** Applied controls journal on the store worker
 after commit, even if the caller disconnects. The optional best-effort journal
 cannot turn a committed transition into an apparent rollback.
+
+**Derived work comes through the registered adapter, never a door.** The
+runtime-only ``derive`` takes the adapter's own ``Namespace`` object, so the
+origin it records names a namespace application code registered, not a
+string a model or a socket supplied. Mandate and grant controls share the
+owner admission of every other control; a grant is never activated here,
+because activation is the broker's yes and that surface is still to come.
 """
 from __future__ import annotations
 
@@ -24,7 +31,8 @@ from typing import Any
 from ciel.config import TasksConfig
 from ciel.journal import ActionJournal
 from ciel.task_context import TaskBinding
-from ciel.tasks import Criterion, Namespace, Scope, Specification, Step, Task, TaskConflict, TaskStore, TaskStoreError
+from ciel.tasks import (Criterion, Mandate, Namespace, Scope, Specification, StandingGrant, Step, Task, TaskConflict, TaskStore,
+                        TaskStoreError)
 
 log = logging.getLogger(__name__)
 
@@ -84,13 +92,25 @@ class TaskController:
         assert binding is not None
         return await store.owner_view(binding.origin.owner, task_id, fence=binding.fence)
 
-    def _record(self, operation: str, task: Task) -> None:
+    def _record(self, operation: str, task: Task | Mandate | StandingGrant, note: str = 'Explicit private owner control; no execution dispatched.') -> None:
         if self.journal is not None:
             try:
                 self.journal.record(tool=f'task_{operation}', args={'task_id': task.id, 'revision': task.revision},
-                                    response=task.status, note='Explicit private owner control; no execution dispatched.')
+                                    response=task.status, note=note)
             except Exception:
                 log.warning('could not journal a committed task control', exc_info=True)
+
+    async def derive(self, namespace: Namespace, mandate_id: str, expected_revision: int | None, event_key: str, source_revision: str,
+                     specification: Specification, step: Step, *, now: float | None = None) -> Task:
+        """Runtime-only: a registered adapter's event becomes a child of a standing mandate."""
+        if namespace not in self.namespaces:
+            raise TaskConflict('only a registered adapter derives work')
+        if self.store is None:
+            raise TaskStoreError(self.unavailable)
+        task = await self.store.derive_task(self.config.owner, mandate_id, expected_revision, namespace.name, event_key, source_revision,
+                                            specification, step, now=now)
+        self._record('derive', task, note='Derived under a standing mandate; no execution dispatched.')
+        return task
 
     async def apply(self, binding: TaskBinding | None, operation: str, args: dict[str, Any], *, revision: int | None = None) -> dict[str, Any]:
         store = self._store(binding)
@@ -111,6 +131,20 @@ class TaskController:
                                  tuple(Criterion(c, target, 'success') for c in checks))
             task = await store.create(binding.origin, spec, Step('read', 'github.pr_checks', target),
                                       resource_wait=True, fence=binding.fence, record=lambda t: self._record(operation, t))
+        elif operation in ('mandate_pause', 'mandate_resume', 'mandate_revoke'):
+            mandate_id = args.get('mandate_id')
+            if not isinstance(mandate_id, str) or not mandate_id:
+                raise ValueError('A mandate ID is required.')
+            mandate = await store.mandate_control(binding.origin.owner, mandate_id, operation.removeprefix('mandate_'), revision=revision,
+                                                  fence=binding.fence, record=lambda m: self._record(operation, m))
+            return {'mandate': asdict(mandate)}
+        elif operation == 'grant_revoke':
+            grant_id = args.get('grant_id')
+            if not isinstance(grant_id, str) or not grant_id:
+                raise ValueError('A grant ID is required.')
+            grant = await store.revoke_grant(binding.origin.owner, grant_id, revision=revision,
+                                             fence=binding.fence, record=lambda g: self._record(operation, g))
+            return {'grant': asdict(grant)}
         else:
             task_id = args.get('task_id')
             if not isinstance(task_id, str) or not task_id:

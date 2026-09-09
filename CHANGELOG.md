@@ -2,6 +2,63 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — Permission has a precise scope
+
+**Why.** The runner could give a task a turn, but every task still began in
+a human turn, and nothing could hold a standing responsibility or say where
+derived work came from. The [independent-action plan](design/2026-09-08-independent-action-plan.md)'s
+second milestone lands as two changes, records first; this is the first. It
+makes derived work possible and bounded without yet giving anything the
+surface to ask for it: the Chart grant form and the broker's approval come
+next, and until an adapter derives under a grant, nothing does.
+
+**What.**
+
+- *An origin says what it is.* `HumanOrigin` is the live private owner turn
+  every task has had, and `Origin` still names it; `DerivedOrigin` names a
+  mandate, grant, adapter, event, and source revision and nothing that claims
+  attendance or a human lane. Schema four rewrites every stored origin as a
+  human one, byte for byte as a fresh create would, so a repeated request
+  still finds its task; version two lifts through three. `create` accepts
+  only a human origin, and can now carry an approval reference and the
+  write-set that must land with it, which is how an approved proposal becomes
+  exactly one task.
+- *A grant is the owner's yes, digest and all.* A draft in `grant_drafts` is
+  what the owner looks at, never executable; editing it moves its revision
+  and digest together. Activation takes an attended private owner turn, the
+  exact draft revision and digest, a registered namespace, and limits within
+  the new config caps, and commits the `StandingGrant` and the `Mandate`
+  under it in one transaction. Revoking a grant ends its mandates at once; an
+  expired grant is marked so on the record the moment it is asked to derive.
+- *Derived work inherits, it never invents.* The runtime-only `derive_task`
+  admits a child only under an active mandate and an active, unexpired grant
+  at the revision it was activated with, only inside the grant's operations
+  and targets, and only within lifetime and window allowances counted from
+  the persisted window start. The same event at the same source revision
+  returns the child it already made and spends nothing; a newer revision
+  revises an unfinished child in place while no dispatch intent exists and
+  the scope stands, voids its open question, and keeps the older revision as
+  a replay alias; a sent mutation freezes the child; a finished child is
+  never reopened; a change of scope is refused so the adapter proposes.
+- *Controls share the owner's door.* The controller derives only through a
+  `Namespace` it registered and journals it; mandate pause, resume, and
+  revoke and grant revoke go through the same admission as every other
+  control, from the same Chart frames. The owner view lists mandates and
+  grants beside tasks.
+
+**Probes.** `probe_task_authority.py 71 (new): drafts edited and never
+executable, activation's refusals and its one transaction, every refusal of
+derive_task, the child's origin, replay, in-place revision and its alias, the
+voided question, the frozen child, the finished child's successor, window and
+lifetime allowances across a reopen and a lowered cap, pause and resume,
+revocation, expiry on the record, the approval path and its stale revision,
+the controller's registered-namespace rule and journal, and the version-three
+lift. probe_tasks.py 200 → 202: the version-two store lifted through three to
+four with its origin saying it was human and its request still found; a
+lifted store lists no mandates or grants. Rerun unchanged: probe_task_runner.py
+25, probe_task_wire.py 20, probe_task_tools.py 24, probe_hub_imports.py 6,
+probe_turns.py 78; hub import clean; the spoke reloaded to ready.`
+
 ## 2026-09-08 — A task gets another turn
 
 **Why.** The store remembered what the owner asked for and the controller let

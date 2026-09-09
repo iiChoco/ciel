@@ -2122,6 +2122,17 @@ class TasksConfig:
     max_feature_records: int = 4096
     """Records one adapter namespace may hold for one owner."""
 
+    max_grant_children: int = 256
+    """The most finite tasks one standing mandate may derive over its life.
+    A grant asks for its own number at approval; the smaller governs, and
+    raising this later never widens a grant already approved."""
+
+    max_grant_per_window: int = 32
+    """Derivations one mandate may make per window, capped the same way."""
+
+    max_grant_lifetime_s: float = 30 * 86400.0
+    """The longest a standing grant may run from approval to expiry."""
+
     extraction_model: str = ""
     """The model the isolated extraction call uses; empty means the brain's."""
 

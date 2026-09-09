@@ -46,6 +46,22 @@ forgotten: a read is requeued with backoff, a sent mutation waits for
 reconciliation, and an exhausted allowance fails the task visibly. Model calls
 have their own allowance, captured at creation like the others.
 
+**A mandate can stand.** A standing grant is the owner's approval of one exact
+scope, digest and all, through Proof Obligation; the mandate under it is the
+responsibility that derives finite tasks from an adapter's events until the
+owner pauses or revokes it, its grant expires, or its allowances run out.
+Config caps what a grant may hold and can never mint one; a draft is never
+executable; completing a child completes nothing above it.
+
+**Derived work inherits, it never invents.** A child's origin names its
+mandate, grant, adapter, event, and source revision, and nothing that claims
+attendance or a human lane. The store admits it only inside the grant's scope,
+deduplicates it on its event and source revision so a replay spends nothing,
+revises it in place only while no dispatch intent exists and the scope
+stands, and never reopens a finished one. A change the grant does not cover
+is the adapter's inert proposal, and only the owner's approval of that exact
+proposal, through the ordinary create path, becomes a task.
+
 Async cancellation does not roll back a worker transaction already submitted.
 Callers must reread state; originating request IDs deduplicate creation, and
 expected revisions make every later stale retry fail explicitly.
@@ -54,6 +70,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import logging
 import math
@@ -78,7 +95,39 @@ Phase = Literal['prepared', 'dispatched', 'observed', 'checkpointed', 'verified'
 WaitReason = Literal['owner', 'external', 'resource', 'reconciliation']
 _TERMINAL = frozenset(('done', 'failed', 'cancelled'))
 _NOTICE = frozenset(('waiting', 'paused', 'done', 'failed', 'cancelled'))
-_SCHEMA = 3
+_SCHEMA = 4
+_POLICY = 1
+"""What a grant's scope and limits mean; a grant records the version it was approved under."""
+GrantStatus = Literal['active', 'revoked', 'expired']
+MandateStatus = Literal['active', 'paused', 'revoked', 'expired']
+DraftStatus = Literal['draft', 'activated', 'discarded']
+_AUTHORITY_TABLES = '''
+            CREATE TABLE grant_drafts (
+                id TEXT PRIMARY KEY, owner TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0),
+                host TEXT NOT NULL, scope_json TEXT NOT NULL, bindings_json TEXT NOT NULL, digest TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('draft','activated','discarded')),
+                created_at REAL NOT NULL, updated_at REAL NOT NULL
+            );
+            CREATE TABLE grants (
+                id TEXT PRIMARY KEY, owner TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0),
+                status TEXT NOT NULL CHECK(status IN ('active','revoked','expired')),
+                scope_json TEXT NOT NULL, digest TEXT NOT NULL, approval_ref TEXT NOT NULL,
+                policy_version INTEGER NOT NULL, limits_json TEXT NOT NULL,
+                approved_at REAL NOT NULL, expires_at REAL NOT NULL, revoked_at REAL, updated_at REAL NOT NULL
+            );
+            CREATE TABLE mandates (
+                id TEXT PRIMARY KEY, owner TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0),
+                status TEXT NOT NULL CHECK(status IN ('active','paused','revoked','expired')),
+                outcome TEXT NOT NULL, namespace TEXT NOT NULL, grant_id TEXT NOT NULL REFERENCES grants(id),
+                grant_revision INTEGER NOT NULL, children INTEGER NOT NULL, window_start REAL NOT NULL,
+                window_count INTEGER NOT NULL, detail TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL
+            );
+            CREATE TABLE derivations (
+                owner TEXT NOT NULL, mandate_id TEXT NOT NULL REFERENCES mandates(id), namespace TEXT NOT NULL,
+                event_key TEXT NOT NULL, source_revision TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id),
+                created_at REAL NOT NULL, PRIMARY KEY(owner,mandate_id,namespace,event_key,source_revision)
+            );
+'''
 _FEATURE_TABLES = '''
             CREATE TABLE feature_namespaces (
                 owner TEXT NOT NULL, namespace TEXT NOT NULL,
@@ -115,7 +164,7 @@ class TaskLimit(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class Origin:
+class HumanOrigin:
     """A live private owner turn; attendance is not physical room presence."""
 
     owner: str
@@ -124,6 +173,39 @@ class Origin:
     attended: bool = True
     private: bool = True
     ingress_ids: tuple[str, ...] = ()
+    approval_ref: str | None = None
+    """The broker's record of the exact proposal this turn approved, when the
+    task is the answer to one; None for a request made in the owner's words."""
+    kind: Literal['human'] = 'human'
+
+
+Origin = HumanOrigin
+"""The name every turn, binding, and tool has used since before there was
+another kind; a human origin is still the only one a turn can mint."""
+
+
+@dataclass(frozen=True, slots=True)
+class DerivedOrigin:
+    """Work the runtime derived under a standing mandate. It names what it
+    inherits from and nothing that claims attendance or a human lane."""
+
+    owner: str
+    request_id: str
+    parent_mandate_id: str
+    parent_revision: int
+    grant_id: str
+    grant_revision: int
+    adapter_namespace: str
+    event_key: str
+    """The adapter's stable identity for the event and the operation it needs."""
+    source_revision: str
+    derived_at: float
+    trigger_key: str
+    """The event key at one source revision: the identity a replay lands on."""
+    kind: Literal['derived'] = 'derived'
+
+
+TaskOrigin = HumanOrigin | DerivedOrigin
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +251,7 @@ class Evidence:
 @dataclass(frozen=True, slots=True)
 class Task:
     id: str
-    origin: Origin
+    origin: TaskOrigin
     specification: Specification
     next_step: Step
     status: Status
@@ -260,6 +342,76 @@ class Notice:
     created_at: float
 
 
+@dataclass(frozen=True, slots=True)
+class GrantLimits:
+    """What a grant may spend; config caps each, and the smaller number governs."""
+
+    max_children: int
+    """Finite tasks the mandate may derive over its life."""
+    window_s: float
+    max_per_window: int
+    """Derivations per window; windows are counted from the persisted start, never a restart."""
+    lifetime_s: float
+    """From approval to expiry."""
+
+
+@dataclass(frozen=True, slots=True)
+class GrantDraft:
+    """What the owner is looking at in Chart; never executable."""
+
+    id: str
+    owner: str
+    revision: int
+    host: str
+    """The execution host the bindings were resolved on."""
+    scope: Scope
+    bindings: tuple[tuple[str, str], ...]
+    """Resolved account and target identities, as the adapter's setup names them."""
+    digest: str
+    status: DraftStatus
+    created_at: float
+    updated_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class StandingGrant:
+    id: str
+    owner: str
+    revision: int
+    status: GrantStatus
+    scope: Scope
+    digest: str
+    approval_ref: str
+    """The broker's record of the yes that made it."""
+    policy_version: int
+    limits: GrantLimits
+    approved_at: float
+    expires_at: float
+    revoked_at: float | None
+    updated_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class Mandate:
+    """A standing responsibility under one grant; it derives finite tasks and is never run itself."""
+
+    id: str
+    owner: str
+    revision: int
+    status: MandateStatus
+    outcome: str
+    namespace: str
+    """The one registered adapter whose events derive work here."""
+    grant_id: str
+    grant_revision: int
+    children: int
+    window_start: float
+    window_count: int
+    detail: str
+    created_at: float
+    updated_at: float
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
@@ -280,9 +432,28 @@ def _step(raw: dict[str, Any]) -> Step:
     return Step(raw['kind'], raw['operation'], raw['target'], tuple(tuple(pair) for pair in raw['arguments']))
 
 
+def _scope(raw: dict[str, Any]) -> Scope:
+    return Scope(tuple(raw['operations']), tuple(raw['targets']))
+
+
 def _spec(raw: dict[str, Any]) -> Specification:
-    scope = Scope(tuple(raw['scope']['operations']), tuple(raw['scope']['targets']))
-    return Specification(raw['outcome'], scope, tuple(Criterion(**item) for item in raw['criteria']), raw['project'])
+    return Specification(raw['outcome'], _scope(raw['scope']), tuple(Criterion(**item) for item in raw['criteria']), raw['project'])
+
+
+def _origin(raw: dict[str, Any]) -> TaskOrigin:
+    if raw.get('kind', 'human') == 'derived':
+        return DerivedOrigin(**raw)
+    fields = {'kind': 'human', 'approval_ref': None, **raw, 'ingress_ids': tuple(raw.get('ingress_ids', ()))}
+    return HumanOrigin(**fields)
+
+
+def _trigger(event_key: str, source_revision: str) -> str:
+    return _json((event_key, source_revision))
+
+
+def _digest(host: str, scope: Scope, bindings: tuple[tuple[str, str], ...]) -> str:
+    """What the owner approves: the normalized draft, byte for byte."""
+    return hashlib.sha256(_json({'host': host, 'scope': asdict(scope), 'bindings': bindings}).encode()).hexdigest()
 
 
 class TaskStore:
@@ -300,10 +471,11 @@ class TaskStore:
         self._namespaces: dict[str, Namespace] = {}
         self._unsupported: set[str] = set()
         if any(type(n) is not int or n < 1 for n in (config.max_active, config.max_attempts, config.max_polls, config.max_record_chars,
-                                                      config.max_model_calls, config.max_feature_records)):
+                                                      config.max_model_calls, config.max_feature_records,
+                                                      config.max_grant_children, config.max_grant_per_window)):
             raise ValueError('task limits must be positive integers')
-        if _clock(config.evidence_max_age_s) <= 0:
-            raise ValueError('evidence age must be positive')
+        if _clock(config.evidence_max_age_s) <= 0 or _clock(config.max_grant_lifetime_s) <= 0:
+            raise ValueError('evidence age and grant lifetime must be positive')
         _clock(config.busy_timeout_s)
 
     async def __aenter__(self) -> TaskStore:
@@ -386,7 +558,7 @@ class TaskStore:
             if not fresh:
                 version = self._db.execute('PRAGMA user_version').fetchone()[0]
                 app = self._db.execute('PRAGMA application_id').fetchone()[0]
-                if app != _APPLICATION or version not in (2, _SCHEMA):
+                if app != _APPLICATION or version not in (2, 3, _SCHEMA):
                     raise TaskStoreError('unsupported task schema; no migration or downgrade was attempted')
                 if self._db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise TaskStoreError('task database failed its integrity check')
@@ -394,6 +566,8 @@ class TaskStore:
             self._db.execute('PRAGMA synchronous=EXTRA')
             if not fresh and version == 2:
                 self._migrate_from_2()
+            if not fresh and version < _SCHEMA:
+                self._migrate_from_3()
             if not fresh:
                 self._validate_rows()
             if fresh:
@@ -459,6 +633,7 @@ class TaskStore:
                 PRIMARY KEY(client_generation,tool_use_id)
             );
             {_FEATURE_TABLES}
+            {_AUTHORITY_TABLES}
             PRAGMA application_id={_APPLICATION};
             PRAGMA user_version={_SCHEMA};
             COMMIT;
@@ -474,10 +649,27 @@ class TaskStore:
             ALTER TABLE tasks ADD COLUMN model_calls INTEGER NOT NULL DEFAULT 0;
             ALTER TABLE tasks ADD COLUMN max_model_calls INTEGER NOT NULL DEFAULT {int(self._config.max_model_calls)};
             {_FEATURE_TABLES}
-            PRAGMA user_version={_SCHEMA};
+            PRAGMA user_version=3;
             COMMIT;
         ''')
-        log.info('task store migrated from schema 2 to %d', _SCHEMA)
+        log.info('task store migrated from schema 2 to 3')
+
+    def _migrate_from_3(self) -> None:
+        """Version three knew one kind of origin and no authority. Every stored
+        origin was a human turn and now says so, written exactly as a fresh
+        create would write it, so a repeated request still finds its task."""
+        assert self._db is not None
+        self._db.execute('BEGIN IMMEDIATE')
+        for statement in _AUTHORITY_TABLES.split(';'):
+            if statement.strip():
+                self._db.execute(statement)
+        for row in self._db.execute('SELECT id,request_json FROM tasks').fetchall():
+            request = json.loads(row['request_json'])
+            request['origin'] = asdict(_origin(request['origin']))
+            self._db.execute('UPDATE tasks SET request_json=? WHERE id=?', (_json(request), row['id']))
+        self._db.execute(f'PRAGMA user_version={_SCHEMA}')
+        self._db.execute('COMMIT')
+        log.info('task store migrated from schema 3 to %d', _SCHEMA)
 
     def register(self, namespace: Namespace) -> None:
         """Application code announces an adapter's records before the store opens."""
@@ -605,15 +797,32 @@ class TaskStore:
             raise TaskLimit('task record exceeds its size allowance')
         return data
 
-    def _validate_request(self, origin: Origin, spec: Specification, step: Step) -> None:
+    def _validate_request(self, origin: TaskOrigin, spec: Specification, step: Step) -> None:
         _text(origin.owner, 'owner')
         _text(origin.request_id, 'request identity')
-        if not isinstance(origin.ingress_ids, tuple) or len(set(origin.ingress_ids)) != len(origin.ingress_ids):
-            raise ValueError('ingress identities must be a unique immutable tuple')
-        for identity in origin.ingress_ids:
-            _text(identity, 'ingress identity')
-        if origin.attended is not True or origin.private is not True or origin.lane not in ('voice','typed','web','discord'):
-            raise TaskConflict('only an attended private owner request may create task responsibility')
+        if isinstance(origin, HumanOrigin):
+            if origin.kind != 'human':
+                raise ValueError('a human origin says so')
+            if not isinstance(origin.ingress_ids, tuple) or len(set(origin.ingress_ids)) != len(origin.ingress_ids):
+                raise ValueError('ingress identities must be a unique immutable tuple')
+            for identity in origin.ingress_ids:
+                _text(identity, 'ingress identity')
+            if origin.attended is not True or origin.private is not True or origin.lane not in ('voice','typed','web','discord'):
+                raise TaskConflict('only an attended private owner request may create task responsibility')
+            if origin.approval_ref is not None:
+                _text(origin.approval_ref, 'approval reference')
+        elif isinstance(origin, DerivedOrigin):
+            if origin.kind != 'derived':
+                raise ValueError('a derived origin says so')
+            for value, name in ((origin.parent_mandate_id, 'mandate'), (origin.grant_id, 'grant'), (origin.adapter_namespace, 'namespace'),
+                                (origin.event_key, 'event key'), (origin.source_revision, 'source revision')):
+                _text(value, name)
+            if any(type(value) is not int or value < 1 for value in (origin.parent_revision, origin.grant_revision)):
+                raise ValueError('a derived origin names positive parent and grant revisions')
+            if origin.trigger_key != _trigger(origin.event_key, origin.source_revision) or _clock(origin.derived_at) != origin.derived_at:
+                raise ValueError('a derived origin carries its own trigger key and derivation time')
+        else:
+            raise TaskConflict('unknown origin kind')
         _text(spec.outcome, 'outcome')
         if not all(isinstance(value,tuple) for value in (spec.scope.operations,spec.scope.targets,spec.criteria)):
             raise ValueError('scope and criteria must be immutable tuples')
@@ -647,7 +856,7 @@ class TaskStore:
 
     def _task(self, row: sqlite3.Row) -> Task:
         request = json.loads(row['request_json'])
-        return Task(row['id'], Origin(**{**request['origin'], 'ingress_ids': tuple(request['origin'].get('ingress_ids', ()))}), _spec(json.loads(row['specification_json'])),
+        return Task(row['id'], _origin(request['origin']), _spec(json.loads(row['specification_json'])),
                     _step(json.loads(row['step_json'])), row['status'], row['revision'],
                     row['attempts'], row['max_attempts'], row['polls'], row['max_polls'], row['evidence_max_age'], row['current_attempt'],
                     row['wait_reason'], row['detail'], row['eligible_at'], row['created_at'], row['updated_at'],
@@ -676,6 +885,10 @@ class TaskStore:
             'ingress': 'owner ingress_id task_id',
             'questions': 'id task_id revision prompt choices_json step_json answer answered_revision',
             'bindings': 'attempt_id task_revision client_generation tool_use_id journal_ref',
+            'grant_drafts': 'id owner revision host scope_json bindings_json digest status created_at updated_at',
+            'grants': 'id owner revision status scope_json digest approval_ref policy_version limits_json approved_at expires_at revoked_at updated_at',
+            'mandates': 'id owner revision status outcome namespace grant_id grant_revision children window_start window_count detail created_at updated_at',
+            'derivations': 'owner mandate_id namespace event_key source_revision task_id created_at',
         }
         for table, expected in columns.items():
             actual = [row['name'] for row in self._db.execute(f'PRAGMA table_info({table})')]
@@ -729,8 +942,17 @@ class TaskStore:
         for row in self._db.execute('SELECT * FROM tasks'):
             task = self._task(row)
             ids = {r[0] for r in self._db.execute('SELECT ingress_id FROM ingress WHERE task_id=?', (task.id,))}
-            if ids != set(task.origin.ingress_ids):
+            if ids != set(getattr(task.origin, 'ingress_ids', ())):
                 raise TaskStoreError('request lost its ingress identities')
+            if isinstance(task.origin, DerivedOrigin):
+                origin = task.origin
+                mandate = self._db.execute('SELECT * FROM mandates WHERE id=? AND owner=?', (origin.parent_mandate_id, origin.owner)).fetchone()
+                if mandate is None or mandate['grant_id'] != origin.grant_id or mandate['namespace'] != origin.adapter_namespace:
+                    raise TaskStoreError('derived task lost its mandate')
+                alias = self._db.execute('SELECT task_id FROM derivations WHERE owner=? AND mandate_id=? AND namespace=? AND event_key=? AND source_revision=?',
+                                         (origin.owner, origin.parent_mandate_id, origin.adapter_namespace, origin.event_key, origin.source_revision)).fetchone()
+                if alias is None or alias['task_id'] != task.id:
+                    raise TaskStoreError('derived task lost its trigger')
         for row in self._db.execute('SELECT * FROM questions'):
             task_row = self._db.execute('SELECT * FROM tasks WHERE id=?', (row['task_id'],)).fetchone()
             task = self._task(task_row)
@@ -757,6 +979,38 @@ class TaskStore:
             _text(row['record_key'], 'record key')
             if not isinstance(json.loads(row['payload_json']), dict):
                 raise TaskStoreError('feature record payload is not an object')
+        for row in self._db.execute('SELECT * FROM grant_drafts'):
+            draft = self._draft_from(row)
+            if (draft.digest != _digest(draft.host, self._validate_scope(draft.scope), self._validate_bindings(draft.bindings))
+                    or any(_clock(value) != value for value in (draft.created_at, draft.updated_at))):
+                raise TaskStoreError('grant draft does not match its digest')
+        for row in self._db.execute('SELECT * FROM grants'):
+            grant = self._grant_from(row)
+            _text(grant.approval_ref, 'approval reference')
+            self._validate_scope(grant.scope)
+            limits = grant.limits
+            if (any(type(value) is not int or value < 1 for value in (limits.max_children, limits.max_per_window, grant.policy_version))
+                    or _clock(limits.window_s) <= 0 or _clock(limits.lifetime_s) <= 0
+                    or _clock(grant.expires_at) <= _clock(grant.approved_at) or (grant.status == 'revoked') != (grant.revoked_at is not None)):
+                raise TaskStoreError('grant has invalid limits or timestamps')
+        for row in self._db.execute('SELECT * FROM mandates'):
+            mandate = self._mandate_from(row)
+            _text(mandate.outcome, 'outcome')
+            _text(mandate.namespace, 'namespace')
+            grant_row = self._db.execute('SELECT * FROM grants WHERE id=? AND owner=?', (mandate.grant_id, mandate.owner)).fetchone()
+            if grant_row is None or not 0 < mandate.grant_revision <= grant_row['revision']:
+                raise TaskStoreError('mandate does not match its grant')
+            if (mandate.children < 0 or not 0 <= mandate.window_count <= mandate.children or _clock(mandate.window_start) != mandate.window_start
+                    or (grant_row['status'] != 'active' and mandate.status in ('active', 'paused'))):
+                raise TaskStoreError('mandate has inconsistent allowances or authority')
+        for row in self._db.execute('SELECT * FROM derivations'):
+            task_row = self._db.execute('SELECT * FROM tasks WHERE id=? AND owner=?', (row['task_id'], row['owner'])).fetchone()
+            if task_row is None:
+                raise TaskStoreError('derivation lost its task')
+            origin = self._task(task_row).origin
+            if (not isinstance(origin, DerivedOrigin) or origin.parent_mandate_id != row['mandate_id']
+                    or origin.adapter_namespace != row['namespace'] or origin.event_key != row['event_key']):
+                raise TaskStoreError('derivation does not match its task')
 
     def _event(self, task: Task, before: str | None) -> None:
         assert self._db is not None
@@ -791,9 +1045,18 @@ class TaskStore:
             raise TaskConflict('attempt is no longer current')
         return task
 
-    async def create(self, origin: Origin, specification: Specification, step: Step, *, now: float | None = None,
-                     resource_wait: bool = False, fence: Fence | None = None, record: Callable[[Task], None] | None = None) -> Task:
+    async def create(self, origin: HumanOrigin, specification: Specification, step: Step, *, now: float | None = None,
+                     resource_wait: bool = False, fence: Fence | None = None, record: Callable[[Task], None] | None = None,
+                     records: RecordSet | None = None) -> Task:
+        """A live owner turn saves a finite task. ``records`` is the write-set
+        that must land with it or not at all: an approved proposal marked so
+        with its expected revision, which is what keeps a stale or repeated
+        approval from making a second task."""
+        if not isinstance(origin, HumanOrigin):
+            raise TaskConflict('only a live owner turn creates a task; derived work has its own path')
         self._validate_request(origin, specification, step)
+        if records is not None:
+            self._namespace(records.namespace)
         data = self._bounded({'origin':asdict(origin), 'specification':asdict(specification), 'step':asdict(step)})
         stamp = _clock(now)
         applied = False
@@ -829,6 +1092,8 @@ class TaskStore:
             self._event(task,None)
             for identity in origin.ingress_ids:
                 self._db.execute('INSERT INTO ingress VALUES(?,?,?)', (origin.owner, identity, task.id))
+            if records is not None:
+                self._apply_records(origin.owner, records)
             if resource_wait:
                 task = self._advance(task, 'waiting', stamp, detail=RESOURCE_WAIT, wait_reason='resource')
             return task
@@ -1122,7 +1387,11 @@ class TaskStore:
             if task_id is None:
                 rows = self._db.execute('SELECT * FROM tasks WHERE owner=? ORDER BY updated_at DESC,id LIMIT ?',
                                         (owner, self._config.max_active)).fetchall()
-                result = {'tasks': [asdict(self._task(row)) for row in rows]}
+                result = {'tasks': [asdict(self._task(row)) for row in rows],
+                          'mandates': [asdict(self._mandate_from(row)) for row in self._db.execute(
+                              'SELECT * FROM mandates WHERE owner=? ORDER BY updated_at DESC,id LIMIT ?', (owner, self._config.max_active))],
+                          'grants': [asdict(self._grant_from(row)) for row in self._db.execute(
+                              'SELECT * FROM grants WHERE owner=? ORDER BY updated_at DESC,id LIMIT ?', (owner, self._config.max_active))]}
             else:
                 task = self._get(owner, task_id)
                 questions = [dict(r) for r in self._db.execute('SELECT * FROM questions WHERE task_id=? ORDER BY revision DESC LIMIT 1', (task_id,))]
@@ -1197,6 +1466,366 @@ class TaskStore:
         def read() -> tuple[Notice, ...]:
             assert self._db is not None
             return tuple(Notice(**dict(row)) for row in self._db.execute('SELECT o.* FROM outbox o JOIN tasks t ON o.task_id=t.id WHERE t.owner=? ORDER BY o.created_at,o.id',(owner,)))
+        return await self._run(lambda: self._transaction(read))
+
+    # ── authority: drafts, grants, mandates, derived work ────────────────────
+
+    def _draft_from(self, row: sqlite3.Row) -> GrantDraft:
+        return GrantDraft(row['id'], row['owner'], row['revision'], row['host'], _scope(json.loads(row['scope_json'])),
+                          tuple(tuple(pair) for pair in json.loads(row['bindings_json'])), row['digest'], row['status'],
+                          row['created_at'], row['updated_at'])
+
+    def _grant_from(self, row: sqlite3.Row) -> StandingGrant:
+        return StandingGrant(row['id'], row['owner'], row['revision'], row['status'], _scope(json.loads(row['scope_json'])), row['digest'],
+                             row['approval_ref'], row['policy_version'], GrantLimits(**json.loads(row['limits_json'])),
+                             row['approved_at'], row['expires_at'], row['revoked_at'], row['updated_at'])
+
+    def _mandate_from(self, row: sqlite3.Row) -> Mandate:
+        return Mandate(row['id'], row['owner'], row['revision'], row['status'], row['outcome'], row['namespace'], row['grant_id'],
+                       row['grant_revision'], row['children'], row['window_start'], row['window_count'], row['detail'],
+                       row['created_at'], row['updated_at'])
+
+    def _draft(self, owner: str, draft_id: str) -> GrantDraft:
+        assert self._db is not None
+        row = self._db.execute('SELECT * FROM grant_drafts WHERE id=? AND owner=?', (draft_id, owner)).fetchone()
+        if row is None:
+            raise TaskConflict('grant draft is not available to this owner')
+        return self._draft_from(row)
+
+    def _grant(self, owner: str, grant_id: str) -> StandingGrant:
+        assert self._db is not None
+        row = self._db.execute('SELECT * FROM grants WHERE id=? AND owner=?', (grant_id, owner)).fetchone()
+        if row is None:
+            raise TaskConflict('grant is not available to this owner')
+        return self._grant_from(row)
+
+    def _mandate(self, owner: str, mandate_id: str) -> Mandate:
+        assert self._db is not None
+        row = self._db.execute('SELECT * FROM mandates WHERE id=? AND owner=?', (mandate_id, owner)).fetchone()
+        if row is None:
+            raise TaskConflict('mandate is not available to this owner')
+        return self._mandate_from(row)
+
+    def _validate_scope(self, scope: Scope) -> Scope:
+        """The normalized form every digest is taken over: sorted, unique, nonempty."""
+        if not isinstance(scope.operations, tuple) or not isinstance(scope.targets, tuple) or not scope.operations or not scope.targets:
+            raise ValueError('a scope names its operations and targets')
+        for value in (*scope.operations, *scope.targets):
+            _text(value, 'scope entry')
+        return Scope(tuple(sorted(set(scope.operations))), tuple(sorted(set(scope.targets))))
+
+    def _validate_bindings(self, bindings: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
+        if not isinstance(bindings, tuple) or any(not isinstance(pair, tuple) or len(pair) != 2 for pair in bindings):
+            raise ValueError('bindings are immutable name/value pairs')
+        names = set()
+        for name, value in bindings:
+            _text(name, 'binding name')
+            if name in names or not isinstance(value, str):
+                raise ValueError('bindings have unique names and string values')
+            names.add(name)
+        return tuple(sorted(bindings))
+
+    def _validate_limits(self, limits: GrantLimits) -> GrantLimits:
+        """Config caps what a grant may hold; it can lower one later, never raise one."""
+        if any(type(value) is not int or value < 1 for value in (limits.max_children, limits.max_per_window)):
+            raise ValueError('grant counts are positive integers')
+        if _clock(limits.window_s) <= 0 or _clock(limits.lifetime_s) <= 0:
+            raise ValueError('grant windows and lifetimes are positive')
+        if (limits.max_children > self._config.max_grant_children or limits.max_per_window > self._config.max_grant_per_window
+                or limits.lifetime_s > self._config.max_grant_lifetime_s):
+            raise TaskLimit('grant limits exceed the configured caps')
+        return limits
+
+    async def save_grant_draft(self, owner: str, host: str, scope: Scope, bindings: tuple[tuple[str, str], ...] = (), *,
+                               draft_id: str | None = None, expected_revision: int | None = None,
+                               now: float | None = None, fence: Fence | None = None) -> GrantDraft:
+        """A draft is what the owner is looking at, never what anything may do.
+        Editing it moves its revision, which is what makes a pending approval stale."""
+        _text(owner, 'owner')
+        _text(host, 'execution host')
+        scope = self._validate_scope(scope)
+        bindings = self._validate_bindings(bindings)
+        digest = _digest(host, scope, bindings)
+        stamp = _clock(now)
+        def write() -> GrantDraft:
+            assert self._db is not None
+            if draft_id is None:
+                new_id = uuid.uuid4().hex
+                self._db.execute('INSERT INTO grant_drafts VALUES(?,?,?,?,?,?,?,?,?,?)',
+                                 (new_id, owner, 1, host, self._bounded(asdict(scope)), self._bounded(bindings), digest, 'draft', stamp, stamp))
+                return self._draft(owner, new_id)
+            draft = self._draft(owner, draft_id)
+            if draft.status != 'draft':
+                raise TaskConflict('the draft is no longer editable')
+            if expected_revision is not None and draft.revision != expected_revision:
+                raise TaskConflict('draft revision changed')
+            self._db.execute('UPDATE grant_drafts SET revision=revision+1,host=?,scope_json=?,bindings_json=?,digest=?,updated_at=? WHERE id=?',
+                             (host, self._bounded(asdict(scope)), self._bounded(bindings), digest, max(stamp, draft.updated_at), draft_id))
+            return self._draft(owner, draft_id)
+        return await self._run(lambda: self._transaction(write, fence))
+
+    async def discard_grant_draft(self, owner: str, draft_id: str, *, revision: int | None = None,
+                                  now: float | None = None, fence: Fence | None = None) -> GrantDraft:
+        stamp = _clock(now)
+        def write() -> GrantDraft:
+            assert self._db is not None
+            draft = self._draft(owner, draft_id)
+            if draft.status != 'draft' or (revision is not None and draft.revision != revision):
+                raise TaskConflict('the draft is not in that state')
+            self._db.execute("UPDATE grant_drafts SET status='discarded',revision=revision+1,updated_at=? WHERE id=?", (max(stamp, draft.updated_at), draft_id))
+            return self._draft(owner, draft_id)
+        return await self._run(lambda: self._transaction(write, fence))
+
+    async def activate_grant(self, origin: HumanOrigin, draft_id: str, revision: int, digest: str, approval_ref: str, *,
+                             outcome: str, namespace: str, limits: GrantLimits, now: float | None = None,
+                             fence: Fence | None = None, record: Callable[[Mandate], None] | None = None) -> tuple[StandingGrant, Mandate]:
+        """The broker's yes, bound to the exact draft revision and digest the owner
+        saw, becomes a grant and the standing mandate under it in one transaction.
+        The turn that carries the approval is admitted exactly as a create is."""
+        if not isinstance(origin, HumanOrigin) or origin.attended is not True or origin.private is not True:
+            raise TaskConflict('only an attended private owner turn may activate a grant')
+        _text(origin.owner, 'owner')
+        _text(approval_ref, 'approval reference')
+        _text(outcome, 'outcome')
+        _text(digest, 'digest')
+        if type(revision) is not int:
+            raise ValueError('a draft revision is an integer')
+        limits = self._validate_limits(limits)
+        spec = self._namespace(namespace)
+        stamp = _clock(now)
+        def write() -> tuple[StandingGrant, Mandate]:
+            assert self._db is not None
+            draft = self._draft(origin.owner, draft_id)
+            if draft.status != 'draft' or draft.revision != revision or draft.digest != digest:
+                raise TaskConflict('the approval does not match the current draft')
+            grant_id, mandate_id = uuid.uuid4().hex, uuid.uuid4().hex
+            self._db.execute('INSERT INTO grants VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                             (grant_id, origin.owner, 1, 'active', self._bounded(asdict(draft.scope)), draft.digest, approval_ref, _POLICY,
+                              self._bounded(asdict(limits)), stamp, stamp + limits.lifetime_s, None, stamp))
+            self._db.execute('INSERT INTO mandates VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                             (mandate_id, origin.owner, 1, 'active', outcome, spec.name, grant_id, 1, 0, stamp, 0, 'activated', stamp, stamp))
+            self._db.execute("UPDATE grant_drafts SET status='activated',revision=revision+1,updated_at=? WHERE id=?", (stamp, draft_id))
+            return self._grant(origin.owner, grant_id), self._mandate(origin.owner, mandate_id)
+        def execute() -> tuple[StandingGrant, Mandate]:
+            result = self._transaction(write, fence)
+            if record is not None:
+                record(result[1])
+            return result
+        return await self._run(execute)
+
+    def _mandate_control_now(self, owner: str, mandate_id: str, operation: str, revision: int | None, now: float) -> Mandate:
+        assert self._db is not None
+        mandate = self._mandate(owner, mandate_id)
+        if revision is not None and mandate.revision != revision:
+            raise TaskConflict('mandate revision changed')
+        if operation == 'pause':
+            if mandate.status != 'active':
+                raise TaskConflict('only an active mandate pauses')
+            status = 'paused'
+        elif operation == 'resume':
+            grant = self._grant(owner, mandate.grant_id)
+            if mandate.status != 'paused' or grant.status != 'active' or grant.expires_at <= now:
+                raise TaskConflict('the mandate cannot resume under its grant')
+            status = 'active'
+        elif operation == 'revoke':
+            if mandate.status in ('revoked', 'expired'):
+                raise TaskConflict('the mandate is already ended')
+            status = 'revoked'
+        else:
+            raise ValueError('unknown mandate control')
+        self._db.execute('UPDATE mandates SET status=?,revision=revision+1,detail=?,updated_at=? WHERE id=?',
+                         (status, operation, max(now, mandate.updated_at), mandate_id))
+        return self._mandate(owner, mandate_id)
+
+    async def mandate_control(self, owner: str, mandate_id: str, operation: str, *, revision: int | None = None,
+                              now: float | None = None, fence: Fence | None = None,
+                              record: Callable[[Mandate], None] | None = None) -> Mandate:
+        """Pause, resume, or revoke the responsibility; children already derived keep their own state."""
+        stamp = _clock(now)
+        def execute() -> Mandate:
+            result = self._transaction(lambda: self._mandate_control_now(owner, mandate_id, operation, revision, stamp), fence)
+            if record is not None:
+                record(result)
+            return result
+        return await self._run(execute)
+
+    async def revoke_grant(self, owner: str, grant_id: str, *, revision: int | None = None, now: float | None = None,
+                           fence: Fence | None = None, record: Callable[[StandingGrant], None] | None = None) -> StandingGrant:
+        """De-escalation never waits: the grant ends now, and every mandate under it with it."""
+        stamp = _clock(now)
+        def write() -> StandingGrant:
+            assert self._db is not None
+            grant = self._grant(owner, grant_id)
+            if grant.status == 'revoked' or (revision is not None and grant.revision != revision):
+                raise TaskConflict('the grant is not in that state')
+            self._db.execute("UPDATE grants SET status='revoked',revision=revision+1,revoked_at=?,updated_at=? WHERE id=?",
+                             (stamp, max(stamp, grant.updated_at), grant_id))
+            self._db.execute("UPDATE mandates SET status='revoked',revision=revision+1,detail='grant revoked',updated_at=? "
+                             "WHERE grant_id=? AND status NOT IN ('revoked','expired')", (stamp, grant_id))
+            return self._grant(owner, grant_id)
+        def execute() -> StandingGrant:
+            result = self._transaction(write, fence)
+            if record is not None:
+                record(result)
+            return result
+        return await self._run(execute)
+
+    def _sweep_expiry(self, owner: str, mandate_id: str, now: float) -> None:
+        """A grant past its lifetime is marked so on its own, before any derivation
+        is attempted, so the refusal that follows leaves the expiry on the record."""
+        assert self._db is not None
+        row = self._db.execute('SELECT grant_id FROM mandates WHERE id=? AND owner=?', (mandate_id, owner)).fetchone()
+        if row is None:
+            return
+        grant = self._grant(owner, row['grant_id'])
+        if grant.status == 'active' and grant.expires_at <= now:
+            self._db.execute("UPDATE grants SET status='expired',revision=revision+1,updated_at=? WHERE id=?", (now, grant.id))
+            self._db.execute("UPDATE mandates SET status='expired',revision=revision+1,detail='grant expired',updated_at=? "
+                             "WHERE grant_id=? AND status NOT IN ('revoked','expired')", (now, grant.id))
+
+    def _spend_derivation(self, mandate: Mandate, grant: StandingGrant, now: float) -> None:
+        """The parent's allowances: a lifetime count, and a windowed one whose
+        boundaries are fixed by the persisted window start, never by a restart.
+        Effective limits are the grant's, capped by config."""
+        assert self._db is not None
+        limits = grant.limits
+        max_children = min(limits.max_children, self._config.max_grant_children)
+        max_per_window = min(limits.max_per_window, self._config.max_grant_per_window)
+        if mandate.children >= max_children:
+            raise TaskLimit('mandate child allowance exhausted')
+        window_start, window_count = mandate.window_start, mandate.window_count
+        if now >= window_start + limits.window_s:
+            window_start += math.floor((now - window_start) / limits.window_s) * limits.window_s
+            window_count = 0
+        if window_count >= max_per_window:
+            raise TaskLimit('mandate window allowance exhausted')
+        self._db.execute('UPDATE mandates SET children=children+1,window_start=?,window_count=?,updated_at=? WHERE id=?',
+                         (window_start, window_count + 1, max(now, mandate.updated_at), mandate.id))
+
+    def _frozen(self, child: Task) -> bool:
+        """Dispatch intent exists once a mutation attempt has been sent, whatever
+        became of it; a child with intent is reconciled, never rewritten."""
+        assert self._db is not None
+        for row in self._db.execute('SELECT step_json,phase FROM attempts WHERE task_id=?', (child.id,)).fetchall():
+            if _step(json.loads(row['step_json'])).kind == 'mutation' and row['phase'] not in ('prepared', 'interrupted'):
+                return True
+        return False
+
+    def _revise(self, child: Task, origin: DerivedOrigin, specification: Specification, step: Step, now: float) -> Task:
+        assert self._db is not None
+        assert isinstance(child.origin, DerivedOrigin)
+        if child.status in ('running', 'verifying') or child.current_attempt is not None:
+            raise TaskConflict('the child is mid-step; revise it after the step settles')
+        if self._frozen(child):
+            raise TaskConflict('the child has dispatch intent; reconcile it before proposing a change')
+        if child.specification.scope != specification.scope:
+            raise TaskConflict('a change of scope is a proposal, never a revision')
+        origin = replace(origin, request_id=child.origin.request_id)
+        self._validate_request(origin, specification, step)
+        data = self._bounded({'origin': asdict(origin), 'specification': asdict(specification), 'step': asdict(step)})
+        self._db.execute('UPDATE tasks SET request_json=?,specification_json=? WHERE id=?',
+                         (data, self._bounded(asdict(specification)), child.id))
+        self._db.execute('DELETE FROM questions WHERE task_id=? AND answer IS NULL', (child.id,))
+        detail = f'revised from source revision {child.origin.source_revision} to {origin.source_revision}'
+        task = self._advance(child, 'paused' if child.status == 'paused' else 'queued', now, detail=detail, eligible_at=now, step=step)
+        self._db.execute('INSERT INTO derivations VALUES(?,?,?,?,?,?,?)',
+                         (origin.owner, origin.parent_mandate_id, origin.adapter_namespace, origin.event_key, origin.source_revision, task.id, now))
+        return task
+
+    async def derive_task(self, owner: str, mandate_id: str, expected_revision: int | None, namespace: str, event_key: str,
+                          source_revision: str, specification: Specification, step: Step, *, now: float | None = None) -> Task:
+        """A registered adapter's event becomes a finite child of a standing mandate.
+
+        Runtime-only: the caller is application code holding a registered
+        namespace, never a tool taking an origin from the model. One transaction
+        checks the mandate is active under an active, unexpired grant of the
+        revision it was activated with, that the child's scope lies inside the
+        grant's, and that the parent's allowances remain. The same event at the
+        same source revision returns the child it already made and spends
+        nothing. A newer source revision revises an unfinished child in place
+        while it has no dispatch intent and the scope stands, keeping the older
+        revision as a replay alias; a finished child is never reopened, so the
+        revision derives a new one.
+        """
+        _text(owner, 'owner')
+        _text(mandate_id, 'mandate')
+        _text(event_key, 'event key')
+        _text(source_revision, 'source revision')
+        if expected_revision is not None and type(expected_revision) is not int:
+            raise ValueError('an expected revision is an integer')
+        spec = self._namespace(namespace)
+        stamp = _clock(now)
+        request_id = hashlib.sha256(_json(('derived', mandate_id, spec.name, event_key, source_revision)).encode()).hexdigest()
+        def write() -> Task:
+            assert self._db is not None
+            mandate = self._mandate(owner, mandate_id)
+            if expected_revision is not None and mandate.revision != expected_revision:
+                raise TaskConflict('mandate revision changed')
+            if mandate.namespace != spec.name:
+                raise TaskConflict('the mandate belongs to another adapter')
+            grant = self._grant(owner, mandate.grant_id)
+            if mandate.status != 'active' or grant.status != 'active' or grant.revision != mandate.grant_revision or grant.expires_at <= stamp:
+                raise TaskConflict('the mandate cannot derive work now')
+            if not set(specification.scope.operations) <= set(grant.scope.operations) or not set(specification.scope.targets) <= set(grant.scope.targets):
+                raise TaskConflict('derived work must stay inside the grant')
+            origin = DerivedOrigin(owner, request_id, mandate.id, mandate.revision, grant.id, grant.revision, spec.name,
+                                   event_key, source_revision, stamp, _trigger(event_key, source_revision))
+            self._validate_request(origin, specification, step)
+            data = self._bounded({'origin': asdict(origin), 'specification': asdict(specification), 'step': asdict(step)})
+            key = (owner, mandate.id, spec.name, event_key)
+            replay = self._db.execute('SELECT task_id FROM derivations WHERE owner=? AND mandate_id=? AND namespace=? AND event_key=? AND source_revision=?',
+                                      (*key, source_revision)).fetchone()
+            if replay is not None:
+                return self._get(owner, replay['task_id'])
+            prior = self._db.execute('SELECT task_id FROM derivations WHERE owner=? AND mandate_id=? AND namespace=? AND event_key=? '
+                                     'ORDER BY created_at DESC,rowid DESC LIMIT 1', key).fetchone()
+            if prior is not None:
+                child = self._get(owner, prior['task_id'])
+                if child.status not in _TERMINAL:
+                    return self._revise(child, origin, specification, step, stamp)
+            self._spend_derivation(mandate, grant, stamp)
+            count = self._db.execute("SELECT count(*) FROM tasks WHERE status NOT IN ('done','failed','cancelled')").fetchone()[0]
+            if count >= self._config.max_active:
+                raise TaskLimit('active task allowance exhausted')
+            task_id = uuid.uuid4().hex
+            self._db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                             (task_id, owner, request_id, data, self._bounded(asdict(specification)), self._bounded(asdict(step)), 'queued', 1, 0,
+                              self._config.max_attempts, 0, self._config.max_polls, self._config.evidence_max_age_s, None, None, 'derived',
+                              stamp, stamp, stamp, 0, self._config.max_model_calls))
+            task = self._get(owner, task_id)
+            self._event(task, None)
+            self._db.execute('INSERT INTO derivations VALUES(?,?,?,?,?,?,?)', (*key, source_revision, task.id, stamp))
+            return task
+        def execute() -> Task:
+            self._transaction(lambda: self._sweep_expiry(owner, mandate_id, stamp))
+            return self._transaction(write)
+        return await self._run(execute)
+
+    async def grant_drafts(self, owner: str) -> tuple[GrantDraft, ...]:
+        def read() -> tuple[GrantDraft, ...]:
+            assert self._db is not None
+            return tuple(self._draft_from(row) for row in self._db.execute('SELECT * FROM grant_drafts WHERE owner=? ORDER BY created_at,id', (owner,)))
+        return await self._run(lambda: self._transaction(read))
+
+    async def grants(self, owner: str) -> tuple[StandingGrant, ...]:
+        def read() -> tuple[StandingGrant, ...]:
+            assert self._db is not None
+            return tuple(self._grant_from(row) for row in self._db.execute('SELECT * FROM grants WHERE owner=? ORDER BY approved_at,id', (owner,)))
+        return await self._run(lambda: self._transaction(read))
+
+    async def mandates(self, owner: str) -> tuple[Mandate, ...]:
+        def read() -> tuple[Mandate, ...]:
+            assert self._db is not None
+            return tuple(self._mandate_from(row) for row in self._db.execute('SELECT * FROM mandates WHERE owner=? ORDER BY created_at,id', (owner,)))
+        return await self._run(lambda: self._transaction(read))
+
+    async def derivations(self, owner: str, mandate_id: str) -> tuple[tuple[str, str, str], ...]:
+        """(event key, source revision, task id) for every trigger the mandate has seen, aliases included."""
+        def read() -> tuple[tuple[str, str, str], ...]:
+            assert self._db is not None
+            self._mandate(owner, mandate_id)
+            return tuple((row['event_key'], row['source_revision'], row['task_id']) for row in self._db.execute(
+                'SELECT * FROM derivations WHERE owner=? AND mandate_id=? ORDER BY created_at,rowid', (owner, mandate_id)))
         return await self._run(lambda: self._transaction(read))
 
     # ── the runner's side ─────────────────────────────────────────────────────

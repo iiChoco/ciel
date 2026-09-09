@@ -19,7 +19,8 @@ reconciliation, or fails the task, and feature records with a namespace:
 validated write-sets, expected revisions, a per-namespace allowance, write-sets
 riding a checkpoint, adapter-owned migration at open, unsupported and unknown
 namespaces preserved untouched, a failed migration rolled back, and a
-version-two store lifted to three with every task in place. No actual tool,
+version-two store lifted through three to four with every task in place and
+its origin saying it was human. No actual tool,
 model, mic, network, or user's runtime state is used.
 
     uv run --no-sync python scripts/probe_tasks.py
@@ -727,6 +728,7 @@ async def probe_migration(root: Path) -> None:
     check('this SQLite can build a version-two fixture', sqlite3.sqlite_version_info >= (3, 35))
     db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
     db.executescript('''
+        DROP TABLE derivations; DROP TABLE mandates; DROP TABLE grants; DROP TABLE grant_drafts;
         DROP TABLE feature_records; DROP TABLE feature_namespaces;
         ALTER TABLE tasks DROP COLUMN max_model_calls; ALTER TABLE tasks DROP COLUMN model_calls;
         PRAGMA user_version=2;
@@ -737,11 +739,15 @@ async def probe_migration(root: Path) -> None:
         db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
         version = db.execute('PRAGMA user_version').fetchone()[0]
         db.close()
-        check('a version-two store opens as version three with every task in place and the new allowance at its configured value',
-              version == 3 and lifted.status == 'queued' and lifted.next_step == READ and lifted.polls == 1
+        check('a version-two store opens as version four with every task in place and the new allowance at its configured value',
+              version == 4 and lifted.status == 'queued' and lifted.next_step == READ and lifted.polls == 1
               and lifted.model_calls == 0 and lifted.max_model_calls == 5)
+        check('the lifted origin says it was human and a repeated request finds its task',
+              lifted.origin.kind == 'human' and (await create(store)).id == task.id)
+        view = await store.owner_view(OWNER)
+        check('a lifted store lists no mandates and no grants yet', view['mandates'] == [] and view['grants'] == [])
     db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
-    db.execute('PRAGMA user_version=4')
+    db.execute('PRAGMA user_version=5')
     db.close()
     try:
         async with TaskStore(cfg):

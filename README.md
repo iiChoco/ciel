@@ -1345,6 +1345,31 @@ Three mechanisms, deliberately separate:
 Only the one-line summaries go into the prompt each turn. Full contents load on
 demand, which is what keeps memory affordable as it grows.
 
+## Independent action (planned)
+
+The [independent-action plan](design/2026-09-08-independent-action-plan.md)
+describes Ciel carrying authorized responsibility between conversations:
+remember the outcome, take bounded steps, wait, recover after interruption,
+verify the result, and report privately. It builds on the durable task store
+and owner controls below. The shared foundation owns grants through Proof
+Obligation, scheduling, Inverse correlation, recovery, and reliable receipts;
+each feature supplies its own sources, actions, and evidence. Events from email
+are the first feature. The foundation's acceptance checks use a synthetic
+adapter so another feature can reuse it without depending on an inbox.
+
+Implementation builds on the task controls that landed as commit 45e4fd7.
+Its first milestone, the runner, the ladder's task step, namespaced feature
+records, and the isolated extraction call, landed on 2026-09-08 and is
+described under durable tasks below. The second milestone's records, two
+kinds of origin, grant drafts, standing grants, mandates, and derived tasks,
+landed on 2026-09-09; the Chart grant form and the broker's approval surface
+are next, and nothing derives work under a grant until an adapter does. The revised plan specifies derived-task origins, a private Chart grant form,
+versioned feature records, a grant-less preview task, one task per operation
+on a persistent event record with inert proposals for changes the grant does
+not cover, and an isolated extraction call sharing the ordinary model-turn
+lease. The [review response](reports/2026-09-08-independent-action-review-response.md)
+records the decisions and their limits.
+
 ## Durable tasks and owner controls
 
 A task is the runtime's record of an explicit owner mandate: outcome, scope,
@@ -1398,8 +1423,45 @@ keeps that namespace's records owner-only, revisioned, bounded by
 wait, or completion they belong to. The store never reads inside a payload. A
 namespace it does not recognise, or one newer than its registration, is
 preserved untouched and reported unsupported: the tasks that need it wait,
-everything else runs. A store from schema version two is lifted to three at
-open with every task in place; a newer store is still refused.
+everything else runs. A store from schema version two or three is lifted to
+four at open with every task in place; a newer store is still refused.
+
+**A mandate can stand.** A standing grant is the owner's approval of one exact
+scope, digest and all: a draft in `grant_drafts` is what the owner looks at,
+its revision and digest move together when it is edited, and it is never
+executable. Activation takes an attended private owner turn, the exact draft
+revision and digest the broker's yes was bound to, a registered adapter
+namespace, and limits within the configured caps, and commits the grant and
+the mandate under it in one transaction. The mandate is the responsibility
+that derives finite tasks from that adapter's events until the owner pauses
+or revokes it, its grant expires, or its allowances run out; it is never run
+itself, and completing a child completes nothing above it. Revoking a grant
+ends its mandates at once, and an expired grant is marked so on the record
+the moment it is asked to derive. Config caps what a grant may hold and can
+never mint one. The Chart form that fills a draft and asks the yes is the
+next change; until then, nothing derives work under a grant.
+
+**Derived work inherits, it never invents.** A task's origin now says which
+kind it is. A `HumanOrigin` is a live private owner turn, as before, and is
+still the only kind `create` accepts. A `DerivedOrigin` names its mandate,
+grant, adapter, event, and source revision, and nothing that claims attendance
+or a human lane. The runtime-only `derive_task` admits a child only while its
+mandate is active under an active, unexpired grant at the revision it was
+activated with, only inside the grant's operations and targets, and only
+within the parent's lifetime and window allowances, counted from the persisted
+window start so a restart refills nothing. The same event at the same source
+revision returns the child it already made and spends nothing. A newer source
+revision revises an unfinished child in place while it has no dispatch intent
+and its scope stands, voids its open question, and keeps the older revision
+as a replay alias; a child whose mutation was sent is reconciled, never
+rewritten; a finished child is never reopened, so the revision derives a new
+one. A change the grant does not cover is the adapter's inert proposal in its
+own records, and only the owner's approval of that exact proposal, carried as
+an approval reference on an ordinary create with the proposal's expected
+record revision, becomes a task. The controller derives only through a
+`Namespace` it registered, journals the derivation, and offers mandate pause,
+resume, and revoke and grant revoke through the same owner admission as every
+other control; the owner view lists mandates and grants beside tasks.
 
 **One model call has one bounded context.** When a read needs a model to say
 what it saw, `brain/extract.py` runs a client of its own: a fresh SDK session
@@ -1485,6 +1547,9 @@ step_timeout_s = 60.0       # the longest one adapter read may take
 retry_backoff_s = 30.0      # how long an abandoned attempt waits before retrying
 max_model_calls = 16        # isolated extraction calls per task, captured at creation
 max_feature_records = 4096  # records one adapter namespace may hold per owner
+max_grant_children = 256    # finite tasks one standing mandate may derive over its life
+max_grant_per_window = 32   # derivations per window, counted from the persisted window start
+max_grant_lifetime_s = 2592000.0  # the longest a grant may run from approval to expiry
 extraction_model = ""       # empty: the brain's model
 extraction_timeout_s = 90.0
 extraction_max_chars = 32000
@@ -1498,7 +1563,9 @@ lives where the Brain lives: the hub in split mode, the one process otherwise.
 `max_model_calls` is captured per task like the other allowances; a spent call
 is never refunded, an interrupted one included. `extraction_model` empty means
 `[brain].model`; the extraction budget and timeout bound one call, and the
-turn lease bounds concurrency to one.
+turn lease bounds concurrency to one. The three grant caps bound what any
+grant may hold: a grant asks for its own numbers at approval, the smaller
+governs, and raising a cap later never widens a grant already approved.
 
 These fields also accept `CIEL_TASKS_*` environment overrides. `max_active`
 bounds non-terminal records and the bounded recent task view.
@@ -1516,8 +1583,9 @@ its wait/failure policy explicitly. The size limit bounds each serialized
 request, next step, observation batch, and private view. Enabling controls does
 not start scheduling; `runner` does.
 
-This is schema version two. Version-one stores and newer stores are refused
-without migration or reset. Choose a fresh dedicated directory for these
+This is schema version four. Version-two and version-three stores are lifted
+at open with every task in place; version-one stores and newer stores are
+refused without migration or reset. Choose a fresh dedicated directory for these
 controls; keep an existing store intact. The database, its full rollback-journal
 name `tasks.sqlite3-journal`, and `owner.lock` are forbidden to model file and
 shell tools, even in a broad workspace.
@@ -1840,6 +1908,7 @@ uv run scripts/probe_voice.py echo    # mic -> STT -> TTS, no model in the loop
 uv run --no-sync python scripts/probe_tasks.py       # records, owner controls, questions, retries, evidence, crash recovery, feature records, the v2→v3 lift
 uv run --no-sync python scripts/probe_task_runner.py # a synthetic adapter: one step, restart, fencing, giving up, human input wins, unsupported records
 uv run --no-sync python scripts/probe_extraction.py  # the isolated call: bounds, lease, timeout, cancellation, schema check, the client with nothing attached
+uv run --no-sync python scripts/probe_task_authority.py # drafts, grants, mandates, derived work: scope, dedupe, revision, allowances, revocation, expiry, approval, the v3→v4 lift
 uv run --no-sync python scripts/probe_task_tools.py  # real SDK dispatcher, turn authority, cancellation, drain debt
 uv run --no-sync python scripts/probe_task_wire.py   # two private Chart sockets, controls, conflicts, reconnect
 uv run --no-sync python scripts/probe_task_wire.py --live  # synthetic task states in Chart; temporary storage
@@ -1925,9 +1994,9 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `music.py` | Spotify on the Mac, through one narrow AppleScript door |
 | `spotify.py` | Spotify Web API — browser login, search and Connect playback from the brain's host |
 | `projects.py` | Atlas — durable working state per project |
-| `tasks.py` | Private task records, atomic owner controls, questions, evidence, recovery, eligibility, abandonment, and namespaced feature records; the store dispatches nothing |
+| `tasks.py` | Private task records, atomic owner controls, questions, evidence, recovery, eligibility, abandonment, namespaced feature records, grant drafts, standing grants, mandates, and derived work; the store dispatches nothing |
 | `task_context.py` | Turn authority captured by in-process tools and fenced through commit |
-| `task_controls.py` | Shared private owner controller, offline PR-watch validation, namespace registration, and control journaling |
+| `task_controls.py` | Shared private owner controller, offline PR-watch validation, namespace registration, mandate and grant controls, the runtime-only derive path, and control journaling |
 | `task_runner.py` | The bounded runner: one read step for the oldest eligible task, the adapter contract, abandonment, and the human-input interrupt |
 | `brain/extract.py` | One isolated model call per extraction: a client with nothing attached, the turn lease, and the schema checked twice |
 | `transcript.py` | Trace — the record of the path actually taken |
