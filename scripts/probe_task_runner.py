@@ -167,9 +167,9 @@ async def probe_steps(root: Path) -> None:
     mutation = await f.task('write-1', WRITE)
     report = await f.runner.step()
     waiting = await store.get(OWNER, mutation.id)
-    check('a mutation step waits for the dispatch phase that does not exist yet',
+    check('a mutation step waits when its adapter cannot dispatch one',
           report is not None and report.result == 'refused' and waiting.status == 'waiting' and waiting.wait_reason == 'resource'
-          and 'mutation dispatch' in waiting.detail)
+          and 'cannot dispatch' in waiting.detail)
     unserved = await f.task('other-1', OTHER)
     report = await f.runner.step()
     waiting = await store.get(OWNER, unserved.id)

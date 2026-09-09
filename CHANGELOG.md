@@ -2,6 +2,58 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — An interrupted action can be understood
+
+**Why.** The runner could read and the store could hold a grant, but no
+mutation had ever been sent: the dispatch phase the runner waited for did not
+exist, and neither did the record that would let a crash mid-send be
+understood rather than repeated. This is the independent-action plan's third
+milestone. With it, a synthetic external effect survives every way a process
+can die around it with exactly one effect on the far side. No adapter can
+write yet; the probes supply one.
+
+**What.**
+
+- *Nothing is sent that was not first written down.* Schema six adds
+  intents and approvals. A `WritingAdapter` plans the payload against what
+  it reads of the target; the runner digests payload and preconditions,
+  journals the intent (a journal entry now returns its reference, and none
+  means no send), and the store's `authorize` finds the authority at that
+  moment, the grant at its activated revision or the owner's approval of
+  this exact payload, and commits the intent with the attempt's dispatch
+  in one write. A moved target or a passed deadline is an unsent attempt,
+  closed as not applied and planned again. A human task with no standing
+  authority asks the owner to approve this action, through a question
+  bound to the payload digest.
+- *An outcome nobody knows is reconciled, never resent.* Uncertain
+  attempts come before any new step. The adapter's `reconcile` is
+  read-only; applied returns the retry allowance and queues the verifying
+  read the plan named, not applied reopens the mutation, and a read that
+  cannot tell is counted on the intent until `max_reconcile_reads`, when
+  the owner is asked in two exact words. A cancelled task records what
+  recovery finds and stays cancelled; a revoked grant reconciles but does
+  not resend; an owner's edit after the effect is read, not overwritten.
+- *A runner queues what the owner answers.* With a runner present, a
+  resumed or answered task is queued for it rather than parked in a
+  resource wait; without one, nothing changes.
+- *Config.* `dispatch_deadline_s`, `mutation_timeout_s`, `max_reconcile_reads`.
+
+**Probes.** `probe_task_dispatch.py 37 (new): the grant path end to end with
+its journal correlation, a lost response reconciled and never resent, a moved
+precondition planned again, a timed-out send found not applied and sent once
+more, reads that cannot tell and the owner's word either way, a task
+cancelled while uncertain, a grant revoked after the send, no journal, a
+passed deadline, the owner's approval of an exact payload and its refusal, an
+owner's edit preserved, and a process killed after the send and before it,
+each recovering to one effect and validating after reopening.
+probe_task_runner.py 25: the mutation wait now names an adapter that cannot
+dispatch. probe_tasks.py 202 and probe_task_authority.py 93: the lifts land
+on six. Rerun unchanged: probe_task_wire.py 28, probe_task_tools.py 24,
+probe_hub_imports.py 6, probe_turns.py 78, probe_hub_arbiter.py 61,
+probe_ladder.py 25, probe_wire.py 79, probe_confirm_wire.py 17,
+probe_shellguard.py 165, probe_vigil.py 173; hub import clean; the spoke
+reloaded to ready.`
+
 ## 2026-09-09 — The form is in Chart; the yes is the broker's
 
 **Why.** The records could hold a grant, but nothing could ask for one: a
@@ -49,7 +101,7 @@ and a task.changed on the other, a yes that activates for every view, and a
 mandate paused from the Chart. probe_confirm_wire.py 14 → 17: the
 channel-scoped ask approves and clears its channel, waits behind a turn's
 channel and gives up rather than clobbering it, and treats no answer as no.
-probe_wire.py 76 → 80: the grant operations' required fields. probe_tasks.py
+probe_wire.py 75 → 79: the grant operations' required fields. probe_tasks.py
 202: the version-two lift now lands on five. Rerun unchanged:
 probe_task_runner.py 25, probe_task_tools.py 24, probe_hub_imports.py 6,
 probe_turns.py 78, probe_hub_arbiter.py 61, probe_ladder.py 25; hub import

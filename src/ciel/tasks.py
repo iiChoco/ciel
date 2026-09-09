@@ -53,6 +53,16 @@ owner pauses or revokes it, its grant expires, or its allowances run out.
 Config caps what a grant may hold and can never mint one; a draft is never
 executable; completing a child completes nothing above it.
 
+**Nothing is sent that was not first written down.** A mutation's attempt
+carries an intent before dispatch: the operation and exact target, the
+payload and precondition digests, the authority found at that moment (the
+grant at its activated revision, or the owner's approval of this exact
+payload), the journal entry that correlates it with Inverse, and a deadline.
+An outcome nobody knows is a reconciliation wait, never a retry: recovery
+asks the adapter what happened, and after enough unanswered reads asks the
+owner; only a verdict, applied or not, moves the task again, and a task the
+owner ended meanwhile records the verdict without reviving.
+
 **Derived work inherits, it never invents.** A child's origin names its
 mandate, grant, adapter, event, and source revision, and nothing that claims
 attendance or a human lane. The store admits it only inside the grant's scope,
@@ -95,7 +105,7 @@ Phase = Literal['prepared', 'dispatched', 'observed', 'checkpointed', 'verified'
 WaitReason = Literal['owner', 'external', 'resource', 'reconciliation']
 _TERMINAL = frozenset(('done', 'failed', 'cancelled'))
 _NOTICE = frozenset(('waiting', 'paused', 'done', 'failed', 'cancelled'))
-_SCHEMA = 5
+_SCHEMA = 6
 _POLICY = 1
 """What a grant's scope and limits mean; a grant records the version it was approved under."""
 GrantStatus = Literal['active', 'revoked', 'expired']
@@ -127,6 +137,23 @@ _AUTHORITY_TABLES = '''
                 owner TEXT NOT NULL, mandate_id TEXT NOT NULL REFERENCES mandates(id), namespace TEXT NOT NULL,
                 event_key TEXT NOT NULL, source_revision TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id),
                 created_at REAL NOT NULL, PRIMARY KEY(owner,mandate_id,namespace,event_key,source_revision)
+            );
+'''
+_DISPATCH_TABLES = '''
+            CREATE TABLE intents (
+                action_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+                attempt_id TEXT NOT NULL UNIQUE REFERENCES attempts(id),
+                operation TEXT NOT NULL, target TEXT NOT NULL, payload_digest TEXT NOT NULL, precondition_digest TEXT NOT NULL,
+                recipe_json TEXT NOT NULL, authority_json TEXT NOT NULL, journal_ref TEXT NOT NULL,
+                deadline REAL NOT NULL, created_at REAL NOT NULL,
+                resolution TEXT CHECK(resolution IN ('applied','not_applied')), resolved_at REAL, resolved_by TEXT,
+                reconcile_reads INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE approvals (
+                question_id TEXT PRIMARY KEY REFERENCES questions(id), task_id TEXT NOT NULL REFERENCES tasks(id),
+                operation TEXT NOT NULL, target TEXT NOT NULL, payload_digest TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('asked','approved','declined')),
+                answered_revision INTEGER, consumed_by TEXT
             );
 '''
 _FEATURE_TABLES = '''
@@ -162,6 +189,10 @@ class TaskConflict(ValueError):
 
 class TaskLimit(ValueError):
     """A persisted allowance or configured admission bound is exhausted."""
+
+
+class NoAuthority(TaskConflict):
+    """Nothing on the record permits this mutation right now."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +372,40 @@ class Notice:
     outcome: str
     detail: str
     created_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class Authority:
+    """Where the right to send one mutation came from, as found at dispatch."""
+
+    kind: Literal['grant', 'approval']
+    grant_id: str | None
+    grant_revision: int | None
+    approval_ref: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Intent:
+    """Dispatch intent: what one attempt was about to send, written before it was."""
+
+    action_id: str
+    task_id: str
+    attempt_id: str
+    operation: str
+    target: str
+    payload_digest: str
+    precondition_digest: str
+    recipe: dict[str, Any]
+    """The adapter's own instructions for finding out later whether it happened."""
+    authority: Authority
+    journal_ref: str
+    deadline: float
+    """Past this, an unsent intent is abandoned rather than sent late."""
+    created_at: float
+    resolution: Literal['applied', 'not_applied'] | None
+    resolved_at: float | None
+    resolved_by: str | None
+    reconcile_reads: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -584,7 +649,7 @@ class TaskStore:
             if not fresh:
                 version = self._db.execute('PRAGMA user_version').fetchone()[0]
                 app = self._db.execute('PRAGMA application_id').fetchone()[0]
-                if app != _APPLICATION or version not in (2, 3, 4, _SCHEMA):
+                if app != _APPLICATION or version not in (2, 3, 4, 5, _SCHEMA):
                     raise TaskStoreError('unsupported task schema; no migration or downgrade was attempted')
                 if self._db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise TaskStoreError('task database failed its integrity check')
@@ -594,8 +659,10 @@ class TaskStore:
                 self._migrate_from_2()
             if not fresh and version < 4:
                 self._migrate_from_3()
-            if not fresh and version < _SCHEMA:
+            if not fresh and version < 5:
                 self._migrate_from_4()
+            if not fresh and version < _SCHEMA:
+                self._migrate_from_5()
             if not fresh:
                 self._validate_rows()
             if fresh:
@@ -653,7 +720,8 @@ class TaskStore:
             CREATE TABLE questions (
                 id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
                 revision INTEGER NOT NULL, prompt TEXT NOT NULL, choices_json TEXT NOT NULL,
-                step_json TEXT, answer TEXT, answered_revision INTEGER
+                step_json TEXT, answer TEXT, answered_revision INTEGER,
+                kind TEXT NOT NULL DEFAULT 'step' CHECK(kind IN ('step','approval','reconciliation'))
             );
             CREATE TABLE bindings (
                 attempt_id TEXT NOT NULL REFERENCES attempts(id), task_revision INTEGER NOT NULL,
@@ -662,6 +730,7 @@ class TaskStore:
             );
             {_FEATURE_TABLES}
             {_AUTHORITY_TABLES}
+            {_DISPATCH_TABLES}
             PRAGMA application_id={_APPLICATION};
             PRAGMA user_version={_SCHEMA};
             COMMIT;
@@ -716,10 +785,25 @@ class TaskStore:
             BEGIN IMMEDIATE;
             {additions}
             UPDATE grant_drafts SET status='discarded',revision=revision+1 WHERE status='draft';
+            PRAGMA user_version=5;
+            COMMIT;
+        ''')
+        log.info('task store migrated from schema 4 to 5')
+
+    def _migrate_from_5(self) -> None:
+        """Version five sent nothing, so it has no intents to carry over; its
+        questions were all step questions and now say so."""
+        assert self._db is not None
+        present = {row['name'] for row in self._db.execute('PRAGMA table_info(questions)')}
+        addition = "ALTER TABLE questions ADD COLUMN kind TEXT NOT NULL DEFAULT 'step' CHECK(kind IN ('step','approval','reconciliation'));" if 'kind' not in present else ''
+        self._db.executescript(f'''
+            BEGIN IMMEDIATE;
+            {addition}
+            {_DISPATCH_TABLES}
             PRAGMA user_version={_SCHEMA};
             COMMIT;
         ''')
-        log.info('task store migrated from schema 4 to %d', _SCHEMA)
+        log.info('task store migrated from schema 5 to %d', _SCHEMA)
 
     def register(self, namespace: Namespace) -> None:
         """Application code announces an adapter's records before the store opens."""
@@ -933,12 +1017,14 @@ class TaskStore:
             'transitions': 'task_id revision before_status after_status detail at',
             'outbox': 'id task_id revision status outcome detail created_at',
             'ingress': 'owner ingress_id task_id',
-            'questions': 'id task_id revision prompt choices_json step_json answer answered_revision',
+            'questions': 'id task_id revision prompt choices_json step_json answer answered_revision kind',
             'bindings': 'attempt_id task_revision client_generation tool_use_id journal_ref',
             'grant_drafts': 'id owner revision host scope_json bindings_json digest status created_at updated_at namespace outcome limits_json',
             'grants': 'id owner revision status scope_json digest approval_ref policy_version limits_json approved_at expires_at revoked_at updated_at',
             'mandates': 'id owner revision status outcome namespace grant_id grant_revision children window_start window_count detail created_at updated_at',
             'derivations': 'owner mandate_id namespace event_key source_revision task_id created_at',
+            'intents': 'action_id task_id attempt_id operation target payload_digest precondition_digest recipe_json authority_json journal_ref deadline created_at resolution resolved_at resolved_by reconcile_reads',
+            'approvals': 'question_id task_id operation target payload_digest status answered_revision consumed_by',
         }
         for table, expected in columns.items():
             actual = [row['name'] for row in self._db.execute(f'PRAGMA table_info({table})')]
@@ -1061,6 +1147,23 @@ class TaskStore:
             if (mandate.children < 0 or not 0 <= mandate.window_count <= mandate.children or _clock(mandate.window_start) != mandate.window_start
                     or (grant_row['status'] != 'active' and mandate.status in ('active', 'paused'))):
                 raise TaskStoreError('mandate has inconsistent allowances or authority')
+        for row in self._db.execute('SELECT * FROM intents'):
+            intent = self._intent_from(row)
+            attempt = self._attempt(intent.attempt_id)
+            if attempt.task_id != intent.task_id or attempt.step.kind != 'mutation' or attempt.step.operation != intent.operation or attempt.step.target != intent.target:
+                raise TaskStoreError('intent does not match its attempt')
+            if attempt.phase == 'prepared':
+                raise TaskStoreError('intent has inconsistent phase')
+            for value in (intent.payload_digest, intent.precondition_digest, intent.journal_ref):
+                _text(value, 'intent field')
+            if intent.authority.kind not in ('grant', 'approval') or (intent.authority.kind == 'grant') != (intent.authority.grant_id is not None):
+                raise TaskStoreError('intent has malformed authority')
+            if (intent.resolution is None) != (intent.resolved_at is None) or intent.reconcile_reads < 0 or _clock(intent.deadline) <= 0:
+                raise TaskStoreError('intent has an inconsistent resolution')
+        for row in self._db.execute('SELECT * FROM approvals'):
+            question = self._db.execute('SELECT * FROM questions WHERE id=? AND task_id=?', (row['question_id'], row['task_id'])).fetchone()
+            if question is None or question['kind'] != 'approval' or (row['status'] != 'asked') != (question['answer'] is not None):
+                raise TaskStoreError('approval does not match its question')
         for row in self._db.execute('SELECT * FROM derivations'):
             task_row = self._db.execute('SELECT * FROM tasks WHERE id=? AND owner=?', (row['task_id'], row['owner'])).fetchone()
             if task_row is None:
@@ -1221,6 +1324,8 @@ class TaskStore:
                 self._db.execute('INSERT INTO evidence VALUES(?,?,?)',(attempt.id,item.criterion_id,_json(raw)))
             result = self._advance(task,'verifying',stamp,detail='observations recorded',current_attempt=attempt.id)
             self._db.execute("UPDATE attempts SET phase='observed',task_revision=?,updated_at=? WHERE id=?",(result.revision,stamp,attempt.id))
+            self._db.execute("UPDATE intents SET resolution='applied',resolved_at=?,resolved_by='provider' WHERE attempt_id=? AND resolution IS NULL",
+                             (stamp, attempt.id))
             return result
         return await self._run(lambda: self._transaction(write))
 
@@ -1398,16 +1503,18 @@ class TaskStore:
             if step is not None:
                 self._validate_step(task.specification, step)
             task = self._advance(task, 'waiting', stamp, detail=prompt, wait_reason='owner')
-            self._db.execute('INSERT INTO questions VALUES(?,?,?,?,?,?,NULL,NULL)',
+            self._db.execute("INSERT INTO questions VALUES(?,?,?,?,?,?,NULL,NULL,'step')",
                              (uuid.uuid4().hex, task.id, task.revision, prompt, self._bounded(choices),
                               self._bounded(asdict(step)) if step else None))
             return task
         return await self._run(lambda: self._transaction(write))
 
     async def owner_control(self, owner: str, task_id: str, operation: str, *, revision: int | None = None,
-                            question_id: str | None = None, answer: str | None = None,
+                            question_id: str | None = None, answer: str | None = None, execution: bool = False,
                             fence: Fence | None = None, now: float | None = None, record: Callable[[Task], None] | None = None) -> Task:
-        """Owner controls never queue work; a missing revision means the current record."""
+        """Owner controls; a missing revision means the current record. With
+        ``execution`` a resumed or answered task is queued for the runner;
+        without one it waits, saved, as it always did."""
         stamp = _clock(now)
         def write() -> Task:
             assert self._db is not None
@@ -1415,20 +1522,39 @@ class TaskStore:
             if operation in ('pause', 'cancel'):
                 return self._control_now(owner, task_id, task.revision, 'paused' if operation == 'pause' else 'cancelled', stamp)
             if operation == 'resume':
-                return self._resume_now(owner, task_id, task.revision, stamp, execution=False)
+                return self._resume_now(owner, task_id, task.revision, stamp, execution=execution)
             if operation != 'answer':
                 raise ValueError('unknown owner control')
             question = self._db.execute('SELECT * FROM questions WHERE id=? AND task_id=?', (question_id, task.id)).fetchone()
+            expected_wait = 'reconciliation' if question is not None and question['kind'] == 'reconciliation' else 'owner'
             if (question is None or question['answer'] is not None or question['revision'] != task.revision
-                    or task.status != 'waiting' or task.wait_reason != 'owner'):
+                    or task.status != 'waiting' or task.wait_reason != expected_wait):
                 raise TaskConflict('the owner question is no longer waiting')
             if answer not in json.loads(question['choices_json']):
                 raise TaskConflict('choose an exact answer; the question is still waiting')
+            if question['kind'] == 'reconciliation':
+                # The owner's word on an effect nobody could see: the same
+                # resolution recovery would record, attributed to the owner.
+                attempt_row = self._db.execute("SELECT id FROM attempts WHERE task_id=? AND phase='unknown' ORDER BY created_at DESC LIMIT 1", (task.id,)).fetchone()
+                if attempt_row is None:
+                    raise TaskConflict('nothing is uncertain any more')
+                self._db.execute('UPDATE questions SET answer=?,answered_revision=? WHERE id=?', (answer, task.revision + 1, question_id))
+                verdict = 'applied' if answer == 'it happened' else 'not_applied'
+                return self._resolve_now(owner, self._attempt(attempt_row['id']), verdict, (), 'owner', stamp, None)
             if task.attempts >= task.max_attempts or task.polls >= task.max_polls:
                 raise TaskLimit('task allowance exhausted')
+            if question['kind'] == 'approval':
+                if answer == 'cancel':
+                    self._db.execute("UPDATE approvals SET status='declined',answered_revision=? WHERE question_id=?", (task.revision + 1, question_id))
+                    self._db.execute('UPDATE questions SET answer=?,answered_revision=? WHERE id=?', (answer, task.revision + 1, question_id))
+                    return self._control_now(owner, task_id, task.revision, 'cancelled', stamp, 'the owner declined the action')
+                self._db.execute("UPDATE approvals SET status='approved',answered_revision=? WHERE question_id=?", (task.revision + 1, question_id))
             step = _step(json.loads(question['step_json'])) if question['step_json'] else task.next_step
             self._validate_step(task.specification, step)
-            task = self._advance(task, 'waiting', stamp, detail=RESOURCE_WAIT, wait_reason='resource', step=step)
+            if execution:
+                task = self._advance(task, 'queued', stamp, detail='owner answered', step=step, eligible_at=stamp)
+            else:
+                task = self._advance(task, 'waiting', stamp, detail=RESOURCE_WAIT, wait_reason='resource', step=step)
             self._db.execute('UPDATE questions SET answer=?,answered_revision=? WHERE id=?', (answer, task.revision, question_id))
             return task
         def execute() -> Task:
@@ -1899,6 +2025,244 @@ class TaskStore:
                 'SELECT * FROM derivations WHERE owner=? AND mandate_id=? ORDER BY created_at,rowid', (owner, mandate_id)))
         return await self._run(lambda: self._transaction(read))
 
+    # ── dispatch: authority, intent, reconciliation ──────────────────────────
+
+    def _intent_from(self, row: sqlite3.Row) -> Intent:
+        return Intent(row['action_id'], row['task_id'], row['attempt_id'], row['operation'], row['target'], row['payload_digest'],
+                      row['precondition_digest'], json.loads(row['recipe_json']), Authority(**json.loads(row['authority_json'])),
+                      row['journal_ref'], row['deadline'], row['created_at'], row['resolution'], row['resolved_at'], row['resolved_by'],
+                      row['reconcile_reads'])
+
+    def _intent_of(self, attempt_id: str) -> Intent | None:
+        assert self._db is not None
+        row = self._db.execute('SELECT * FROM intents WHERE attempt_id=?', (attempt_id,)).fetchone()
+        return self._intent_from(row) if row is not None else None
+
+    def _authority_for(self, task: Task, operation: str, target: str, payload_digest: str, now: float) -> Authority:
+        """Where the right to send this comes from, checked now, not remembered.
+
+        Derived work: its grant, at the revision the mandate was activated
+        with, active and unexpired, its scope holding the operation and the
+        target, its mandate not paused or ended. A proposal's task: the
+        approval that made it, whose scope is the approved operation. Any
+        other owner task: an approval the owner gave to this exact payload
+        through a question this store asked. Nothing else is authority.
+        """
+        assert self._db is not None
+        origin = task.origin
+        if isinstance(origin, DerivedOrigin):
+            mandate = self._mandate(origin.owner, origin.parent_mandate_id)
+            grant = self._grant(origin.owner, origin.grant_id)
+            if mandate.status != 'active' or grant.status != 'active' or grant.expires_at <= now or grant.revision != origin.grant_revision:
+                raise NoAuthority('the grant no longer covers new dispatches')
+            if operation not in grant.scope.operations or target not in grant.scope.targets:
+                raise NoAuthority('the grant does not cover this operation on this target')
+            return Authority('grant', grant.id, grant.revision, None)
+        if origin.approval_ref is not None:
+            return Authority('approval', None, None, origin.approval_ref)
+        row = self._db.execute("SELECT question_id FROM approvals WHERE task_id=? AND operation=? AND target=? AND payload_digest=? "
+                               "AND status='approved' AND consumed_by IS NULL ORDER BY rowid LIMIT 1",
+                               (task.id, operation, target, payload_digest)).fetchone()
+        if row is None:
+            raise NoAuthority('the owner has not approved this action')
+        return Authority('approval', None, None, f'question:{row["question_id"]}')
+
+    async def authorize(self, owner: str, attempt: Attempt, operation: str, target: str, payload_digest: str, precondition_digest: str,
+                        recipe: dict[str, Any], journal_ref: str, *, now: float | None = None) -> Intent:
+        """Dispatch intent, durable before anything is sent.
+
+        One transaction binds the attempt, the operation and exact target,
+        the payload and precondition digests, the authority found now, the
+        journal entry already written, and a deadline; the attempt becomes
+        dispatched in the same write. A missing journal reference is a
+        refusal: what cannot be correlated with Inverse is not sent.
+        """
+        _text(operation, 'operation')
+        _text(target, 'target')
+        _text(payload_digest, 'payload digest')
+        _text(precondition_digest, 'precondition digest')
+        _text(journal_ref, 'journal reference')
+        if not isinstance(recipe, dict):
+            raise ValueError('a reconciliation recipe is an object')
+        stamp = _clock(now)
+        def write() -> Intent:
+            assert self._db is not None
+            task = self._current(owner, attempt, 'prepared')
+            if attempt.step.kind != 'mutation' or attempt.step.operation != operation or attempt.step.target != target:
+                raise TaskConflict('the intent must name the mutation the attempt was claimed for')
+            authority = self._authority_for(task, operation, target, payload_digest, stamp)
+            action_id = uuid.uuid4().hex
+            self._db.execute('INSERT INTO intents VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,0)',
+                             (action_id, task.id, attempt.id, operation, target, payload_digest, precondition_digest, self._bounded(recipe),
+                              self._bounded(asdict(authority)), journal_ref, stamp + self._config.dispatch_deadline_s, stamp))
+            if authority.kind == 'approval' and authority.approval_ref.startswith('question:'):
+                self._db.execute('UPDATE approvals SET consumed_by=? WHERE question_id=?', (action_id, authority.approval_ref.removeprefix('question:')))
+            updated = self._advance(task, 'running', stamp, detail=f'dispatch intent committed: {operation} on {target}', current_attempt=attempt.id)
+            self._db.execute("UPDATE attempts SET phase='dispatched',task_revision=?,updated_at=? WHERE id=?", (updated.revision, stamp, attempt.id))
+            return self._intent_of(attempt.id)  # type: ignore[return-value]
+        return await self._run(lambda: self._transaction(write))
+
+    async def intents(self, owner: str, task_id: str) -> tuple[Intent, ...]:
+        def read() -> tuple[Intent, ...]:
+            assert self._db is not None
+            self._get(owner, task_id)
+            return tuple(self._intent_from(row) for row in self._db.execute('SELECT * FROM intents WHERE task_id=? ORDER BY created_at,rowid', (task_id,)))
+        return await self._run(lambda: self._transaction(read))
+
+    async def reconcilable(self, owner: str, *, limit: int = 8) -> tuple[tuple[Task, Attempt, Intent], ...]:
+        """Tasks waiting on an outcome nobody knows, oldest first, with the
+        attempt and the intent recovery must ask about."""
+        if type(limit) is not int or limit < 1:
+            raise ValueError('limit must be a positive integer')
+        def read() -> tuple[tuple[Task, Attempt, Intent], ...]:
+            assert self._db is not None
+            found = []
+            for row in self._db.execute("SELECT * FROM tasks WHERE owner=? AND status IN ('waiting','cancelled') AND wait_reason='reconciliation' "
+                                        'ORDER BY updated_at,id LIMIT ?', (owner, limit)).fetchall():
+                task = self._task(row)
+                attempt_row = self._db.execute("SELECT id FROM attempts WHERE task_id=? AND phase='unknown' ORDER BY created_at DESC LIMIT 1", (task.id,)).fetchone()
+                if attempt_row is None:
+                    continue
+                attempt = self._attempt(attempt_row['id'])
+                intent = self._intent_of(attempt.id)
+                if intent is not None and intent.resolution is None:
+                    found.append((task, attempt, intent))
+            return tuple(found)
+        return await self._run(lambda: self._transaction(read))
+
+    def _uncertain(self, owner: str, attempt: Attempt) -> tuple[Task, Intent]:
+        task = self._get(owner, attempt.task_id)
+        stored = self._attempt(attempt.id)
+        intent = self._intent_of(attempt.id)
+        if stored.phase != 'unknown' or intent is None or intent.resolution is not None:
+            raise TaskConflict('the attempt is not an unresolved uncertain one')
+        return task, intent
+
+    async def note_reconcile(self, owner: str, attempt: Attempt, detail: str, *, now: float | None = None) -> Intent:
+        """A reconciliation read that could not tell: spent, counted, and the wait kept."""
+        _text(detail, 'reconciliation detail')
+        stamp = _clock(now)
+        def write() -> Intent:
+            assert self._db is not None
+            task, intent = self._uncertain(owner, attempt)
+            # Counted on the intent, not the polls: a reconciliation read is
+            # not an execution round, and its own bound ends in the owner's ear.
+            self._db.execute('UPDATE tasks SET detail=?,updated_at=? WHERE id=?', (self._bounded(detail) and detail, max(stamp, task.updated_at), task.id))
+            self._db.execute('UPDATE intents SET reconcile_reads=reconcile_reads+1 WHERE action_id=?', (intent.action_id,))
+            return self._intent_of(attempt.id)  # type: ignore[return-value]
+        return await self._run(lambda: self._transaction(write))
+
+    async def resolve(self, owner: str, attempt: Attempt, verdict: Literal['applied', 'not_applied'], evidence: tuple[Evidence, ...], *,
+                      by: str, now: float | None = None, next_step: Step | None = None) -> Task:
+        """What became of an uncertain effect, once somebody knows.
+
+        Applied: the attempt observed what it sent, its evidence recorded, and
+        the task goes on to the verifying read its adapter names. Not applied:
+        the attempt was interrupted after all, and the mutation may be planned
+        again under fresh authority. A task the owner cancelled or that failed
+        meanwhile keeps that state; the effect is recorded, nothing reactivates.
+        """
+        if verdict not in ('applied', 'not_applied'):
+            raise ValueError('a verdict is applied or not_applied')
+        _text(by, 'who resolved it')
+        stamp = _clock(now)
+        self._bounded([asdict(item) for item in evidence])
+        return await self._run(lambda: self._transaction(lambda: self._resolve_now(owner, attempt, verdict, evidence, by, stamp, next_step)))
+
+    def _resolve_now(self, owner: str, attempt: Attempt, verdict: str, evidence: tuple[Evidence, ...], by: str, stamp: float,
+                     next_step: Step | None) -> Task:
+        data = _json([asdict(item) for item in evidence])
+        if True:
+            assert self._db is not None
+            task, intent = self._uncertain(owner, attempt)
+            if task.status not in ('waiting', 'paused', 'cancelled', 'failed') or (task.status == 'waiting' and task.wait_reason != 'reconciliation'):
+                raise TaskConflict('the task is not waiting on this outcome')
+            self._db.execute('UPDATE intents SET resolution=?,resolved_at=?,resolved_by=? WHERE action_id=?', (verdict, stamp, by, intent.action_id))
+            if verdict == 'applied':
+                criteria = {c.id: c for c in task.specification.criteria}
+                for raw in json.loads(data):
+                    item = Evidence(**raw)
+                    if item.criterion_id not in criteria or item.target != criteria[item.criterion_id].target or _clock(item.observed_at) > stamp:
+                        raise ValueError('evidence must observe this task\'s criteria at a valid time')
+                    self._db.execute('INSERT OR REPLACE INTO evidence VALUES(?,?,?)', (attempt.id, item.criterion_id, _json(raw)))
+                self._db.execute("UPDATE attempts SET phase='observed',updated_at=? WHERE id=?", (stamp, attempt.id))
+                # It succeeded after all: the retry allowance it was charged
+                # when it became uncertain is returned, as for any clean round.
+                self._db.execute('UPDATE tasks SET attempts=attempts-1 WHERE id=? AND attempts>0', (task.id,))
+            else:
+                self._db.execute("UPDATE attempts SET phase='interrupted',updated_at=? WHERE id=?", (stamp, attempt.id))
+            if task.status != 'waiting':
+                self._db.execute('UPDATE tasks SET detail=?,updated_at=? WHERE id=?', (f'reconciled while {task.status}: {verdict}', stamp, task.id))
+                return self._get(owner, task.id)
+            step = next_step or task.next_step
+            verify = intent.recipe.get('verify')
+            if verdict == 'applied' and next_step is None and isinstance(verify, dict):
+                # The read the adapter named when it planned the send, kept in
+                # the intent so the owner's word can use it as the adapter would.
+                step = _step(verify)
+            self._validate_step(task.specification, step)
+            if verdict == 'applied' and step.kind != 'read':
+                raise TaskConflict('an applied mutation is verified by a read before anything else')
+            if task.attempts >= task.max_attempts or task.polls >= task.max_polls:
+                return self._advance(task, 'failed', stamp, detail=f'reconciled: {verdict}; allowance exhausted')
+            return self._advance(task, 'queued', stamp, detail=f'reconciled by {by}: {verdict}', eligible_at=stamp, step=step)
+
+    def _park_now(self, owner: str, attempt: Attempt, reason: WaitReason, detail: str, stamp: float) -> Task:
+        """A claimed attempt that will not be sent, set down cleanly: the
+        attempt is checkpointed, not charged, and the task waits with the
+        step it was claimed for still next."""
+        assert self._db is not None
+        task = self._current(owner, attempt, 'prepared')
+        self._db.execute("UPDATE attempts SET phase='checkpointed',updated_at=? WHERE id=?", (stamp, attempt.id))
+        return self._advance(task, 'waiting', stamp, detail=detail, wait_reason=reason)
+
+    async def park(self, owner: str, attempt: Attempt, reason: WaitReason, detail: str, *, now: float | None = None) -> Task:
+        if reason not in ('external', 'resource'):
+            raise ValueError('a parked attempt waits on the world or the runtime')
+        _text(detail, 'wait explanation')
+        stamp = _clock(now)
+        return await self._run(lambda: self._transaction(lambda: self._park_now(owner, attempt, reason, detail, stamp)))
+
+    async def ask_approval(self, owner: str, attempt: Attempt, prompt: str, payload_digest: str, *, now: float | None = None) -> Task:
+        """A mutation with no standing authority asks the owner for exactly this
+        one: the question names the operation, the target, and the payload it
+        was planned with, and an approve answer covers nothing else. The
+        attempt that planned it is set down cleanly."""
+        _text(prompt, 'question')
+        _text(payload_digest, 'payload digest')
+        stamp = _clock(now)
+        def write() -> Task:
+            assert self._db is not None
+            if attempt.step.kind != 'mutation':
+                raise TaskConflict('only a mutation asks for approval')
+            task = self._park_now(owner, attempt, 'external', prompt, stamp)
+            task = self._advance(task, 'waiting', stamp, detail=prompt, wait_reason='owner')
+            question_id = uuid.uuid4().hex
+            self._db.execute("INSERT INTO questions VALUES(?,?,?,?,?,?,NULL,NULL,'approval')",
+                             (question_id, task.id, task.revision, prompt, self._bounded(('approve', 'cancel')), self._bounded(asdict(attempt.step))))
+            self._db.execute("INSERT INTO approvals VALUES(?,?,?,?,?,'asked',NULL,NULL)",
+                             (question_id, task.id, attempt.step.operation, attempt.step.target, payload_digest))
+            return task
+        return await self._run(lambda: self._transaction(write))
+
+    async def ask_reconciliation(self, owner: str, attempt: Attempt, prompt: str, *, now: float | None = None) -> Task:
+        """Recovery could not tell; the owner is asked, in two exact words."""
+        _text(prompt, 'question')
+        stamp = _clock(now)
+        def write() -> Task:
+            assert self._db is not None
+            task, intent = self._uncertain(owner, attempt)
+            if task.status != 'waiting':
+                raise TaskConflict('only a waiting task asks')
+            if self._db.execute("SELECT 1 FROM questions WHERE task_id=? AND kind='reconciliation' AND answer IS NULL", (task.id,)).fetchone():
+                raise TaskConflict('the owner is already being asked')
+            task = self._advance(task, 'waiting', stamp, detail=prompt, wait_reason='reconciliation')
+            self._db.execute("INSERT INTO questions VALUES(?,?,?,?,?,?,NULL,NULL,'reconciliation')",
+                             (uuid.uuid4().hex, task.id, task.revision, prompt, self._bounded(('it happened', 'it did not happen')),
+                              self._bounded(asdict(attempt.step))))
+            return task
+        return await self._run(lambda: self._transaction(write))
+
     # ── the runner's side ─────────────────────────────────────────────────────
 
     async def eligible(self, owner: str, *, now: float | None = None, limit: int = 8) -> tuple[Task, ...]:
@@ -1923,17 +2287,24 @@ class TaskStore:
             raise TaskConflict('attempt is no longer current')
         return task, stored
 
-    async def abandon(self, owner: str, attempt: Attempt, detail: str, *, eligible_at: float, now: float | None = None) -> Task:
+    async def abandon(self, owner: str, attempt: Attempt, detail: str, *, eligible_at: float, now: float | None = None,
+                      sent: bool = True) -> Task:
         """The runner gives an attempt up: a timeout, an adapter failure, the
         owner's voice. The attempt is spent. A read is requeued with backoff,
         a sent mutation waits for reconciliation, and an exhausted allowance
-        fails the task where the owner can see why."""
+        fails the task where the owner can see why. ``sent=False`` is the
+        runner's word that the intent never left: a failed precondition, a
+        deadline passed; the intent is closed as not applied and the
+        mutation may be planned again."""
         stamp, eligible = _clock(now), _clock(eligible_at)
         _text(detail, 'abandonment explanation')
         def write() -> Task:
             assert self._db is not None
             task, stored = self._live(owner, attempt)
-            uncertain = stored.phase == 'dispatched' and stored.step.kind == 'mutation'
+            uncertain = stored.phase == 'dispatched' and stored.step.kind == 'mutation' and sent
+            if stored.phase == 'dispatched' and stored.step.kind == 'mutation' and not sent:
+                self._db.execute("UPDATE intents SET resolution='not_applied',resolved_at=?,resolved_by='runner' WHERE attempt_id=? AND resolution IS NULL",
+                                 (stamp, attempt.id))
             self._db.execute('UPDATE attempts SET phase=?,updated_at=? WHERE id=?', ('unknown' if uncertain else 'interrupted', stamp, attempt.id))
             self._db.execute('UPDATE tasks SET attempts=attempts+1 WHERE id=?', (task.id,))
             task = self._get(owner, task.id)

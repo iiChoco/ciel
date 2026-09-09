@@ -59,6 +59,8 @@ class TaskController:
         self.setups = setups
         """What the adapters offer the owner to approve; the Chart form's fields."""
         self._asker: Asker | None = None
+        self.execution = False
+        """Whether a runner exists here: a resumed or answered task is then queued, not parked."""
         self.store: TaskStore | None = None
         self.unavailable = 'Tasks are disabled.' if not config.enabled else 'Task storage is starting.'
 
@@ -248,6 +250,6 @@ class TaskController:
             if not isinstance(task_id, str) or not task_id:
                 raise ValueError('A task ID is required.')
             task = await store.owner_control(binding.origin.owner, task_id, operation, revision=revision,
-                                             question_id=args.get('question_id'), answer=args.get('answer'),
+                                             question_id=args.get('question_id'), answer=args.get('answer'), execution=self.execution,
                                              fence=binding.fence, record=lambda t: self._record(operation, t))
         return {'task': asdict(task)}

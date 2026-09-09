@@ -988,6 +988,7 @@ class Pipeline:
                 lambda: self._task_controller.store,
                 lease=self._brain.lease,
                 backend=AgentSdkExtractor(config.tasks.extraction_model or config.brain.model),
+                journal=self._journal,
             )
         self._task_controller = TaskController(
             config.tasks, self._journal,
@@ -995,6 +996,7 @@ class Pipeline:
             setups=self._task_runner.setups if self._task_runner is not None else (),
         )
         self._task_controller.bind_approval(self._approve_grant)
+        self._task_controller.execution = self._task_runner is not None
         bind_tasks(self._task_controller, self._brain._task_authority.capture)
         if self._web_link is not None:
             self._web_link.bind_tasks(self._task_controller)

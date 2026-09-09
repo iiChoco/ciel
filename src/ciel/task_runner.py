@@ -27,6 +27,16 @@ an extraction — when the owner speaks, the pipeline interrupts it: the step
 is cancelled, the attempt is spent, the task is requeued with backoff. A
 plain read is left to finish; it holds nothing anyone is waiting for.
 
+**A mutation is written down before it is sent, and never sent twice on a
+guess.** The adapter plans the payload under a claimed attempt; the runner
+digests it, journals the intent, and asks the store for authority — the
+grant at its activated revision, or the owner's approval of this exact
+payload — and only then dispatches, once, under a timeout. A failed
+precondition or a passed deadline is an unsent attempt, planned again. A
+timeout, an exception, or the owner's voice after the send is an outcome
+nobody knows: the task waits for reconciliation, where the adapter is asked
+what happened, and after enough reads that cannot tell, the owner is.
+
 **Giving up is recorded, never retried blindly.** A timeout, an adapter's
 exception, a cancellation: each abandons the attempt through the store,
 which charges the allowance and requeues, waits for reconciliation, or
@@ -37,15 +47,20 @@ it did not observe.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Iterable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, Protocol
 
 from ciel.brain.extract import ExtractionBackend, ExtractionError, ExtractionLimits, Lease, extract_json
 from ciel.config import TasksConfig
-from ciel.tasks import (Attempt, Evidence, FeatureRecord, GrantSetup, Namespace, RecordSet, Step, Task, TaskConflict, TaskLimit,
-                        TaskStore, TaskStoreError, WaitReason)
+from ciel.tasks import (Attempt, DerivedOrigin, Evidence, FeatureRecord, GrantSetup, Intent, Namespace, NoAuthority, RecordSet, Step,
+                        Task, TaskConflict, TaskLimit, TaskStore, TaskStoreError, WaitReason)
+
+if TYPE_CHECKING:
+    from ciel.journal import ActionJournal
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +108,37 @@ class StepContext:
     extraction_available: bool
 
 
+@dataclass(frozen=True, slots=True)
+class Plan:
+    """What a mutation would send, planned under a claimed attempt and read
+    back from the target before anything is authorized."""
+
+    payload: dict[str, Any]
+    preconditions: dict[str, Any]
+    """What the adapter observed the target to be; the send must fail if it moved."""
+    recipe: dict[str, Any]
+    """The adapter's own instructions for reconciling: an idempotency key, a lookup."""
+    verify: Step
+    """The read that verifies the effect afterwards; a mutation never completes on its own word."""
+
+
+@dataclass(frozen=True, slots=True)
+class MutationResult:
+    evidence: tuple[Evidence, ...] = ()
+    records: RecordSet | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Reconciliation:
+    verdict: Literal['applied', 'not_applied', 'unknown']
+    evidence: tuple[Evidence, ...] = ()
+    detail: str = ''
+
+
+class PreconditionFailed(Exception):
+    """The target moved between the plan and the send; nothing was sent."""
+
+
 class TaskAdapter(Protocol):
     namespace: Namespace | None
     operations: frozenset[str]
@@ -101,7 +147,20 @@ class TaskAdapter(Protocol):
     async def read(self, context: StepContext) -> Outcome: ...
 
 
-Result = Literal['done', 'checkpointed', 'waiting', 'asked', 'abandoned', 'refused', 'stale']
+class WritingAdapter(TaskAdapter, Protocol):
+    """An adapter that can be granted mutations declares how it plans, sends,
+    and reconciles them; one without these never has a mutation dispatched."""
+
+    async def plan(self, context: StepContext) -> Plan: ...
+    async def mutate(self, context: StepContext, intent: Intent, plan: Plan) -> MutationResult: ...
+    async def reconcile(self, context: StepContext, intent: Intent) -> Reconciliation: ...
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+
+
+Result = Literal['done', 'checkpointed', 'waiting', 'asked', 'abandoned', 'refused', 'stale', 'dispatched', 'reconciled']
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,12 +173,14 @@ class StepReport:
 class TaskRunner:
     def __init__(self, config: TasksConfig, store: Callable[[], TaskStore | None], adapters: Iterable[TaskAdapter] = (), *,
                  lease: Lease | None = None, backend: ExtractionBackend | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, journal: "ActionJournal | None" = None) -> None:
         self._config = config
         self._store = store
         self._lease = lease
         self._backend = backend
         self._clock = clock
+        self._journal = journal
+        """Inverse; a mutation whose intent cannot be journaled is not sent."""
         self._by_operation: dict[str, TaskAdapter] = {}
         self._adapters: list[TaskAdapter] = []
         for adapter in adapters:
@@ -180,12 +241,14 @@ class TaskRunner:
             return
         try:
             tasks = await store.eligible(self._config.owner, now=now, limit=1)
+            uncertain = await store.reconcilable(self._config.owner, limit=1)
         except (TaskStoreError, TaskConflict, ValueError):
             log.debug('task eligibility could not be read', exc_info=True)
             self._ready, self._oldest = False, None
             return
-        self._ready = bool(tasks)
-        self._oldest = tasks[0].eligible_at if tasks else None
+        stamps = [t.eligible_at for t in tasks] + [t.updated_at for t, _, _ in uncertain]
+        self._ready = bool(stamps)
+        self._oldest = min(stamps) if stamps else None
 
     # ── what the ladder enacts ────────────────────────────────────────────────
 
@@ -219,13 +282,19 @@ class TaskRunner:
             return None
         stamp = self._clock() if now is None else now
         try:
-            tasks = await store.eligible(self._config.owner, now=stamp, limit=1)
+            uncertain = await store.reconcilable(self._config.owner, limit=1)
+            tasks = () if uncertain else await store.eligible(self._config.owner, now=stamp, limit=1)
         except TaskStoreError:
             log.warning('task store unavailable; no step taken', exc_info=True)
             return None
-        if not tasks:
+        if uncertain:
+            # An outcome nobody knows comes before any new step: the world may
+            # already hold an effect the runner must not add to.
+            report = await self._reconcile(store, *uncertain[0], stamp)
+        elif tasks:
+            report = await self._run(store, tasks[0], stamp)
+        else:
             return None
-        report = await self._run(store, tasks[0], stamp)
         self.reports.append(report)
         del self.reports[:-32]
         self._next_refresh = 0.0
@@ -244,8 +313,9 @@ class TaskRunner:
         adapter = self._by_operation.get(step.operation)
         if adapter is None:
             return await self._wait(store, task, 'resource', f'no adapter serves {step.operation}', now)
-        if step.kind == 'mutation':
-            return await self._wait(store, task, 'resource', 'mutation dispatch is not available yet', now)
+        writer = all(hasattr(adapter, name) for name in ('plan', 'mutate', 'reconcile'))
+        if step.kind == 'mutation' and not writer:
+            return await self._wait(store, task, 'resource', f'the adapter for {step.operation} cannot dispatch a mutation', now)
         namespace = adapter.namespace
         if namespace is not None and not store.namespace_supported(namespace.name):
             return await self._wait(store, task, 'resource', f'records for {namespace.name} are unsupported by this runtime', now)
@@ -257,6 +327,8 @@ class TaskRunner:
             return await self._wait(store, task, 'resource', 'the adapter could not prepare this step', now)
         if preparation.wait is not None:
             return await self._wait(store, task, preparation.wait[0], preparation.wait[1], now)
+        if step.kind == 'mutation':
+            return await self._dispatch(store, task, adapter, records, now)  # type: ignore[arg-type]
         try:
             attempt = await store.claim(owner, task.id, task.revision, now=now)
             attempt = await store.mark_dispatched(owner, attempt, now=now)
@@ -277,16 +349,128 @@ class TaskRunner:
             return await self._abandon(store, task, attempt, 'the read failed', now)
         return await self._settle(store, task, attempt, outcome, now)
 
+    async def _dispatch(self, store: TaskStore, task: Task, adapter: WritingAdapter, records: tuple[FeatureRecord, ...], now: float) -> StepReport:
+        """One mutation: plan, journal, authorize, send once, verify by a read."""
+        owner = self._config.owner
+        step = task.next_step
+        try:
+            attempt = await store.claim(owner, task.id, task.revision, now=now)
+        except (TaskConflict, TaskLimit) as exc:
+            return StepReport(task.id, 'stale', str(exc))
+        context = StepContext(task, attempt, records, now, self._extractor(store, attempt), self._backend is not None and self._lease is not None)
+        try:
+            plan = await asyncio.wait_for(adapter.plan(context), self._config.step_timeout_s)
+            payload_digest, precondition_digest = _digest(plan.payload), _digest(plan.preconditions)
+        except asyncio.CancelledError:
+            await self._abandon(store, task, attempt, 'interrupted by the owner while planning', now)
+            raise
+        except Exception as exc:  # noqa: BLE001 - nothing was sent; the plan failed
+            log.warning('adapter could not plan task %s', task.id, exc_info=True)
+            return await self._abandon(store, task, attempt, f'the plan failed: {type(exc).__name__}', now)
+        ref = None
+        if self._journal is not None:
+            ref = self._journal.record(tool=f'task_{step.operation}',
+                                       args={'task_id': task.id, 'attempt_id': attempt.id, 'target': step.target,
+                                             'payload_digest': payload_digest, 'precondition_digest': precondition_digest},
+                                       note='Dispatch intent recorded before the send; the store holds the authority and the outcome.')
+        if ref is None:
+            return await self._abandon(store, task, attempt, 'the journal could not record the intent; nothing was sent', now)
+        authorized_at = self._clock()
+        try:
+            intent = await store.authorize(owner, attempt, step.operation, step.target, payload_digest, precondition_digest,
+                                           {**plan.recipe, 'verify': {'kind': plan.verify.kind, 'operation': plan.verify.operation,
+                                                                       'target': plan.verify.target, 'arguments': list(plan.verify.arguments)}},
+                                           ref, now=now)
+        except NoAuthority as exc:
+            if isinstance(task.origin, DerivedOrigin) or task.origin.approval_ref is not None:
+                try:
+                    await store.park(owner, attempt, 'external', str(exc), now=now)
+                except TaskConflict:
+                    return StepReport(task.id, 'stale', 'the attempt was no longer current')
+                return StepReport(task.id, 'waiting', str(exc))
+            prompt = f'{task.specification.outcome}: {step.operation} on {step.target} — approve?'
+            try:
+                await store.ask_approval(owner, attempt, prompt, payload_digest, now=now)
+            except TaskConflict:
+                return StepReport(task.id, 'stale', 'the attempt was no longer current')
+            return StepReport(task.id, 'asked', prompt)
+        except (TaskConflict, TaskLimit, ValueError) as exc:
+            return StepReport(task.id, 'stale', str(exc))
+        # Authorization moved the task's revision; the attempt the store now
+        # holds names it, and every later write must name the same one.
+        attempt = next(a for a in await store.attempts(owner, task.id) if a.id == attempt.id)
+        if self._clock() - authorized_at >= self._config.dispatch_deadline_s:
+            # Elapsed on the runner's own clock: the store's deadline stamp is
+            # the same bound written down, for anyone reading the record.
+            return await self._abandon(store, task, attempt, 'the dispatch deadline passed before the send', now, sent=False)
+        try:
+            result = await asyncio.wait_for(adapter.mutate(context, intent, plan), self._config.mutation_timeout_s)
+        except PreconditionFailed as exc:
+            return await self._abandon(store, task, attempt, f'the target moved before the send: {exc}', now, sent=False)
+        except asyncio.CancelledError:
+            await self._abandon(store, task, attempt, 'interrupted by the owner after the send', now)
+            raise
+        except asyncio.TimeoutError:
+            return await self._abandon(store, task, attempt, 'the send timed out; its outcome is unknown', now)
+        except Exception:  # noqa: BLE001 - the adapter's failure is logged without its payload
+            log.warning('adapter mutation failed for task %s', task.id, exc_info=True)
+            return await self._abandon(store, task, attempt, 'the send failed; its outcome is unknown', now)
+        stamp = self._after(now)
+        try:
+            current = await store.observe(owner, attempt, result.evidence, now=stamp)
+            await store.checkpoint(owner, current.id, current.revision, plan.verify, eligible_at=stamp, now=stamp, records=result.records)
+            return StepReport(task.id, 'dispatched', f'sent; verifying by {plan.verify.operation}')
+        except (TaskConflict, ValueError, TaskLimit) as exc:
+            log.warning('mutation outcome refused for task %s: %s', task.id, exc)
+            return await self._abandon(store, task, attempt, 'the send returned an outcome the store refused; its effect is unknown', now)
+
+    async def _reconcile(self, store: TaskStore, task: Task, attempt: Attempt, intent: Intent, now: float) -> StepReport:
+        """Ask the adapter what became of an effect nobody saw land; never resend."""
+        owner = self._config.owner
+        adapter = self._by_operation.get(intent.operation)
+        if adapter is None or not hasattr(adapter, 'reconcile'):
+            return StepReport(task.id, 'waiting', f'no adapter can reconcile {intent.operation}')
+        namespace = adapter.namespace
+        try:
+            records = await store.records(owner, namespace.name) if namespace is not None and store.namespace_supported(namespace.name) else ()
+        except TaskStoreError:
+            records = ()
+        context = StepContext(task, attempt, records, now, self._extractor(store, attempt), False)
+        try:
+            outcome = await asyncio.wait_for(adapter.reconcile(context, intent), self._config.step_timeout_s)  # type: ignore[attr-defined]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a failed read tells nothing; it is counted, not acted on
+            log.warning('reconciliation read failed for task %s', task.id, exc_info=True)
+            outcome = Reconciliation('unknown', detail=f'the reconciliation read failed: {type(exc).__name__}')
+        stamp = self._after(now)
+        try:
+            if outcome.verdict in ('applied', 'not_applied'):
+                verify = intent.recipe.get('verify')
+                next_step = Step(verify['kind'], verify['operation'], verify['target'], tuple(tuple(p) for p in verify['arguments'])) \
+                    if outcome.verdict == 'applied' and isinstance(verify, dict) else None
+                after = await store.resolve(owner, attempt, outcome.verdict, outcome.evidence, by='adapter', now=stamp, next_step=next_step)
+                return StepReport(task.id, 'reconciled', f'{outcome.verdict} ({after.status})')
+            noted = await store.note_reconcile(owner, attempt, outcome.detail or 'the read could not tell', now=stamp)
+            if noted.reconcile_reads >= self._config.max_reconcile_reads:
+                prompt = (f'{task.specification.outcome}: I sent {intent.operation} on {intent.target} but never saw whether it landed, '
+                          f'and {noted.reconcile_reads} checks could not tell. Did it happen?')
+                await store.ask_reconciliation(owner, attempt, prompt, now=stamp)
+                return StepReport(task.id, 'asked', prompt)
+            return StepReport(task.id, 'waiting', outcome.detail or 'the read could not tell')
+        except (TaskConflict, TaskLimit, ValueError) as exc:
+            return StepReport(task.id, 'stale', str(exc))
+
     def _after(self, now: float) -> float:
         """A stamp no earlier than the step's own clock: a caller may run the
         runner ahead of wall time, and the store will not take evidence
         observed after the moment it is recorded."""
         return max(now, self._clock())
 
-    async def _abandon(self, store: TaskStore, task: Task, attempt: Attempt, detail: str, now: float) -> StepReport:
+    async def _abandon(self, store: TaskStore, task: Task, attempt: Attempt, detail: str, now: float, *, sent: bool = True) -> StepReport:
         stamp = self._after(now)
         try:
-            after = await store.abandon(self._config.owner, attempt, detail, eligible_at=stamp + self._config.retry_backoff_s, now=stamp)
+            after = await store.abandon(self._config.owner, attempt, detail, eligible_at=stamp + self._config.retry_backoff_s, now=stamp, sent=sent)
         except TaskConflict:
             return StepReport(task.id, 'stale', 'the attempt was no longer current')
         return StepReport(task.id, 'abandoned', f'{detail} ({after.status})')
@@ -341,4 +525,5 @@ class TaskRunner:
         return extract
 
 
-__all__ = ['Outcome', 'Preparation', 'StepContext', 'StepReport', 'TaskAdapter', 'TaskRunner']
+__all__ = ['MutationResult', 'Outcome', 'Plan', 'PreconditionFailed', 'Preparation', 'Reconciliation', 'StepContext', 'StepReport',
+           'TaskAdapter', 'TaskRunner', 'WritingAdapter']

@@ -93,6 +93,17 @@ CREATE = Step('mutation', 'calendar.create', 'calendar:primary', (('when', 'frid
 LOOK = Step('read', 'calendar.create', 'calendar:primary')
 
 
+def strip_dispatch(db: sqlite3.Connection) -> None:
+    """What a store from before schema six looks like: no intents, no approvals, and questions without a kind."""
+    db.executescript('''
+        DROP TABLE approvals; DROP TABLE intents;
+        CREATE TABLE questions_old (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL,
+            prompt TEXT NOT NULL, choices_json TEXT NOT NULL, step_json TEXT, answer TEXT, answered_revision INTEGER);
+        INSERT INTO questions_old SELECT id,task_id,revision,prompt,choices_json,step_json,answer,answered_revision FROM questions;
+        DROP TABLE questions; ALTER TABLE questions_old RENAME TO questions;
+    ''')
+
+
 def opened(directory: Path, **kwargs: object) -> TaskStore:
     store = TaskStore(config(directory, **kwargs))
     store.register(NAMESPACE)
@@ -409,6 +420,7 @@ async def probe_migration(root: Path) -> None:
         task = await store.create(Origin(OWNER, 'request-1', 'voice', ingress_ids=('voice:1',)), child_spec(), LOOK, now=7000)
     check('this SQLite can build a version-three fixture', sqlite3.sqlite_version_info >= (3, 35))
     db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
+    strip_dispatch(db)
     for row in db.execute('SELECT id,request_json FROM tasks').fetchall():
         request = json.loads(row[1])
         request['origin'] = {k: v for k, v in request['origin'].items() if k not in ('kind', 'approval_ref')}
@@ -422,7 +434,7 @@ async def probe_migration(root: Path) -> None:
         version = db.execute('PRAGMA user_version').fetchone()[0]
         db.close()
         check('a version-three store opens as the current version with every task in place and its origin saying it was human',
-              version == 5 and lifted.status == 'queued' and lifted.origin == task.origin and lifted.origin.kind == 'human')
+              version == 6 and lifted.status == 'queued' and lifted.origin == task.origin and lifted.origin.kind == 'human')
         same = await store.create(Origin(OWNER, 'request-1', 'voice', ingress_ids=('voice:1',)), child_spec(), LOOK, now=7001)
         check('a repeated request still finds its migrated task', same.id == task.id)
         grant, mandate = await activate(store, now=7002)
@@ -430,6 +442,7 @@ async def probe_migration(root: Path) -> None:
         open_draft = await draft(store, 7003)
     print('\nversion four is lifted, not reset')
     db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
+    strip_dispatch(db)
     db.executescript('ALTER TABLE grant_drafts DROP COLUMN limits_json; ALTER TABLE grant_drafts DROP COLUMN outcome; '
                      'ALTER TABLE grant_drafts DROP COLUMN namespace; PRAGMA user_version=4;')
     db.commit()
@@ -439,8 +452,8 @@ async def probe_migration(root: Path) -> None:
         version = db.execute('PRAGMA user_version').fetchone()[0]
         db.close()
         drafts = {d.id: d for d in await store.grant_drafts(OWNER)}
-        check('a version-four store opens as version five: the open draft is discarded, the activated one keeps its history, the grant stands',
-              version == 5 and drafts[open_draft.id].status == 'discarded' and drafts[open_draft.id].revision == open_draft.revision + 1
+        check('a version-four store opens as the current version: the open draft is discarded, the activated one keeps its history, the grant stands',
+              version == 6 and drafts[open_draft.id].status == 'discarded' and drafts[open_draft.id].revision == open_draft.revision + 1
               and any(d.status == 'activated' for d in drafts.values()) and (await store.mandates(OWNER))[0].status == 'active')
         check('a lifted store takes a new draft with every field', (await draft(store, 7004)).status == 'draft')
 

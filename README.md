@@ -1363,8 +1363,10 @@ records, and the isolated extraction call, landed on 2026-09-08 and is
 described under durable tasks below. The second milestone's records, two
 kinds of origin, grant drafts, standing grants, mandates, and derived tasks,
 landed on 2026-09-09, and the Chart grant form with the broker's approval
-followed the same day; nothing derives work under a grant until an adapter
-offers one. The revised plan specifies derived-task origins, a private Chart grant form,
+followed the same day, and the third milestone, dispatch intent, guarded
+mutation dispatch, and reconciliation, landed on 2026-09-09 as well; nothing
+derives work under a grant until an adapter offers one, and no adapter can
+write yet. The revised plan specifies derived-task origins, a private Chart grant form,
 versioned feature records, a grant-less preview task, one task per operation
 on a persistent event record with inert proposals for changes the grant does
 not cover, and an isolated extraction call sharing the ordinary model-turn
@@ -1397,11 +1399,46 @@ has come and gives it exactly one step. An adapter serves a set of operations;
 its `prepare` is pure and may say wait, its `read` observes the target and
 returns evidence and what should happen next: completion when the evidence
 matches the criteria, a checkpoint with a delay, an external or resource wait,
-or a question for the owner. A mutation step is not dispatched by this runner
-at all; it waits, visibly, for the authorized dispatch phase that arrives with
-the foundation's third milestone. An operation no adapter serves waits the
-same way. No adapter ships yet: the probes supply a synthetic one, and the
-first real ones belong to the inbox feature.
+or a question for the owner. A mutation step is dispatched only through an
+adapter that declares how it plans, sends, and reconciles one; a mutation
+whose adapter cannot, or an operation no adapter serves, waits visibly. No
+adapter ships yet: the probes supply synthetic ones, and the first real ones
+belong to the inbox feature.
+
+**Nothing is sent that was not first written down.** For a mutation the
+runner claims the attempt, has the adapter plan the payload against what it
+reads of the target now, digests the payload and those preconditions,
+writes the intent to the action journal, and asks the store for authority:
+a derived task's grant, at the revision its mandate was activated with,
+active and unexpired and covering the operation and the target; a
+proposal's task's approval; or, for any other owner task, an approval the
+owner gave to this exact payload. Nothing else is authority, and the check
+is made at the send, every time. The store commits the intent, the
+operation and exact target, both digests, the authority, the journal
+reference, and a deadline in the same write that marks the attempt
+dispatched. Then the adapter sends, once, under `mutation_timeout_s`, and
+the effect is verified by the read the plan named before anything
+completes. A target that moved between the plan and the send, or a passed
+`dispatch_deadline_s`, is an unsent attempt: the intent closes as not
+applied and the mutation is planned again. A runtime with no journal sends
+nothing. A human task with no standing authority asks the owner, in the
+task's own question, to approve this action; approve dispatches it once,
+cancel ends it, and a changed payload asks again.
+
+**An outcome nobody knows is reconciled, never resent.** A timeout, an
+exception, the owner's voice, or a process death after the send leaves the
+attempt uncertain and the task waiting for reconciliation, ahead of any
+new step. The runner asks the adapter what happened, read-only: applied
+resolves the intent, records the evidence, returns the retry allowance the
+uncertainty had charged, and queues the verifying read; not applied
+reopens the mutation for a fresh plan under fresh authority; a read that
+cannot tell is counted on the intent, and after `max_reconcile_reads` the
+owner is asked in two exact words, whose answer resolves it the same way.
+A grant revoked after the send still lets the effect be reconciled and
+refuses the next send. A task the owner cancelled while uncertain has the
+effect recovery finds recorded on it and stays cancelled. An edit the
+owner made to the target after the effect is read, not overwritten. With
+a runner present, a resumed or answered task is queued rather than parked.
 
 One exception keeps a task from starving: one that has waited longer than
 `task_aging_s` moves ahead of a *nonurgent* Vigil nudge. An urgent one, the
@@ -1572,6 +1609,9 @@ max_feature_records = 4096  # records one adapter namespace may hold per owner
 max_grant_children = 256    # finite tasks one standing mandate may derive over its life
 max_grant_per_window = 32   # derivations per window, counted from the persisted window start
 max_grant_lifetime_s = 2592000.0  # the longest a grant may run from approval to expiry
+dispatch_deadline_s = 60.0  # a committed intent unsent past this is abandoned, not sent late
+mutation_timeout_s = 60.0   # the longest one send may take before its outcome is unknown
+max_reconcile_reads = 3     # reads that cannot tell before the owner is asked
 extraction_model = ""       # empty: the brain's model
 extraction_timeout_s = 90.0
 extraction_max_chars = 32000
@@ -1605,8 +1645,8 @@ its wait/failure policy explicitly. The size limit bounds each serialized
 request, next step, observation batch, and private view. Enabling controls does
 not start scheduling; `runner` does.
 
-This is schema version five. Version-two, -three, and -four stores are lifted
-at open with every task in place, an open version-four draft discarded rather
+This is schema version six. Version-two through -five stores are lifted at
+open with every task in place, an open version-four draft discarded rather
 than guessed at; version-one stores and newer stores are refused without
 migration or reset. Choose a fresh dedicated directory for these
 controls; keep an existing store intact. The database, its full rollback-journal
@@ -1932,6 +1972,7 @@ uv run --no-sync python scripts/probe_tasks.py       # records, owner controls, 
 uv run --no-sync python scripts/probe_task_runner.py # a synthetic adapter: one step, restart, fencing, giving up, human input wins, unsupported records
 uv run --no-sync python scripts/probe_extraction.py  # the isolated call: bounds, lease, timeout, cancellation, schema check, the client with nothing attached
 uv run --no-sync python scripts/probe_task_authority.py # drafts, grants, mandates, derived work, the form's draft and the broker's yes, the v3 and v4 lifts
+uv run --no-sync python scripts/probe_task_dispatch.py  # a mutation sent once: intent, authority, reconciliation, the owner's word, process kills; a fake remote
 uv run --no-sync python scripts/probe_task_tools.py  # real SDK dispatcher, turn authority, cancellation, drain debt
 uv run --no-sync python scripts/probe_task_wire.py   # two private Chart sockets, controls, conflicts, reconnect, a draft and its private approval
 uv run --no-sync python scripts/probe_task_wire.py --live  # synthetic task states in Chart; temporary storage
@@ -2017,10 +2058,10 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `music.py` | Spotify on the Mac, through one narrow AppleScript door |
 | `spotify.py` | Spotify Web API — browser login, search and Connect playback from the brain's host |
 | `projects.py` | Atlas — durable working state per project |
-| `tasks.py` | Private task records, atomic owner controls, questions, evidence, recovery, eligibility, abandonment, namespaced feature records, grant drafts, standing grants, mandates, and derived work; the store dispatches nothing |
+| `tasks.py` | Private task records, atomic owner controls, questions, evidence, recovery, eligibility, abandonment, namespaced feature records, grant drafts, standing grants, mandates, derived work, dispatch intents, and approvals; the store dispatches nothing |
 | `task_context.py` | Turn authority captured by in-process tools and fenced through commit |
 | `task_controls.py` | Shared private owner controller, offline PR-watch validation, namespace registration, the grant form's drafts and approval, mandate and grant controls, the runtime-only derive path, and control journaling |
-| `task_runner.py` | The bounded runner: one read step for the oldest eligible task, the adapter contract, abandonment, and the human-input interrupt |
+| `task_runner.py` | The bounded runner: one step for the oldest eligible task, the adapter contracts for reads and for mutations, guarded dispatch, reconciliation, abandonment, and the human-input interrupt |
 | `brain/extract.py` | One isolated model call per extraction: a client with nothing attached, the turn lease, and the schema checked twice |
 | `transcript.py` | Trace — the record of the path actually taken |
 | `reload.py` | Analytic Continuation — watch the source, re-exec, resume |

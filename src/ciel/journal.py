@@ -133,8 +133,12 @@ class ActionJournal:
         response: str | None = None,
         snapshot: str | None = None,
         note: str | None = None,
-    ) -> None:
+    ) -> str | None:
+        """Append one entry. Returns its reference, or None when the journal
+        could not be written: a caller that must correlate an action with
+        this record (a task's dispatch intent) treats None as a refusal."""
         entry = {
+            "ref": uuid.uuid4().hex,
             "ts": time.time(),
             "when": datetime.now().isoformat(timespec="seconds"),
             "tool": tool,
@@ -161,6 +165,8 @@ class ActionJournal:
             self._prune_snapshots(dropped, kept)
         except OSError:
             log.warning("could not write the action journal", exc_info=True)
+            return None
+        return entry["ref"]
 
     # ── reading ──────────────────────────────────────────────────────────────
 

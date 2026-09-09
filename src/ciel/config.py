@@ -2133,6 +2133,18 @@ class TasksConfig:
     max_grant_lifetime_s: float = 30 * 86400.0
     """The longest a standing grant may run from approval to expiry."""
 
+    dispatch_deadline_s: float = 60.0
+    """How long a committed intent may wait to be sent; past it the attempt
+    is abandoned unsent and the mutation planned again under fresh authority."""
+
+    mutation_timeout_s: float = 60.0
+    """The longest one adapter mutation may take; past it the outcome is
+    unknown and the task waits for reconciliation rather than retrying."""
+
+    max_reconcile_reads: int = 3
+    """Reconciliation reads that may come back unable to tell before the
+    owner is asked what happened."""
+
     extraction_model: str = ""
     """The model the isolated extraction call uses; empty means the brain's."""
 

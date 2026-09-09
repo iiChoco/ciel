@@ -19,7 +19,7 @@ reconciliation, or fails the task, and feature records with a namespace:
 validated write-sets, expected revisions, a per-namespace allowance, write-sets
 riding a checkpoint, adapter-owned migration at open, unsupported and unknown
 namespaces preserved untouched, a failed migration rolled back, and a
-version-two store lifted through three and four to five with every task in place and
+version-two store lifted through every version to the current one with every task in place and
 its origin saying it was human. No actual tool,
 model, mic, network, or user's runtime state is used.
 
@@ -312,6 +312,17 @@ async def probe_lifecycle(root: Path) -> None:
     await refused('a shared directory is refused instead of having its permissions changed',opened.start(),TaskStoreError)
     await opened.close()
     check('a refused shared directory is left alone',stat.S_IMODE(directory.stat().st_mode)==0o755 and not list(directory.iterdir()))
+
+
+def strip_dispatch(db: sqlite3.Connection) -> None:
+    """What a store from before schema six looks like: no intents, no approvals, and questions without a kind."""
+    db.executescript('''
+        DROP TABLE approvals; DROP TABLE intents;
+        CREATE TABLE questions_old (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL,
+            prompt TEXT NOT NULL, choices_json TEXT NOT NULL, step_json TEXT, answer TEXT, answered_revision INTEGER);
+        INSERT INTO questions_old SELECT id,task_id,revision,prompt,choices_json,step_json,answer,answered_revision FROM questions;
+        DROP TABLE questions; ALTER TABLE questions_old RENAME TO questions;
+    ''')
 
 
 def kill() -> None:
@@ -727,6 +738,7 @@ async def probe_migration(root: Path) -> None:
         await store.checkpoint(OWNER, task.id, seen.revision, READ, eligible_at=200, now=105)
     check('this SQLite can build a version-two fixture', sqlite3.sqlite_version_info >= (3, 35))
     db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
+    strip_dispatch(db)
     db.executescript('''
         DROP TABLE derivations; DROP TABLE mandates; DROP TABLE grants; DROP TABLE grant_drafts;
         DROP TABLE feature_records; DROP TABLE feature_namespaces;
@@ -739,15 +751,15 @@ async def probe_migration(root: Path) -> None:
         db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
         version = db.execute('PRAGMA user_version').fetchone()[0]
         db.close()
-        check('a version-two store opens as version five with every task in place and the new allowance at its configured value',
-              version == 5 and lifted.status == 'queued' and lifted.next_step == READ and lifted.polls == 1
+        check('a version-two store opens as the current version with every task in place and the new allowance at its configured value',
+              version == 6 and lifted.status == 'queued' and lifted.next_step == READ and lifted.polls == 1
               and lifted.model_calls == 0 and lifted.max_model_calls == 5)
         check('the lifted origin says it was human and a repeated request finds its task',
               lifted.origin.kind == 'human' and (await create(store)).id == task.id)
         view = await store.owner_view(OWNER)
         check('a lifted store lists no mandates and no grants yet', view['mandates'] == [] and view['grants'] == [])
     db = sqlite3.connect(cfg.directory / 'tasks.sqlite3')
-    db.execute('PRAGMA user_version=6')
+    db.execute('PRAGMA user_version=7')
     db.close()
     try:
         async with TaskStore(cfg):
