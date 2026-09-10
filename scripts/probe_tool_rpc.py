@@ -449,11 +449,95 @@ async def probe_process_cleanup(config: Config) -> None:
         await pair.close()
 
 
+async def probe_documents(config: Config) -> None:
+    print("\nthe Mac's bound documents")
+    from ciel.brain.tools import projects as project_tools
+    from ciel.project_work import RemoteWorkbench, WorkLimits
+    from ciel.projects import ProjectStore
+
+    home = Path(tempfile.mkdtemp(prefix="ciel-rpc-home-")) / "home"
+    course = home / "Berkeley" / "H104" / "hw03"
+    course.mkdir(parents=True)
+    (course / "hw03.tex").write_text("\\begin{numedquestion} One. \\begin{framed} Done. \\end{framed} \\end{numedquestion}\n\\input{parts/two}\n")
+    (course / "parts").mkdir()
+    (course / "parts" / "two.tex").write_text("\\begin{numedquestion} Two. \\end{numedquestion}\n")
+    (home / "elsewhere.tex").write_text("\\begin{numedquestion} Elsewhere. \\end{numedquestion}\n")
+    (course / "notes.pdf").write_bytes(b"%PDF-1.4")
+    (course / "id_rsa").write_text("secret")
+    opened: list[list[str]] = []
+
+    class Ran:
+        returncode = 0
+        stderr = ""
+
+    def runner(args, **kwargs):
+        opened.append(list(args))
+        return Ran()
+
+    with patch.object(Path, "home", return_value=home):
+        pair = Pair(config)
+        pair.executor._open_runner = runner
+        remote = RemoteBindings(pair.server, config)
+        data, note = await remote.mac.read_document(str(course / "hw03.tex"), 100000)
+        check("a document under home is read as bytes through the spoke", data is not None and b"numedquestion" in data and note is None)
+        (home / ".ciel").mkdir()
+        (home / ".ciel" / "config.toml").write_text("[x]\n")
+        with patch.object(pair.executor, "_config", replace(config, state_dir=home / ".ciel")):
+            for path, why in ((str(home / ".ciel" / "config.toml"), "state directory"), (str(course / "id_rsa"), "off limits"),
+                              (str(course / "notes.pdf"), "not a document type"), ("relative.tex", "absolute"), ("/etc/hosts", "home folder")):
+                try:
+                    await remote.mac.read_document(path, 100000)
+                    check(f"the spoke refuses {why}", False)
+                except Exception as exc:  # noqa: BLE001 - the refusal is the sentence
+                    check(f"the spoke refuses a document {why}", "refused on the Mac" in str(exc) and why.split()[0] in str(exc))
+        data, note = await remote.mac.read_document(str(course / "hw03.tex"), 10)
+        check("a document past the bound is not read, in words", data is None and "larger than 10" in note)
+        data, note = await remote.mac.read_document(str(course / "missing.tex"), 1000)
+        check("a missing document is said, not raised", data is None and "does not exist" in note)
+
+        said = await remote.mac.open_document(str(course / "hw03.tex"), "TeXShop")
+        check("open goes through the Mac's open with the app named", said == "opened hw03.tex with TeXShop" and opened[-1][:3] == ["/usr/bin/open", "-a", "TeXShop"])
+        said = await remote.mac.open_document("https://example.test/hw03.pdf", "")
+        check("a URL opens the page in the browser", said == "opened the page" and opened[-1] == ["/usr/bin/open", "https://example.test/hw03.pdf"])
+        said = await remote.mac.open_document(str(course / "nope.tex"), "")
+        check("a path that is not there is not opened, in words", said.startswith("not opened") and len(opened) == 2)
+        said = await remote.mac.open_document(str(config.state_dir / "config.toml"), "")
+        check("nothing under the state directory is opened", said.startswith("refused") and len(opened) == 2)
+        try:
+            await remote.mac.open_document(str(course / "hw03.tex"), "Tex Shop; rm")
+            check("an opener with a space or a shell character is refused", False)
+        except Exception as exc:  # noqa: BLE001
+            check("an opener with a space or a shell character is refused", "one app name" in str(exc))
+
+        store = ProjectStore(config.state_dir / "projects")
+        store.write("analysis", "hw03 open", description="H104")
+        store.bind("analysis", "folder", str(course.parent))
+        store.bind("analysis", "solution", str(course / "hw03.tex"), key="hw03", current=True, opener="TeXShop")
+        store.bind("analysis", "solution", str(home / "elsewhere.tex"), key="away")
+        project_tools.bind_projects(store)
+        project_tools.bind_workbench(RemoteWorkbench(remote.mac), WorkLimits(max_bytes=100000, max_includes=4, include_depth=2))
+        out = text_of(await project_tools.project_progress.handler({"project": "analysis"}))
+        check("project_progress reads the current solution through the Mac, follows the include within the bound folder, and reports both questions",
+              "2 questions: 1 written, 0 in progress, 1 not started" in out and "- 2 [question] not started" in out and "two.tex" in out
+              and "Revisions read: hw03.tex" in out and "quoted data" in out)
+        out = text_of(await project_tools.project_progress.handler({"project": "analysis", "key": "away"}))
+        check("a bound document outside the project's folders is not read: the roots are the registered folder",
+              "outside the folders bound" in out)
+        out = text_of(await project_tools.open_document.handler({"project": "analysis", "role": "solution"}))
+        check("open_document opens the current solution with its opener", out.endswith("opened hw03.tex with TeXShop") and opened[-1][2] == "TeXShop")
+        pair.leave()
+        out = text_of(await project_tools.project_progress.handler({"project": "analysis"}))
+        check("with the Mac gone, the reading says so instead of reading the server", "could not be reached" in out or "not connected" in out)
+        project_tools.bind_workbench(None)
+        await pair.close()
+
+
 async def main() -> None:
     tmp = Path(tempfile.mkdtemp())
     config = make_config(tmp)
     await probe_senses(config)
     await probe_mac(config)
+    await probe_documents(config)
     await probe_edges(config)
     await probe_snapshots(config)
     await probe_process_cleanup(config)

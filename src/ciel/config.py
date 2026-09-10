@@ -785,6 +785,15 @@ class ProjectsConfig:
     a role. Past this the owner unbinds one first; a project with more
     places than that is two projects."""
 
+    max_document_bytes: int = 2_000_000
+    """The largest bound document a reading takes, per file."""
+
+    max_includes: int = 20
+    """Includes one reading follows in all, within the project's folders."""
+
+    include_depth: int = 3
+    """How deep an include of an include is followed."""
+
 
 @dataclass(frozen=True, slots=True)
 class JournalConfig:

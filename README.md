@@ -1623,9 +1623,36 @@ a guess. `bind_resource`, `select_resource`, `unbind_resource`, and
 found in a listing is something to ask about, not to bind — and only the
 private brain has them. A file from before this date loads exactly as it
 did, its prose untouched, until it is bound; a rename keeps the old name
-as an alias. `scripts/probe_atlas.py` drives all of it. What Ciel then
-*observes* about a bound resource is the [project-awareness
+as an alias. `scripts/probe_atlas.py` drives all of it.
+
+**Pull it up, and where did I leave off.** `open_document` opens a bound
+resource where the owner is — the current one of the role asked for, in
+the app its binding names or the Mac's default, a URL in the browser —
+and `project_progress` reads the bound document now and answers from it:
+which questions or sections have an answer written, are in progress, or
+are not started, each with its line and the words it rests on. The
+readers (`readers.py`) are deterministic passes, never a compile or a
+macro: LaTeX by the template's own environments — `numedquestion`,
+`alphaparts`, `framed`, both spellings, comments dropped, verbatim
+opaque, the unused `\answerbox` read as not started, a box that only
+repeats the statement read as not started, a TODO as in progress — and
+Markdown by headings. Counts describe what is written, never correctness
+or effort, and a roster read from the working file alone says its
+completeness is unknown. Includes are followed only within the folders
+bound to the project — the owner naming the folder is what makes it
+readable, not the brain's workspace guard — up to `max_includes` and
+`include_depth`, each file within `max_document_bytes`; a reference that
+escapes or fails is a gap named in the reading. The hands are the
+*workbench* (`project_work.py`): on the hub, the spoke's two new
+operations, `project.read` and `project.open`, which re-check the path
+against the Mac's own home, state directory, credential names, and
+document suffixes whatever the hub said; in the single process, the
+filesystem and `open`. A hub without its spoke says the Mac is not
+reachable rather than reading the server. Readings are answered live;
+keeping them and watching for change is the [project-awareness
 plan](design/2026-09-09-project-awareness-plan.md)'s next step.
+`scripts/probe_readers.py` drives the readers, and the documents ride in
+`probe_atlas.py` and `probe_tool_rpc.py`.
 
 ```toml
 [projects]
@@ -1635,6 +1662,9 @@ max_index_entries = 30      # projects named in every system prompt; close the r
 max_state_chars = 4000      # an opened project's state, whole; more is refused, not truncated
 log_tail = 15               # log lines returned on open; the file keeps them all
 max_resources = 24          # places one project may be bound to
+max_document_bytes = 2000000 # the largest bound document a reading takes
+max_includes = 20           # includes one reading follows, within the project's folders
+include_depth = 3           # how deep an include of an include is followed
 ```
 
 ### Quick notes
@@ -2512,7 +2542,8 @@ uv run --no-sync python scripts/probe_speaker.py     # Barn Door: diagnostic pol
 uv run --no-sync python scripts/probe_files.py       # file/search boundaries and session credentials
 uv run --no-sync python scripts/probe_tool_rpc.py    # Mac snapshots, undo, and process cancellation
 uv run scripts/probe_closure.py       # Closure + Atlas: rotation, turn lock, atomic writes
-uv run scripts/probe_atlas.py         # Atlas bindings: ids, aliases, rename, resources, resolution
+uv run scripts/probe_atlas.py         # Atlas bindings: ids, aliases, rename, resources, resolution, documents
+uv run scripts/probe_readers.py       # the readers: LaTeX by the template's environments, Markdown by headings
 uv run scripts/probe_vigil.py         # Vigil: queue, policy, presence, the Witness guard
 uv run scripts/probe_discord.py       # the Discord lane's scripted checks
 uv run scripts/probe_discord.py --live  # connect for real and echo your DMs
@@ -2587,7 +2618,9 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `timers.py` | Timers and alarms, ringing or held while muted |
 | `music.py` | Spotify on the Mac, through one narrow AppleScript door |
 | `spotify.py` | Spotify Web API — browser login, search and Connect playback from the brain's host |
-| `projects.py` | Atlas — durable working state per project |
+| `projects.py` | Atlas — durable working state per project, bound to where the work lives |
+| `readers.py` | What a document says about where the work stands, read as data: LaTeX, Markdown |
+| `project_work.py` | The workbench: a bound document read within the project's folders and opened where the owner is |
 | `email_calendar.py` | Events from email: the inbox as a source, a message as bounded data, candidates held to the message, and the preview adapter |
 | `tasks.py` | Private task records, atomic owner controls, questions, evidence, recovery, eligibility, abandonment, namespaced feature records, grant drafts, standing grants, mandates, derived work, dispatch intents, and approvals; the store dispatches nothing |
 | `task_context.py` | Turn authority captured by in-process tools and fenced through commit |

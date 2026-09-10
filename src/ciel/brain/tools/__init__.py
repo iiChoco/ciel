@@ -39,7 +39,7 @@ from ciel.brain.tools.memory import MEMORY_TOOLS, bind_store
 from ciel.brain.tools.messages import MESSAGE_TOOLS, SEND_TOOLS
 from ciel.brain.tools.messages import bind_client as bind_messages
 from ciel.brain.tools.oura import OURA_TOOLS, bind_oura
-from ciel.brain.tools.projects import PROJECT_TOOLS, bind_projects
+from ciel.brain.tools.projects import PROJECT_TOOLS, bind_projects, bind_workbench
 from ciel.brain.tools.screen import SCREEN_TOOLS, bind_screen
 from ciel.brain.tools.spotify import SPOTIFY_ACTIONS, SPOTIFY_TOOLS, bind_spotify
 from ciel.brain.tools.tasks import TASK_TOOLS, bind_tasks
@@ -147,6 +147,17 @@ def build_tool_server(
             config.projects.max_resources,
         )
         bind_projects(projects)
+        # The hands on the bound documents: the Mac through the hub's
+        # remote, or this machine. A hub without its spoke keeps the tools
+        # and answers that the Mac is not reachable.
+        from ciel.brain.permissions import forbidden_names
+        from ciel.project_work import LocalWorkbench, RemoteWorkbench, WorkLimits
+
+        limits = WorkLimits(config.projects.max_document_bytes, config.projects.max_includes, config.projects.include_depth)
+        if remote is not None:
+            bind_workbench(RemoteWorkbench(remote.mac), limits)
+        else:
+            bind_workbench(LocalWorkbench(state_dir=config.state_dir, forbidden=forbidden_names(config)), limits)
     else:
         # Same reasoning as memory: an always-unavailable tool wastes turns.
         tools = [t for t in tools if t not in PROJECT_TOOLS]

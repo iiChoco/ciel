@@ -205,10 +205,67 @@ async def tool_checks(root: Path) -> None:
     check("a bad binding reaches the model as words", "needs a locator" in text(await tools.bind_resource.handler({"project": "real analysis", "role": "draft", "locator": ""})))
 
 
+async def document_checks(root: Path) -> None:
+    print("\nthe documents")
+    from ciel.brain.tools import projects as tools
+    from ciel.project_work import LocalWorkbench, WorkLimits, check_document_path, observe, open_target
+
+    home = root / "home"
+    course = home / "Math" / "H104" / "hw03"
+    course.mkdir(parents=True)
+    (course / "hw03.tex").write_text("\\begin{numedquestion} One. \\begin{framed} TODO \\end{framed} \\end{numedquestion}\n\\input{more}\n\\input{../../../outside}\n")
+    (course / "more.tex").write_text("\\begin{numedquestion} Two. \\begin{framed} Written. \\end{framed} \\end{numedquestion}\n")
+    (home / "outside.tex").write_text("\\begin{numedquestion} Outside. \\end{numedquestion}\n")
+    (course / "draft.md").write_text("# Draft\n\n## Aims\n\n## Method\n\nwritten\n")
+    state = root / "state"
+    state.mkdir()
+    (state / "config.toml").write_text("[x]\n")
+    bench = LocalWorkbench(home=home, state_dir=state, forbidden=frozenset({"id_rsa"}))
+    store = ProjectStore(root / "doc-projects")
+    tools.bind_projects(store)
+    tools.bind_workbench(bench, WorkLimits(max_bytes=10000, max_includes=3, include_depth=2))
+    text = lambda r: r["content"][0]["text"]
+    store.write("analysis", "hw03", description="H104")
+    check("nothing bound: the tools say to ask and bind", "ask the owner where the work lives" in text(await tools.project_progress.handler({"project": "analysis"})))
+    store.bind("analysis", "folder", str(course.parent))
+    store.bind("analysis", "solution", str(course / "hw03.tex"), key="hw03", current=True)
+    store.bind("analysis", "draft", str(course / "draft.md"))
+    store.bind("analysis", "handout", "https://example.test/hw03.pdf")
+    out = text(await tools.project_progress.handler({"project": "h104" if False else "analysis", "role": "solution"}))
+    check("a reading follows the include inside the bound folder, not the one that escapes it, and names the gap",
+          "2 questions: 1 written, 1 in progress, 0 not started" in out and "more.tex" in out and "../../../outside: included but not readable" in out)
+    check("the Markdown draft reads by its own reader", "3 sections: 1 written, 0 in progress, 2 not started" in text(await tools.project_progress.handler({"project": "analysis", "role": "draft"})))
+    check("a URL resource is opened, not read", "opened, not read" in text(await tools.project_progress.handler({"project": "analysis", "role": "handout"})))
+    out = text(await tools.project_progress.handler({"project": "analysis", "role": "nothing"}))
+    check("a role with no resource lists what there is and asks", "has no single resource" in out and "hw03 (solution, current)" in out)
+    project = store.get("analysis")
+    observed = await observe(project, project.resource(role="solution"), bench, WorkLimits(max_bytes=10, max_includes=3, include_depth=2))
+    check("a document past the byte bound is not read, in words", observed.reading is None and "larger than 10" in observed.note)
+    store.bind("analysis", "notes", str(course / "notes.pdf"))
+    (course / "notes.pdf").write_bytes(b"%PDF")
+    check("an unsupported document can be named but not read", "no reader for .pdf" in text(await tools.project_progress.handler({"project": "analysis", "role": "notes"})))
+    for raw, why in ((str(state / "config.toml"), "state directory"), (str(home / "id_rsa"), "off limits"), ("/etc/hosts", "home folder"), ("hw03.tex", "absolute")):
+        check(f"the local bench refuses {why}", check_document_path(raw, home=home, state_dir=state, forbidden=frozenset({"id_rsa"}))[0] is None)
+    ran: list[list[str]] = []
+
+    class Ran:
+        returncode = 0
+        stderr = ""
+
+    check("open resolves the path, refuses the state directory, and says when a file is not there",
+          open_target(str(course / "hw03.tex"), "TeXShop", home=home, state_dir=state, runner=lambda a, **k: ran.append(a) or Ran()) == "opened hw03.tex with TeXShop"
+          and ran[-1][:3] == ["/usr/bin/open", "-a", "TeXShop"]
+          and open_target(str(state / "config.toml"), "", home=home, state_dir=state, runner=lambda a, **k: Ran()).startswith("refused")
+          and open_target(str(course / "gone.tex"), "", home=home, state_dir=state, runner=lambda a, **k: Ran()).startswith("not opened"))
+    tools.bind_workbench(None)
+    check("without a workbench the tools say the machine is not reachable", "not reachable" in text(await tools.open_document.handler({"project": "analysis", "role": "solution"})))
+
+
 async def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ciel-atlas-probe-") as tmp:
         store_checks(Path(tmp))
         await tool_checks(Path(tmp))
+        await document_checks(Path(tmp))
     print(f"\nall {len(CHECKS)} checks passed")
     return 0
 

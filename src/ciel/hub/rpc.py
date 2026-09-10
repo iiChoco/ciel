@@ -212,6 +212,21 @@ class RemoteMac(_Remote):
     async def list_dir(self, path: str) -> list[str]:
         return [str(r) for r in await self.call("files.list", path=path) or []]
 
+    async def read_document(self, path: str, max_bytes: int) -> tuple[bytes | None, str | None]:
+        """A project's bound document, within the spoke's own document rules."""
+        import base64
+
+        result = await self.call("project.read", path=path, max_bytes=max_bytes)
+        encoded = result.get("data")
+        if encoded is None:
+            return None, str(result.get("note") or "the document could not be read on the Mac")
+        if len(encoded) > 4 * ((max_bytes + 2) // 3):
+            raise ValueError("the Mac's document exceeded the bound")
+        return base64.b64decode(encoded, validate=True), None
+
+    async def open_document(self, target: str, opener: str = "") -> str:
+        return str(await self.call("project.open", target=target, opener=opener))
+
 
 class PresenceView:
     """Presence on the hub: the spoke's signals plus the hub's own.

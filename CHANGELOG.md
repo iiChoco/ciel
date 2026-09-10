@@ -2,6 +2,42 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — Pull it up, and where did I leave off
+
+**Why.** Step 2 of the project-awareness plan: a bound project could be
+named and its places listed, but nothing opened them or read them.
+"Pull up my analysis homework" and "where did I leave off?" are the two
+sentences the plan exists for, and both are answerable now, on demand.
+
+**What.**
+
+- *Readers, deterministic.* `readers.py` reads LaTeX by the template's
+  own environments (both spellings, comments dropped, verbatim opaque,
+  includes through a loader the caller bounds, the unused `\answerbox`
+  and a box that only repeats the statement as not started, a TODO as in
+  progress, an unclosed box as unclear with a gap) and Markdown by
+  headings. Counts describe what is written; the roster's completeness
+  is said to be unknown.
+- *The workbench.* `project_work.py` reads a bound document only within
+  the folders bound to the project and follows includes there, within
+  `[projects]` bounds; opens a path in its app or a URL in the browser.
+  Local, it is the filesystem and `open`; on the hub, the spoke's new
+  `project.read` and `project.open`, which re-check home, the state
+  directory, credential names, and document suffixes whatever the hub
+  said, and never write.
+- *Two tools.* `open_document` and `project_progress`, resolving the
+  project by alias and the resource by role or key, asking when several
+  could be meant. A hub without its spoke says so.
+
+**Probes.** `probe_readers.py 22, new: the synthetic homework's roster
+and claims, includes and their gaps, the unclosed box, Markdown sections.
+probe_atlas.py 38 → 51: nothing bound asks, includes inside the folder
+and not outside, the Markdown draft, a URL opened not read, an ambiguous
+role, the byte bound, an unsupported suffix, the local bench's refusals,
+open's rules, no workbench. probe_tool_rpc.py 62 → 76: the spoke's
+document rules end to end, open through the Mac, a reading through the
+remote following an include, the roots rule, and the Mac gone.`
+
 ## 2026-09-09 — A project is bound to the work it is about
 
 **Why.** Atlas knew a project by name and description and nothing of

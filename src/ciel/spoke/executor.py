@@ -93,6 +93,8 @@ class Executor:
             "files.snapshot": self._files_snapshot,
             "files.write": self._files_write,
             "files.list": self._files_list,
+            "project.read": self._project_read,
+            "project.open": self._project_open,
         }
 
     # ── the wire's side ──────────────────────────────────────────────────────
@@ -302,6 +304,38 @@ class Executor:
 
         await asyncio.to_thread(write)
         return f"wrote {len(str(content))} characters to {target}"
+
+    async def _project_read(self, path: str, max_bytes: int) -> dict[str, Any]:
+        """A bound document, read as data for the hub's readers. The hub
+        checked the path against the project's bindings; this side checks
+        it against its own home, state directory, credential names, and
+        the document suffixes — the workspace guard is not the rule here,
+        and neither is the hub's word alone."""
+        from ciel.project_work import check_document_path, read_document_bytes
+
+        resolved, why = check_document_path(path, home=Path.home(), state_dir=self._config.state_dir,
+                                            forbidden=forbidden_names(self._config))
+        if resolved is None:
+            raise RuntimeError(f"refused on the Mac — {why}")
+        limit = max(0, min(int(max_bytes), 8 * 1024 * 1024))
+        data, note = await asyncio.to_thread(read_document_bytes, resolved, limit)
+        if data is None:
+            return {"data": None, "note": note}
+        return {"data": base64.b64encode(data).decode("ascii"), "note": None}
+
+    async def _project_open(self, target: str, opener: str = "") -> str:
+        """Open a document or a page where the owner is. Quiet on purpose:
+        nothing is written and nothing leaves the machine; the state
+        directory is never opened, and a path that is not there is said."""
+        from ciel.project_work import open_target
+
+        opener = " ".join(str(opener or "").split())
+        if any(ch in opener for ch in " ;&|$`"):
+            raise RuntimeError("refused on the Mac — an opener is one app name")
+        return await asyncio.to_thread(open_target, str(target), opener, home=Path.home(), state_dir=self._config.state_dir, runner=self._open_runner)
+
+    _open_runner: Any = None
+    """The subprocess runner ``open`` goes through; the probes plant one."""
 
     async def _files_list(self, path: str = ".") -> list[str]:
         target = self._path(path, write=False)
