@@ -32,6 +32,10 @@ from ciel.turn import owner_origin
 
 CHECKS: list[str] = []
 NAMESPACE = Namespace('fixture-inbox', 1, lambda payload: None)
+ROW = {'key': 'candidate:fixture:0', 'state': 'needs clarification', 'title': '<img src=x onerror=alert(2)> Dinner with Sam', 'when': '2026-09-20T19:00– America/Los_Angeles',
+       'location': '', 'sender': 'sam@friends.test', 'subject': 'Dinner?', 'reason': 'an invitation; whether to attend is yours', 'unresolved': ['end'],
+       'asked': False, 'event': None, 'proposals': [], 'controls': ['inbox_add', 'inbox_dismiss']}
+"""A feature's row as the Chart shows it — with markup in the title, which must render as text."""
 SETUP = GrantSetup(NAMESPACE.name, 'Events from email', 'Confirmed dinners land on the calendar', 'hub',
                    (('calendar.create', 'add an event'), ('inbox.read', 'read the inbox')),
                    (('calendar:primary', 'Personal calendar'), ('inbox:main', 'Main inbox')),
@@ -75,6 +79,12 @@ async def request(ws: Any, identity: str, operation: str, **fields: Any) -> dict
 async def fixture(root: Path, port: int = 0) -> tuple[TaskController, HubServer, str, dict[str, Any]]:
     cfg = TasksConfig(enabled=True, directory=root / 'tasks')
     controller = TaskController(cfg, namespaces=(NAMESPACE,), setups=(SETUP,))
+    dismissed: list[str] = []
+    async def dismiss(store: Any, owner: str, args: dict[str, Any]) -> dict[str, Any]:
+        dismissed.append(str(args.get('candidate')))
+        return {'candidate': args.get('candidate'), 'decision': 'dismissed'}
+    controller.bind_feature(NAMESPACE, frozenset({'calendar.create', 'inbox.read'}), listing=lambda records: [ROW] if not dismissed else [{**ROW, 'state': 'dismissed', 'controls': []}],
+                            controls={'inbox_dismiss': dismiss})
     await controller.start()
     binding = TaskBinding(owner_origin(cfg.owner, 'web', 'seed', namespace='chart'), 1, 1)
     task = (await controller.apply(binding, 'create', {'repository': 'fixture/repository', 'pr': 12, 'checks': ['build', 'review']}))['task']
@@ -143,6 +153,12 @@ async def run(root: Path, live: bool, port: int = 0) -> None:
                 check('task frames do not enter the shared replay ring', link._ring.seq == 0)
                 listed = await request(first, 'setups', 'list')
                 check('the list view carries the form\'s setups and no drafts yet', listed['data']['setups'][0]['title'] == 'Events from email' and listed['data']['drafts'] == [])
+                check('the list view carries each feature\'s rows under the setup\'s title, controls named by the feature',
+                      listed['data']['features'] == [{'namespace': NAMESPACE.name, 'title': 'Events from email', 'rows': [ROW]}])
+                gone = await request(first, 'dismiss-row', 'inbox_dismiss', candidate=ROW['key'])
+                check('a row\'s control reaches the feature\'s own door over the wire, with no revision, and the row reads as dismissed after',
+                      gone['ok'] and gone['data']['decision'] == 'dismissed'
+                      and (await request(second, 'relist', 'list'))['data']['features'][0]['rows'][0]['state'] == 'dismissed')
                 saved = await request(first, 'draft', 'grant_draft_save', namespace=NAMESPACE.name, operations=['calendar.create'], targets=['calendar:primary'])
                 draft = saved['data']['draft']
                 check('a Chart draft is saved with the setup\'s account and limits and shows on the other view',

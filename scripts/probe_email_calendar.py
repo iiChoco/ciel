@@ -59,7 +59,7 @@ from ciel.brain.extract import ExtractionLimits
 from ciel.config import EmailCalendarConfig, JournalConfig, TasksConfig
 from ciel.email_calendar import (CANDIDATE_SCHEMA, CalendarConflict, CalendarMoved, CalendarUnavailable, Changes, EmailCalendarAdapter, NAMESPACE,
                                  RawMessage, add_request, approve_proposal_request, calendar_body, dismiss, event_id_for, extraction_payload,
-                                 interpret, normalize, preview_request, question_for, watch_request)
+                                 interpret, normalize, preview_request, question_for, roster, watch_request)
 from ciel.journal import ActionJournal
 from ciel.task_context import TaskBinding
 from ciel.task_controls import TaskController
@@ -555,6 +555,9 @@ async def probe_add_event(root: Path) -> None:
           and record['etag'] == stored['etag'])
     check('the owner reads the add as its one event and where it stands',
           'added on primary' in f.adapter.summarize(done, await store.records(OWNER, NAMESPACE.name)))
+    row = roster(await store.records(OWNER, NAMESPACE.name))[0]
+    check('the roster row for an added candidate says added on its calendar and offers nothing to press',
+          row['key'] == key and row['state'] == 'added' and row['event']['event_id'] == event_id and row['controls'] == [] and row['sender'] == 'bookings@clinic.test')
     again = await add_task(f, key, 'add-2')
     results = await f.run(again.id)
     check('asking again finds Ciel\'s own event by its id and completes without sending', results == ['checkpointed', 'done'] and calendar.inserts == 1)
@@ -885,6 +888,11 @@ async def probe_judgement(root: Path) -> None:
     check('the invitation with no end is on the edge: not added, its record carries the question, not yet asked',
           dinner_record.payload['decision'] == 'review' and 'question' in dinner_record.payload and not dinner_record.payload.get('asked_at')
           and [r.key for r in await store.owed_questions(OWNER)] == ['candidate:d1:0'])
+    rows = {row['key']: row for row in roster(records)}
+    check('the roster shows the stranger\'s event as added with no controls, and the invitation as needing clarification with add and dismiss',
+          rows['candidate:s1:0']['state'] == 'added' and rows['candidate:s1:0']['controls'] == [] and rows['candidate:s1:0']['event']['calendar'] == 'primary'
+          and rows['candidate:d1:0']['state'] == 'needs clarification' and rows['candidate:d1:0']['controls'] == ['inbox_add', 'inbox_dismiss']
+          and rows['candidate:d1:0']['subject'] == 'Dinner?' and rows['candidate:d1:0']['unresolved'] == ['end'] and rows['candidate:d1:0']['asked'] is False)
     queue = FakeQueue()
     notifier = TaskNotifier(f.tasks, lambda: f.store, lambda: queue, clock=lambda: base + 62)
     pushed = await notifier.poll_now(base + 62)
@@ -920,6 +928,9 @@ async def probe_judgement(root: Path) -> None:
     result = await dismiss(store, OWNER, remaining)
     check('a dismissal before the question was put is the answer: the record is marked asked and nothing is owed',
           result['decision'] == 'dismissed' and await store.owed_questions(OWNER) == () and await notifier.poll_now(base + 133) == 0)
+    rows = {row['key']: row for row in roster(await store.records(OWNER, NAMESPACE.name))}
+    check('the roster shows the dismissal standing, with no controls, and the asked one as asked',
+          rows[remaining]['state'] == 'dismissed' and rows[remaining]['controls'] == [] and rows['candidate:d1:0']['asked'] is True)
     await f.close()
 
 

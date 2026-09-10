@@ -2,6 +2,43 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — The candidates are in Chart
+
+**Why.** The email feature's candidates were visible only as a task's
+summary text under inspect, and only while a preview task was selected;
+a watch's findings, the plan's "views of durable state", had no place on
+the page at all.
+
+**What.**
+
+- *A feature lists its records.* `bind_feature` takes a `listing`: rows
+  from the feature's records, each naming the controls the owner may
+  press. The controller puts them in the list view under the setup's
+  title; a listing that fails is left out and the view stands.
+- *The email roster.* `roster` gives one row per dated candidate: a state
+  word of record (found, needs clarification, ready, adding, added,
+  already present, conflict, change proposed, dismissed), the title and
+  time, the sender and subject quoted, the reason, what is unsettled,
+  where it stands on the calendar, open proposals, and whether it was
+  asked about.
+- *Chart shows them.* Under Tasks, below the grants, *Events from email*
+  renders the rows as text, never markup, with Add to calendar (the same
+  finite task the voice tool makes, approval before any send), Dismiss,
+  and Approve change on open proposals. The wire admits the three inbox
+  controls by the record key they name, with no rendered revision: the
+  feature fences its own writes.
+
+**Probes.** `probe_email_calendar.py 108 → 111: an added candidate's row
+says added with nothing to press, the judgement roster shows added and
+needs-clarification rows with their controls, a dismissal stands.
+probe_task_authority.py 94 → 97: no listing means no rows, a bound
+listing's rows ride under the setup's title, a failing listing is left
+out. probe_task_wire.py 28 → 30: the wire carries the rows, markup and
+all, for the page to show as text, and a row's control reaches the
+feature's door with no revision. probe_wire.py 83 → 84: the inbox
+controls name their record and need no revision; an unknown one is
+refused.`
+
 ## 2026-09-09 — The uploads folder does not grow forever
 
 **Why.** Every file sent from the Chart was written under the workspace's

@@ -71,6 +71,7 @@ class TaskController:
         """A feature's own owner controls over its records, by operation name;
         each takes the store, the owner, and the arguments, and answers a dict."""
         self._summaries: dict[str, tuple[frozenset[str], Callable[[Task, tuple[FeatureRecord, ...]], str]]] = {}
+        self._listings: dict[str, Callable[[tuple[FeatureRecord, ...]], list[dict[str, Any]]]] = {}
         """How a feature describes a task's records to the owner: by namespace,
         the operations that mark a task as its own and the words."""
         self.execution = False
@@ -126,10 +127,13 @@ class TaskController:
                      requests: dict[str, Callable[[dict[str, Any]], Any]] | None = None,
                      controls: dict[str, Callable[[TaskStore, str, dict[str, Any]], Any]] | None = None,
                      summary: Callable[[Task, tuple[FeatureRecord, ...]], str] | None = None,
+                     listing: Callable[[tuple[FeatureRecord, ...]], list[dict[str, Any]]] | None = None,
                      activated: Callable[..., Any] | None = None, mandate_changed: Callable[..., Any] | None = None) -> None:
         """A registered feature's own doors: the finite tasks an owner turn may
         ask for (each builds a specification from the owner's arguments, in
-        application code) and the words it gives a task's records."""
+        application code), the words it gives a task's records, and the rows
+        it shows of its records in the list view (``listing``), each naming
+        the controls the owner may press on it."""
         if namespace not in self.namespaces:
             raise TaskConflict('only a registered adapter binds a feature')
         for operation, build in (requests or {}).items():
@@ -142,6 +146,8 @@ class TaskController:
             self._mandate_changed[namespace.name] = mandate_changed
         if summary is not None:
             self._summaries[namespace.name] = (frozenset(operations), summary)
+        if listing is not None:
+            self._listings[namespace.name] = listing
 
     async def view(self, binding: TaskBinding | None, task_id: str | None = None) -> dict[str, Any]:
         store = self._store(binding)
@@ -155,6 +161,17 @@ class TaskController:
         view = await store.owner_view(binding.origin.owner, task_id, fence=binding.fence)
         if task_id is None:
             view['setups'] = [asdict(setup) for setup in self.setups]
+            titles = {setup.namespace: setup.title for setup in self.setups}
+            view['features'] = []
+            for namespace, listing in self._listings.items():
+                if not store.namespace_supported(namespace):
+                    continue
+                try:
+                    rows = listing(await store.records(binding.origin.owner, namespace))
+                except Exception:  # noqa: BLE001 - a feature's rows are optional; the record is not
+                    log.warning('a feature could not list its records', exc_info=True)
+                    continue
+                view['features'].append({'namespace': namespace, 'title': titles.get(namespace, namespace), 'rows': rows})
         else:
             view['received'] = received
             task = await store.get(binding.origin.owner, task_id)

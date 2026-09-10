@@ -105,6 +105,11 @@ def probe_codec() -> None:
     check('task payloads and invalidation never enter the replay ring', not {'task.result', 'task.changed'} & wire.BROADCAST_TYPES)
     check('Chart controls need the revision they rendered', refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'pause', 'task_id': 't'}), 'c2h'))
     check('task request identities are bounded', refused(json.dumps({'type': 'task.request', 'request_id': 'r' * 257, 'operation': 'list'}), 'c2h'))
+    check('a feature\'s row control names its record and needs no rendered revision',
+          not refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'inbox_dismiss', 'candidate': 'candidate:m1:0'}), 'c2h')
+          and refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'inbox_dismiss'}), 'c2h')
+          and not refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'inbox_approve', 'proposal': 'proposal:e'}), 'c2h')
+          and refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'inbox_unknown', 'candidate': 'c'}), 'c2h'))
     check('task frame payloads are bounded', refused(json.dumps({'type': 'task.result', 'request_id': 'r', 'ok': True, 'data': {'text': 'x' * 65536}}), 'h2c'))
     check('a new draft needs no revision but names its feature, operations, and targets',
           not refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'grant_draft_save', 'namespace': 'n', 'operations': ['a'], 'targets': ['t']}), 'c2h')

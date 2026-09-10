@@ -765,6 +765,57 @@ async def dismiss(store: Any, owner: str, candidate_key: str) -> dict[str, Any]:
     return {'candidate': candidate_key, 'decision': 'dismissed'}
 
 
+_EVENT_STATES = {'added': 'added', 'updated': 'added', 'present': 'already present', 'conflict': 'conflict', 'suppressed': 'removed by you',
+                 'missing': 'missing', 'removed': 'removed', 'planned': 'adding', 'adding': 'adding'}
+
+
+def roster(records: tuple[FeatureRecord, ...], *, limit: int = 64) -> list[dict[str, Any]]:
+    """The candidates as Chart shows them: one row per dated candidate, its
+    state as a word of durable record, the message's own words quoted, and
+    the controls the owner may press. Ignored candidates are not rows; a
+    dismissed one is, so the owner sees their no stood. Newest keys first."""
+    messages = {r.payload.get('message_id'): r.payload for r in records if r.payload.get('kind') == 'message'}
+    events = {r.payload.get('candidate'): r.payload for r in records if r.payload.get('kind') == 'event'}
+    proposals: dict[str, list[dict[str, Any]]] = {}
+    for r in records:
+        if r.payload.get('kind') == 'proposal' and r.payload.get('status') == 'open':
+            proposals.setdefault(str(r.payload.get('event')), []).append({'key': r.key, 'operation': r.payload.get('operation'), 'status': 'open'})
+    rows: list[dict[str, Any]] = []
+    for r in sorted((r for r in records if r.payload.get('kind') == 'candidate'), key=lambda r: r.key, reverse=True):
+        c = r.payload
+        if c.get('decision') == 'ignored' or not c.get('start'):
+            continue
+        event = events.get(r.key)
+        open_changes = proposals.get(f'event:{r.key}', [])
+        if c.get('decision') == 'dismissed':
+            state = 'dismissed'
+        elif event is not None and event.get('status') in _EVENT_STATES:
+            state = 'change proposed' if open_changes and event.get('status') in ('added', 'updated') else _EVENT_STATES[event['status']]
+        elif c.get('decision') == 'ready':
+            state = 'ready'
+        elif c.get('unresolved'):
+            state = 'needs clarification'
+        else:
+            state = 'found'
+        placed = event is not None and event.get('status') in ('added', 'updated', 'present', 'conflict', 'planned', 'adding')
+        controls: list[str] = []
+        if c.get('decision') in ('ready', 'review') and not placed:
+            controls.append('inbox_add')
+        if c.get('decision') != 'dismissed' and not placed:
+            controls.append('inbox_dismiss')
+        message = messages.get(c.get('message_id'), {})
+        when = f"{c.get('start', '')}–{c.get('end', '')} {c.get('timezone', '')}".strip('– ')
+        rows.append({'key': r.key, 'state': state, 'title': c.get('title', ''), 'when': when, 'location': c.get('location', ''),
+                     'sender': c.get('sender', ''), 'subject': message.get('subject', ''), 'reason': c.get('reason', ''),
+                     'unresolved': list(c.get('unresolved') or []), 'asked': bool(c.get('asked_at')),
+                     'event': None if event is None else {'status': event.get('status'), 'calendar': event.get('calendar'),
+                                                          'event_id': event.get('event_id'), 'note': event.get('note', '')},
+                     'proposals': open_changes, 'controls': controls})
+        if len(rows) >= limit:
+            break
+    return rows
+
+
 def _criterion(ctx: StepContext) -> str:
     """The one criterion an inbox task completes on: the preview's or the watch's."""
     return ctx.task.specification.criteria[0].id
@@ -1352,4 +1403,4 @@ class EmailCalendarAdapter:
 __all__ = ['CANDIDATE_SCHEMA', 'Candidate', 'EmailCalendarAdapter', 'EXTRACTION_PROMPT', 'GmailInbox', 'InboxSource', 'NAMESPACE',
            'CalendarConflict', 'CalendarSource', 'CalendarUnavailable', 'GoogleCalendar', 'Normalized', 'RawMessage', 'add_request',
            'CalendarMoved', 'Changes', 'calendar_body', 'dismiss', 'event_id_for', 'extraction_payload', 'interpret', 'normalize',
-           'approve_proposal_request', 'preview_request', 'proposal_request', 'question_for', 'watch_request']
+           'approve_proposal_request', 'preview_request', 'proposal_request', 'question_for', 'roster', 'watch_request']

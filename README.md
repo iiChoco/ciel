@@ -1301,6 +1301,20 @@ never skips one. Then the queue is extracted and the watch goes round again
 after `poll_s`. When Gmail has forgotten back to the cursor, the watch lists
 the window since its anchor once, bounded by `max_messages_per_poll`, takes
 what it did not have, and anchors again, counting the resync on its record.
+**The candidates are in Chart.** Under **Tasks**, below the standing
+grants, *Events from email* lists every dated candidate as a row of durable
+record: its state in a word — *found*, *needs clarification*, *ready*,
+*adding*, *added*, *already present*, *conflict*, *change proposed*,
+*dismissed* — the event's title and time, the sender and the subject
+quoted, the decision's reason, what is unsettled, and where it stands on
+the calendar. Each row offers only the controls the feature named for it:
+**Add to calendar** makes the same finite task the voice tool would, which
+asks for the exact event's approval before anything is sent; **Dismiss** is
+the tombstone; **Approve change** on an open proposal is `approve_proposal`.
+Every string is shown as text, never as markup. The rows come from a
+`listing` the feature binds on the controller, which puts them in the list
+view under the setup's title; a listing that fails is left out and the rest
+of the view stands.
 `dismiss_candidate` is the owner's no to a candidate: a tombstone on its
 record that outlives replay, so the same message never puts it forward or
 adds it again, and a second preview of the window reads it no more.
@@ -1914,7 +1928,8 @@ persisted resume; changing public channels starts a fresh public history.
 
 Chart's **Tasks** section uses private, addressed requests and the same controller
 as the tools. It shows waits, questions, history, and evidence, including the
-last observed head and age. Controls submit the rendered revision; a conflict
+last observed head and age, and each feature's own rows (`listing` on
+`bind_feature`) with the controls the feature named. Controls submit the rendered revision; a conflict
 refreshes the view. Spoken controls read the current revision in their store
 transaction. Question answers must match the specific waiting question and an
 offered choice. An ambiguous answer leaves it waiting; cancellation makes old

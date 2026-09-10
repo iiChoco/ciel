@@ -1018,7 +1018,7 @@ class Pipeline:
         )
         self._task_controller.bind_approval(self._approve_grant)
         for adapter in feature_adapters:
-            from ciel.email_calendar import EmailCalendarAdapter, add_request, preview_request
+            from ciel.email_calendar import EmailCalendarAdapter, add_request, preview_request, roster
             if isinstance(adapter, EmailCalendarAdapter):
                 def ask_preview(args: dict[str, Any], _adapter: EmailCalendarAdapter = adapter) -> Any:
                     limit = args.get('max_messages')
@@ -1044,7 +1044,7 @@ class Pipeline:
                 self._task_controller.bind_feature(adapter.namespace, adapter.operations,
                                                    requests={'inbox_preview': ask_preview, 'inbox_add': ask_add, 'inbox_approve': ask_approve},
                                                    controls={'inbox_dismiss': dismiss_candidate},
-                                                   summary=adapter.summarize,
+                                                   summary=adapter.summarize, listing=roster,
                                                    activated=adapter.activated, mandate_changed=adapter.mandate_changed)
         # What the store owes the owner rides Vigil's queue; the notifier
         # exists even where the runner does not, since a hub with no runner

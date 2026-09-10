@@ -252,8 +252,11 @@ _TASK_IDENTITY = {
     'grant_draft_save': '', 'grant_draft_discard': 'draft_id', 'grant_approve': 'draft_id',
     'mandate_pause': 'mandate_id', 'mandate_resume': 'mandate_id', 'mandate_revoke': 'mandate_id', 'grant_revoke': 'grant_id',
     'notices_mute': '', 'notices_unmute': '',
+    'inbox_add': 'candidate', 'inbox_dismiss': 'candidate', 'inbox_approve': 'proposal',
 }
-"""Every Chart task operation and the record identity it must carry."""
+"""Every Chart task operation and the record identity it must carry. The
+inbox three are a feature's own controls: they name a record by key and
+the feature fences the write, so they carry no rendered revision."""
 
 
 # ── codec ────────────────────────────────────────────────────────────────────
@@ -296,7 +299,7 @@ def validate(frame: Any, direction: Direction) -> dict[str, Any]:
             if operation == 'grant_draft_save':
                 if not all(isinstance(v, str) and v for v in (*frame.get('operations', []), *frame.get('targets', []))) or not frame.get('namespace'):
                     raise WireError('a draft names its feature, operations, and targets')
-            needs_revision = (operation not in ('list', 'inspect', 'notices_mute', 'notices_unmute')
+            needs_revision = (operation not in ('list', 'inspect', 'notices_mute', 'notices_unmute', 'inbox_add', 'inbox_dismiss', 'inbox_approve')
                               and (operation != 'grant_draft_save' or frame.get('draft_id')))
             if needs_revision and (type(frame.get('revision')) is not int or frame['revision'] < 1):
                 raise WireError('a Chart control needs its rendered revision')

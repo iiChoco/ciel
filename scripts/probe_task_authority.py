@@ -339,6 +339,15 @@ async def probe_approval_surface(root: Path) -> None:
     binding = TaskBinding(Origin(OWNER, 'chart-turn', 'web', ingress_ids=('web:1',)), 1, 1)
     view = await controller.view(binding)
     check('the list view carries the adapters\' setups for the form', view['setups'][0]['title'] == 'Events from email' and view['drafts'] == [])
+    check('without a listing bound the view has no feature rows', view['features'] == [])
+    controller.bind_feature(NAMESPACE, frozenset({'calendar.create'}), listing=lambda records: [{'key': 'candidate:x', 'state': 'found', 'controls': []}])
+    check('a bound listing\'s rows ride the list view under the setup\'s title',
+          (await controller.view(binding))['features'] == [{'namespace': NAMESPACE.name, 'title': 'Events from email', 'rows': [{'key': 'candidate:x', 'state': 'found', 'controls': []}]}])
+    def broken(records):
+        raise RuntimeError('no words today')
+    controller.bind_feature(NAMESPACE, frozenset({'calendar.create'}), listing=broken)
+    check('a listing that fails is left out; the record is still shown', (await controller.view(binding))['features'] == [] and 'tasks' in await controller.view(binding))
+    controller.bind_feature(NAMESPACE, frozenset({'calendar.create'}), listing=lambda records: [])
     await refused('a draft names only offered operations', controller.apply(binding, 'grant_draft_save', {'namespace': NAMESPACE.name, 'operations': ['calendar.delete'], 'targets': ['calendar:primary']}), ValueError)
     await refused('a draft names only offered targets', controller.apply(binding, 'grant_draft_save', {'namespace': NAMESPACE.name, 'operations': ['calendar.create'], 'targets': ['calendar:work']}), ValueError)
     await refused('a draft needs a feature that offers a grant', controller.apply(binding, 'grant_draft_save', {'namespace': 'nobody', 'operations': ['calendar.create'], 'targets': ['calendar:primary']}), ValueError)

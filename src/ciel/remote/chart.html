@@ -439,7 +439,8 @@
   #grants { padding-top: 12px; border-top: 1px solid var(--line); margin-top: 8px; overflow-wrap: anywhere; }
   #grants h3 { font: 16px var(--serif); margin-bottom: 6px; }
   #grants p, #grants li { margin-bottom: 6px; }
-  #grants .dim { color: var(--text-dim); }
+  #grants .dim, #features .dim { color: var(--text-dim); }
+  #features .row { margin: 8px 0 0; }
   #grants form { border: 1px solid var(--line); padding: 8px 10px; margin: 8px 0; }
   #grants fieldset { border: none; padding: 0; margin: 6px 0; }
   #grants legend { color: var(--gold); font: 12px var(--mono); margin-bottom: 4px; }
@@ -496,6 +497,7 @@
   <div id="tasklist" aria-label="Saved tasks"></div>
   <section id="taskdetail" aria-label="Task details" tabindex="-1"></section>
   <section id="grants" aria-label="Standing grants" tabindex="-1"></section>
+  <section id="features" aria-label="From your features" tabindex="-1"></section>
 </details>
 
 
@@ -1195,6 +1197,7 @@ function showTask(data) {
 // alone as the ordinary confirm prompt. A yes there is the only thing that
 // makes a grant; this page never assumes one.
 const grantsEl = document.getElementById("grants");
+const featuresEl = document.getElementById("features");
 let draftEditing = null; // {id, revision, namespace, operations, targets} while a saved draft is being edited
 function grantLabel(setup, kind, value) {
   const found = (setup ? setup[kind] : []).find(([v]) => v === value);
@@ -1204,20 +1207,55 @@ function grantScope(setup, scope) {
   return scope.operations.map(o => grantLabel(setup, "operations", o)).join(", ") + " on " +
     scope.targets.map(t => grantLabel(setup, "targets", t)).join(", ");
 }
-async function grantControl(operation, fields, busyText, timeoutMs) {
+async function grantControl(operation, fields, busyText, timeoutMs, panel = grantsEl) {
   if (taskBusy) return;
   taskBusy = true;
-  grantsEl.querySelectorAll("button").forEach(b => b.disabled = true);
+  panel.querySelectorAll("button").forEach(b => b.disabled = true);
   taskNotice(busyText);
   let failure = null, result = null;
   try { result = await requestTask(operation, fields, timeoutMs); }
   catch (error) { failure = error.message; }
   finally { taskBusy = false; }
   await refreshTasks();
-  grantsEl.focus();
+  panel.focus();
   if (failure) taskNotice(failure + " The view has been refreshed where available.", true);
   else if (operation === "grant_approve") taskNotice(result.approved ? "Grant approved; the mandate is active." : "Not approved. The draft is kept.", !result.approved);
+  else if (operation === "inbox_add") taskNotice("Saved as a task; it asks you to approve the exact event before anything is sent.");
+  else if (operation === "inbox_approve") taskNotice("Saved as a task; the change is sent at the event's current version.");
   return result;
+}
+// ── the features' own rows: candidates from email, and whatever comes next ──
+// Every string here is the feature's reading of someone else's mail; it is
+// shown as text, never as markup, and the controls are the ones it named.
+function showFeatures(data) {
+  featuresEl.replaceChildren();
+  const features = (data.features || []).filter(f => f.rows.length);
+  if (!features.length) return;
+  for (const feature of features) {
+    taskText(featuresEl, "h3", feature.title);
+    for (const row of feature.rows) {
+      const line = taskText(featuresEl, "p", `${row.state} · ${row.title} · ${row.when}${row.location ? " at " + row.location : ""}`);
+      line.className = "row";
+      const about = [`from ${row.sender || "unknown"}`, row.subject ? `"${row.subject}"` : "", row.reason || ""].filter(Boolean).join(" · ");
+      taskText(featuresEl, "p", about + (row.unresolved.length ? ` · unsettled: ${row.unresolved.join(", ")}` : "")
+        + (row.event ? ` · ${row.event.status} on ${row.event.calendar}${row.event.note ? " (" + row.event.note + ")" : ""}` : "")).className = "dim";
+      const actions = document.createElement("div");
+      actions.className = "task-actions";
+      featuresEl.appendChild(actions);
+      const button = (label, handler) => {
+        const b = taskText(actions, "button", label);
+        b.type = "button";
+        b.disabled = taskBusy;
+        b.addEventListener("click", handler);
+      };
+      if (row.controls.includes("inbox_add")) button("Add to calendar", () => grantControl("inbox_add", {candidate: row.key}, "Saving the add…", undefined, featuresEl));
+      if (row.controls.includes("inbox_dismiss")) button("Dismiss", () => grantControl("inbox_dismiss", {candidate: row.key}, "Dismissing…", undefined, featuresEl));
+      for (const proposal of row.proposals) {
+        button(`Approve ${proposal.operation === "calendar.delete" ? "removal" : "change"}`,
+               () => grantControl("inbox_approve", {proposal: proposal.key}, "Approving…", undefined, featuresEl));
+      }
+    }
+  }
 }
 function showGrants(data) {
   grantsEl.replaceChildren();
@@ -1344,6 +1382,7 @@ async function refreshTasks() {
       });
     }
     showGrants(data);
+    showFeatures(data);
     if (selectedTask) {
       const detail = await requestTask("inspect", {task_id: selectedTask});
       if (generation === taskRefreshGeneration) showTask(detail);
