@@ -531,6 +531,34 @@ async def probe_documents(config: Config) -> None:
         project_tools.bind_workbench(None)
         await pair.close()
 
+        print("\nthe Mac is told what to watch")
+        from ciel.proactive.resources import ResourceWatcher
+
+        class Sink:
+            def __init__(self):
+                self.n = 0
+            def next_id(self):
+                self.n += 1
+                return str(self.n)
+            def push(self, event):
+                return True
+
+        watcher = ResourceWatcher(config.state_dir / "spoke-resources.json", Sink(), poll_s=60.0)
+        pair = Pair(config, executor_kwargs={"resources": watcher})
+        remote = RemoteBindings(pair.server, config)
+        result = await remote.mac.watch_resources([str(course / "hw03.tex"), str(course / "notes.pdf"), "/etc/hosts", str(course / "parts" / "two.tex")])
+        check("the watched set replaces the last, each path judged by the Mac's own document rules, the refused ones named",
+              result["watching"] == 2 and set(result["refused"]) == {str(course / "notes.pdf"), "/etc/hosts"}
+              and watcher.watched() == sorted([str((course / "hw03.tex").resolve()), str((course / "parts" / "two.tex").resolve())]))
+        await pair.close()
+        bare = Pair(config)
+        try:
+            await RemoteBindings(bare.server, config).mac.watch_resources([str(course / "hw03.tex")])
+            check("a Mac with projects off says it is not watching", False)
+        except Exception as exc:  # noqa: BLE001
+            check("a Mac with projects off says it is not watching", "not watching" in str(exc))
+        await bare.close()
+
 
 async def main() -> None:
     tmp = Path(tempfile.mkdtemp())

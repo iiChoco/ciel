@@ -65,6 +65,7 @@ class Executor:
         locator: "Locator | None" = None,
         watcher: "WorkWatcher | None" = None,
         calendar: Any | None = None,
+        resources: Any | None = None,
     ) -> None:
         self._config = config
         self._send = send
@@ -72,6 +73,8 @@ class Executor:
         self._locator = locator
         self._watcher = watcher
         self._calendar = calendar
+        self._resources = resources
+        """The resource watcher (``proactive/resources.py``): the hub names what to watch."""
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._workspace: WorkspaceGuard | None = (
             WorkspaceGuard.from_config(config)
@@ -95,6 +98,7 @@ class Executor:
             "files.list": self._files_list,
             "project.read": self._project_read,
             "project.open": self._project_open,
+            "project.watch": self._project_watch,
         }
 
     # ── the wire's side ──────────────────────────────────────────────────────
@@ -336,6 +340,23 @@ class Executor:
 
     _open_runner: Any = None
     """The subprocess runner ``open`` goes through; the probes plant one."""
+
+    async def _project_watch(self, paths: list[str]) -> dict[str, Any]:
+        """The hub's watched set, replaced whole. Each path passes the same
+        document rules a read does; one that does not is dropped and named,
+        never watched on the hub's word alone."""
+        from ciel.project_work import check_document_path
+
+        if self._resources is None:
+            raise RuntimeError("the Mac is not watching documents (projects are off here)")
+        accepted: list[str] = []
+        refused: list[str] = []
+        for raw in list(paths or [])[:500]:
+            resolved, _ = check_document_path(str(raw), home=Path.home(), state_dir=self._config.state_dir,
+                                              forbidden=forbidden_names(self._config))
+            (accepted if resolved is not None else refused).append(str(resolved) if resolved is not None else str(raw))
+        watching = self._resources.set_paths(accepted)
+        return {"watching": watching, "refused": refused}
 
     async def _files_list(self, path: str = ".") -> list[str]:
         target = self._path(path, write=False)

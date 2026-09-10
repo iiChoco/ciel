@@ -198,6 +198,15 @@ class Spoke:
                     config.sections, self._publish, mail=config.mail, world=self._world,
                 )
             )
+        self._resources = None
+        if config.projects.enabled:
+            # The bound documents the hub asks after: a stat-plus-hash poll,
+            # settled changes published like the other Mac watchers' events.
+            from ciel.proactive.resources import ResourceWatcher
+
+            self._resources = ResourceWatcher(config.state_dir / "spoke-resources.json", self._publish,
+                                              poll_s=config.projects.watch_poll_s, max_bytes=config.projects.max_document_bytes)
+            self._watchers.append(self._resources)
         messages = None
         if config.messages.enabled:
             from ciel.messages import MessagesClient
@@ -207,6 +216,7 @@ class Spoke:
             config, self._link.send,
             messages=messages, locator=self._locator,
             watcher=self._work_watcher, calendar=self._calendar,
+            resources=self._resources,
         )
         self._heartbeat = Heartbeat(
             self._link.send, self._presence, self._work_watcher,

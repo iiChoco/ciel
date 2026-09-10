@@ -794,6 +794,21 @@ class ProjectsConfig:
     include_depth: int = 3
     """How deep an include of an include is followed."""
 
+    watch_poll_s: float = 15.0
+    """On the Mac, between looks at the bound documents a standing grant
+    covers: a stat each, a hash when the stat moved, one event when a
+    change has held still for two looks."""
+
+    observe_poll_s: float = 60.0
+    """On the brain's host, between the watch task's looks at the settled
+    changes on record; each new one derives a bounded reading."""
+
+    max_reads_per_day: int = 200
+    """Readings a standing grant asks to keep in a day; [tasks] caps it."""
+
+    reading_lifetime_s: float = 30 * 86400.0
+    """How long the readings grant runs before it expires; [tasks] caps it."""
+
 
 @dataclass(frozen=True, slots=True)
 class JournalConfig:

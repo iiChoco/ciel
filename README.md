@@ -1648,11 +1648,37 @@ operations, `project.read` and `project.open`, which re-check the path
 against the Mac's own home, state directory, credential names, and
 document suffixes whatever the hub said; in the single process, the
 filesystem and `open`. A hub without its spoke says the Mac is not
-reachable rather than reading the server. Readings are answered live;
-keeping them and watching for change is the [project-awareness
-plan](design/2026-09-09-project-awareness-plan.md)'s next step.
-`scripts/probe_readers.py` drives the readers, and the documents ride in
-`probe_atlas.py` and `probe_tool_rpc.py`.
+reachable rather than reading the server. `scripts/probe_readers.py`
+drives the readers, and the documents ride in `probe_atlas.py` and
+`probe_tool_rpc.py`.
+
+**Readings are kept under a grant, and only then.** Opening or remembering
+a project never starts watching it. Under **Tasks → Standing grants**, the
+feature *Readings of bound documents* offers one target per project with a
+readable local document; the owner narrows to the projects to watch, and
+the yes starts a watch task under the mandate. The Mac then watches those
+projects' bound documents — a stat every `watch_poll_s`, a hash only when
+the stat moved, one event when a change has held still for two looks, so
+a burst of saves is one event and an unchanged save is none — and reports
+each settled change up the wire by path and content hash, nothing else,
+mirrored in `~/.ciel/spoke-resources.json` so a restart catches up on what
+moved while it was down. On the hub the change is a `change` record in the
+`atlas` namespace; every `observe_poll_s` the watch derives one bounded
+reading task per hash no reading has, and that task reads the document
+through the workbench and keeps the reading — the summary, every followed
+file's hash, the roster within `max_items` — only if the change it was
+derived for is still the newest on record. A save during a reading makes
+that reading superseded, and the newer hash gets its own; a file gone
+derives nothing and the last reading stands at its age. The Mac is told
+about each include a reading followed, and told the whole set again every
+time it seats. A resource change is never news: it goes to the adapter,
+not to Vigil, and nothing is spoken. `open_project` then shows the last
+readings with their age; `project_progress` still reads afresh. Pausing
+the mandate pauses the watch, revoking the grant ends it and the Mac
+watches nothing. In the single process the same watcher runs beside the
+work watcher, on this machine. `scripts/probe_project_watch.py` drives the
+watcher and the adapter; the wire and the routing ride in
+`probe_tool_rpc.py` and `probe_turns.py`.
 
 ```toml
 [projects]
@@ -1665,6 +1691,10 @@ max_resources = 24          # places one project may be bound to
 max_document_bytes = 2000000 # the largest bound document a reading takes
 max_includes = 20           # includes one reading follows, within the project's folders
 include_depth = 3           # how deep an include of an include is followed
+watch_poll_s = 15.0         # on the Mac, between looks at the watched documents
+observe_poll_s = 60.0       # on the brain's host, between the watch task's looks at settled changes
+max_reads_per_day = 200     # what the readings grant asks for; [tasks] caps it
+reading_lifetime_s = 2592000.0 # thirty days; [tasks] caps it
 ```
 
 ### Quick notes
@@ -2544,6 +2574,7 @@ uv run --no-sync python scripts/probe_tool_rpc.py    # Mac snapshots, undo, and 
 uv run scripts/probe_closure.py       # Closure + Atlas: rotation, turn lock, atomic writes
 uv run scripts/probe_atlas.py         # Atlas bindings: ids, aliases, rename, resources, resolution, documents
 uv run scripts/probe_readers.py       # the readers: LaTeX by the template's environments, Markdown by headings
+uv run scripts/probe_project_watch.py # readings kept under a grant: the Mac's resource watcher and the project adapter
 uv run scripts/probe_vigil.py         # Vigil: queue, policy, presence, the Witness guard
 uv run scripts/probe_discord.py       # the Discord lane's scripted checks
 uv run scripts/probe_discord.py --live  # connect for real and echo your DMs
@@ -2620,7 +2651,8 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `spotify.py` | Spotify Web API — browser login, search and Connect playback from the brain's host |
 | `projects.py` | Atlas — durable working state per project, bound to where the work lives |
 | `readers.py` | What a document says about where the work stands, read as data: LaTeX, Markdown |
-| `project_work.py` | The workbench: a bound document read within the project's folders and opened where the owner is |
+| `project_work.py` | The workbench: a bound document read within the project's folders and opened where the owner is; the project adapter keeping readings under a grant |
+| `proactive/resources.py` | The resource watcher: a bound document changed on the Mac, reported by path and hash |
 | `email_calendar.py` | Events from email: the inbox as a source, a message as bounded data, candidates held to the message, and the preview adapter |
 | `tasks.py` | Private task records, atomic owner controls, questions, evidence, recovery, eligibility, abandonment, namespaced feature records, grant drafts, standing grants, mandates, derived work, dispatch intents, and approvals; the store dispatches nothing |
 | `task_context.py` | Turn authority captured by in-process tools and fenced through commit |

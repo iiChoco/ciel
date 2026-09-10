@@ -770,11 +770,30 @@ def rehydrate_schedule(
     return True
 
 
+class _ResourceSink:
+    """A queue-shaped door for the local resource watcher: a settled change
+    goes to the project adapter's ingest, and never into Vigil's queue."""
+
+    def __init__(self, adapter: Any) -> None:
+        self._adapter = adapter
+        self._n = 0
+
+    def next_id(self) -> str:
+        self._n += 1
+        return f"resource-{self._n}"
+
+    def push(self, event: Any) -> bool:
+        asyncio.get_running_loop().create_task(self._adapter.changed(dict(event.payload)))
+        return True
+
+
 class Pipeline:
     """Runs Ciel until stopped."""
 
     _shortcuts: GlobalShortcuts | None = None
     _task_notifier: TaskNotifier | None = None
+    _project_adapter: Any = None
+    _resource_watcher: Any = None
     _reload_forced = False
     _run_task: asyncio.Task[None] | None = None
     _notes: NoteWindow | None = None
@@ -1002,6 +1021,25 @@ class Pipeline:
             feature_adapters.append(EmailCalendarAdapter(
                 config.email_calendar, GmailInbox(GmailReader(config.sections.gmail_oauth_keys, config.sections.gmail_token_file)),
                 calendar=calendar, host=self._role))
+        self._project_adapter: "ProjectAdapter | None" = None
+        if config.tasks.enabled and config.tasks.runner and config.projects.enabled and self._projects is not None:
+            # Readings of bound documents, kept under a standing grant: the
+            # Mac reports settled changes, the watch derives readings. The
+            # workbench is the spoke on the hub and this machine otherwise.
+            from ciel.brain.permissions import forbidden_names
+            from ciel.project_work import LocalWorkbench, ProjectAdapter, RemoteWorkbench, WorkLimits
+
+            work_limits = WorkLimits(config.projects.max_document_bytes, config.projects.max_includes, config.projects.include_depth,
+                                     config.projects.observe_poll_s, config.projects.max_reads_per_day, config.projects.reading_lifetime_s)
+            if self._remote is not None:
+                bench: Any = RemoteWorkbench(self._remote.mac)
+                watch: Any = self._remote.mac.watch_resources
+            else:
+                bench = LocalWorkbench(state_dir=config.state_dir, forbidden=forbidden_names(config))
+                watch = self._watch_locally
+            self._project_adapter = ProjectAdapter(self._projects, bench, work_limits, host=self._role, watch=watch)
+            self._project_adapter.bind_store(lambda: self._task_controller.store, config.tasks.owner)
+            feature_adapters.append(self._project_adapter)
         if config.tasks.enabled and config.tasks.runner:
             self._task_runner = TaskRunner(
                 config.tasks,
@@ -1017,6 +1055,7 @@ class Pipeline:
             setups=self._task_runner.setups if self._task_runner is not None else (),
         )
         self._task_controller.bind_approval(self._approve_grant)
+        from ciel.project_work import ProjectAdapter
         for adapter in feature_adapters:
             from ciel.email_calendar import EmailCalendarAdapter, add_request, preview_request, roster
             if isinstance(adapter, EmailCalendarAdapter):
@@ -1046,6 +1085,11 @@ class Pipeline:
                                                    controls={'inbox_dismiss': dismiss_candidate},
                                                    summary=adapter.summarize, listing=roster,
                                                    activated=adapter.activated, mandate_changed=adapter.mandate_changed)
+            if isinstance(adapter, ProjectAdapter):
+                self._task_controller.bind_feature(adapter.namespace, adapter.operations, summary=adapter.summarize, listing=adapter.listing,
+                                                   activated=adapter.activated, mandate_changed=adapter.mandate_changed)
+                from ciel.brain.tools.projects import bind_readings
+                bind_readings(self._kept_readings)
         # What the store owes the owner rides Vigil's queue; the notifier
         # exists even where the runner does not, since a hub with no runner
         # still owes the notices it holds.
@@ -1178,6 +1222,7 @@ class Pipeline:
                 self._presence = self._remote.presence
                 self._web_link.on_event = self._on_published_event
                 self._web_link.on_presence = self._on_presence
+                self._web_link.on_spoke_seated = self._on_spoke_seated
                 if config.proactive.calendar_enabled:
                     if config.proactive.calendar_source == "google":
                         self._calendar = GoogleCalendarWatcher(config.proactive, self._events)
@@ -1201,6 +1246,14 @@ class Pipeline:
                 bind_watcher(work)
                 self._vigil_watchers.append(work)
                 self._work_watcher = work
+            if self._project_adapter is not None and self._remote is None:
+                # This machine's own bound documents: the same watcher the
+                # spoke runs, its events routed to the adapter, not to Vigil.
+                from ciel.proactive.resources import ResourceWatcher
+
+                self._resource_watcher = ResourceWatcher(config.state_dir / "resources.json", _ResourceSink(self._project_adapter),
+                                                         poll_s=config.projects.watch_poll_s, max_bytes=config.projects.max_document_bytes)
+                self._vigil_watchers.append(self._resource_watcher)
             if config.proactive.brief_time:
                 self._vigil_watchers.append(
                     ScheduleWatcher(config.proactive, self._events)
@@ -2011,10 +2064,39 @@ class Pipeline:
         log.debug("spoke cancelled turn %s (%s)", turn_id, reason or "no reason")
         asyncio.get_running_loop().create_task(self._abandon_playback(False))
 
+    def _on_spoke_seated(self) -> None:
+        """The Mac holds state the hub owns: what to watch. Resent on every seat."""
+        adapter, store = self._project_adapter, self._task_controller.store
+        if adapter is not None and store is not None:
+            asyncio.get_running_loop().create_task(adapter.sync_watch(store, self._config.tasks.owner))
+
+    async def _watch_locally(self, paths: list[str]) -> None:
+        """The single process: this machine's own resource watcher."""
+        if self._resource_watcher is not None:
+            self._resource_watcher.set_paths(paths)
+
+    async def _kept_readings(self, project_id: str) -> list[dict[str, Any]]:
+        """The readings the store keeps for one project, newest first."""
+        from ciel.project_work import NAMESPACE_NAME
+        store = self._task_controller.store
+        if store is None or self._project_adapter is None:
+            return []
+        try:
+            records = await store.records(self._config.tasks.owner, NAMESPACE_NAME)
+        except Exception:  # noqa: BLE001 - no readings is an answer
+            return []
+        found = [r.payload for r in records if r.payload.get("kind") == "reading" and r.payload.get("project") == project_id]
+        return sorted(found, key=lambda p: -float(p.get("read_at", 0)))
+
     def _on_published_event(self, raw: dict[str, Any]) -> bool:
         """A Mac watcher's event, arrived over the wire — into the queue,
         whose dedupe absorbs a resend. Malformed ones are refused loudly;
-        the publisher is code, not a user."""
+        the publisher is code, not a user. A resource change is not news:
+        it goes to the project adapter, never to Vigil, and is acked."""
+        if str(raw.get("source")) == "resource":
+            if self._project_adapter is not None:
+                asyncio.get_running_loop().create_task(self._project_adapter.changed(dict(raw.get("payload") or {})))
+            return True
         if self._events is None:
             return False
         event = ProactiveEvent(

@@ -942,6 +942,29 @@ async def probe_forced_reload() -> None:
         pass
 
 
+async def probe_resource_events() -> None:
+    print("\na resource change is not news")
+    from ciel.proactive.events import EventQueue
+    with tempfile.TemporaryDirectory() as tmp:
+        p = make_pipeline(STREAM, events=EventQueue(Path(tmp) / "events.json", 3600.0))
+        taken: list[dict] = []
+
+        class Adapter:
+            async def changed(self, payload):
+                taken.append(payload)
+
+        p._project_adapter = Adapter()
+        raw = {"source": "resource", "payload": {"path": "/Users/x/hw03.tex", "digest": "abcd"}}
+        acked = p._on_published_event(raw)
+        await asyncio.sleep(0)
+        check("a resource event goes to the project adapter, is acked, and never enters Vigil's queue",
+              acked and taken == [{"path": "/Users/x/hw03.tex", "digest": "abcd"}] and not p._events.pending)
+        p._project_adapter = None
+        check("with no adapter it is acked and dropped", p._on_published_event(raw) and not p._events.pending)
+        news = {"id": "e1", "source": "calendar", "importance": 2, "created_at": 1.0, "expires_at": None, "summary": "Standup in ten", "dedupe_key": "cal:1", "payload": {}}
+        check("other events still reach the queue", p._on_published_event(news) and p._events.pending)
+
+
 async def main() -> int:
     probe_registry()
     await probe_labels_and_rows()
@@ -958,6 +981,7 @@ async def main() -> int:
     await probe_speak_back()
     await probe_ask_first()
     await probe_forced_reload()
+    await probe_resource_events()
     print(f"\nall {len(CHECKS)} checks passed")
     return 0
 

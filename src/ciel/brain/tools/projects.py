@@ -30,6 +30,8 @@ log = logging.getLogger(__name__)
 _store: ProjectStore | None = None
 _bench: Workbench | None = None
 _limits = WorkLimits()
+_readings: Any = None
+"""``async (project_id) -> list[dict]``: the readings the store keeps, newest first; None without a store."""
 
 
 def _resource_for(args: dict[str, Any]) -> tuple[Project | None, Resource | None, str]:
@@ -97,9 +99,20 @@ async def open_project(args: dict[str, Any]) -> dict[str, Any]:
         + (" · current" if r.current else "") + (f" · opens with {r.opener}" if r.opener else "")
         for r in project.resources
     ) or "(none bound — ask the owner where the work lives, then bind_resource)"
+    kept = ""
+    if _readings is not None and project.id:
+        try:
+            latest = await _readings(project.id)
+        except Exception:  # noqa: BLE001 - the notebook stands without its readings
+            latest = []
+        if latest:
+            from ciel.project_work import age_words
+            import time as _time
+            lines = [f"- {r.get('key')}: {r.get('summary')} (read {age_words(_time.time() - float(r.get('read_at', 0)))})" for r in latest[:4]]
+            kept = "\n\n## Last readings (kept under the readings grant; project_progress reads afresh)\n" + "\n".join(lines)
     return _text(
         f"# {project.name} ({project.status})\n{project.description}\n{aliases}\n"
-        f"## State\n{project.state}\n\n## Resources\n{resources}\n\n## Recent log\n{log_block}"
+        f"## State\n{project.state}\n\n## Resources\n{resources}{kept}\n\n## Recent log\n{log_block}"
     )
 
 
@@ -316,6 +329,12 @@ def bind_projects(store: ProjectStore) -> None:
     _store = store
 
 
+def bind_readings(readings: Any) -> None:
+    """The kept readings, for open_project's last-readings lines."""
+    global _readings
+    _readings = readings
+
+
 def bind_workbench(bench: Workbench | None, limits: WorkLimits | None = None) -> None:
     """The hands that open and read bound documents: the local machine, or
     the Mac through the hub's remote. None withholds both tools' effects."""
@@ -328,5 +347,5 @@ def bind_workbench(bench: Workbench | None, limits: WorkLimits | None = None) ->
 PROJECT_TOOLS = [open_project, update_project, log_progress, bind_resource, select_resource, unbind_resource, rename_project,
                  open_document, project_progress]
 
-__all__ = ["PROJECT_TOOLS", "bind_projects", "bind_workbench", "open_project", "update_project", "log_progress",
+__all__ = ["PROJECT_TOOLS", "bind_projects", "bind_readings", "bind_workbench", "open_project", "update_project", "log_progress",
            "bind_resource", "select_resource", "unbind_resource", "rename_project", "open_document", "project_progress"]

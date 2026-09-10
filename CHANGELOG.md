@@ -2,6 +2,46 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-10 — Readings are kept under a grant
+
+**Why.** Step 3 of the project-awareness plan. A reading answered on
+demand is only as current as the question; the plan asks that a settled
+save refresh the reading silently, that a burst of saves be one, that a
+stale result never commit, and that a restart catch up — all under the
+foundation's admitted derived reads, never on the model's initiative.
+
+**What.**
+
+- *The Mac's resource watcher.* `proactive/resources.py`: a stat each
+  `watch_poll_s`, a hash when the stat moved, one event when a change has
+  held still for two looks, by path and content hash and nothing else;
+  a deletion is one event saying gone; the mirror file survives the
+  spoke's re-exec and the first poll after a start reports what moved
+  while it was down. The hub names the set through `project.watch`, each
+  path judged by the Mac's own document rules; the set is resent when
+  the spoke seats.
+- *The project adapter.* `ProjectAdapter` in the `atlas` namespace offers
+  the grant *Readings of bound documents*, one target per project with a
+  readable local document; activation starts the watch and tells the
+  Mac what to watch; a settled change is a `change` record; the watch
+  derives one reading per new hash; the reading is kept — summary,
+  every followed file's hash, the bounded roster — only if its change is
+  still the newest, else it completes superseded; the Mac is told about
+  the includes a reading followed. Pause, resume, and revoke follow the
+  mandate; revoke empties the watched set.
+- *Never news.* A resource event goes to the adapter, not to Vigil.
+  `open_project` shows the last readings with their age; Chart's feature
+  rows list them.
+
+**Probes.** `probe_project_watch.py 30, new: the watcher's settling,
+burst, unchanged, gone, restart, and mirror; the grant's targets, the
+watch under the mandate, an ignored path, the derived reading and its
+kept hashes, the include told to the Mac, the superseded reading and the
+newer one, a file gone, the rows and views, the mandate's controls, and
+no workbench. probe_tool_rpc.py 76 → 78: the watched set through the
+Mac's rules, and a Mac with projects off. probe_turns.py 99 → 102: a
+resource event is routed and acked, never queued.`
+
 ## 2026-09-09 — Pull it up, and where did I leave off
 
 **Why.** Step 2 of the project-awareness plan: a bound project could be

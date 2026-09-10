@@ -227,6 +227,10 @@ class RemoteMac(_Remote):
     async def open_document(self, target: str, opener: str = "") -> str:
         return str(await self.call("project.open", target=target, opener=opener))
 
+    async def watch_resources(self, paths: list[str]) -> dict[str, Any]:
+        """Tell the Mac which bound documents to watch; the set replaces the last."""
+        return dict(await self.call("project.watch", paths=list(paths)) or {})
+
 
 class PresenceView:
     """Presence on the hub: the spoke's signals plus the hub's own.

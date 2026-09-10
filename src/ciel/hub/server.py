@@ -80,6 +80,8 @@ class HubServer(WebLink):
         Returns whether it was new; either way the publish is acked."""
         self.on_presence: Callable[[dict[str, Any]], None] | None = None
         """The spoke's heartbeat, raw — the presence view folds it in."""
+        self.on_spoke_seated: Callable[[], None] | None = None
+        """A spoke took the seat: state the Mac must hold (what to watch) is resent."""
         self.on_fact: Callable[[dict[str, Any]], None] | None = None
         """One world fact from the spoke, raw — the world table absorbs it."""
         self.spoke_listening = False
@@ -238,6 +240,11 @@ class HubServer(WebLink):
                 self._peers.pop(old, None)
                 asyncio.get_running_loop().create_task(self._drop(old))
             log.info("spoke seated (%s)", verdict.client_id or "-")
+            if self.on_spoke_seated is not None:
+                try:
+                    self.on_spoke_seated()
+                except Exception:  # noqa: BLE001 - a hook must not unseat the spoke
+                    log.warning("the spoke-seated hook failed", exc_info=True)
             # The authoritative timer set, straight to the seat. The
             # broadcast in note_timers is deduped against the last set
             # *sent* — which a spoke that was away for the change never
