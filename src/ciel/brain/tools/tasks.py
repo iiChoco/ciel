@@ -117,8 +117,8 @@ async def preview_inbox(args: dict[str, Any]) -> dict[str, Any]:
     return await _call('inbox_preview', args)
 
 
-@tool('add_event_from_mail', 'Put one previewed candidate on the calendar, only when the owner explicitly asks: a finite task that checks the calendars for the event already present, asks the owner to approve the exact event once, adds it once under an id only Ciel would choose, and completes on a read-back. Use the candidate key from inspect_task on the preview. It never adds without that approval and never adds twice.',
-      {'type': 'object', 'properties': {'candidate': {'type': 'string'}}, 'required': ['candidate'], 'additionalProperties': False})
+@tool('add_event_from_mail', 'Put one previewed candidate on the calendar, only when the owner explicitly asks: a finite task that checks the calendars for the event already present, asks the owner to approve the exact event once, adds it once under an id only Ciel would choose, and completes on a read-back. Use the candidate key from inspect_task on the preview. It never adds without that approval and never adds twice. When the candidate is unresolved on its end time or timezone and the owner has just given it, pass `end` as YYYY-MM-DDTHH:MM in the event\'s zone and `timezone` as an IANA name; nothing else can be settled here. A held note that asks about a candidate names its key: the owner\'s yes is this call, their no is dismiss_candidate.',
+      {'type': 'object', 'properties': {'candidate': {'type': 'string'}, 'end': {'type': 'string'}, 'timezone': {'type': 'string'}}, 'required': ['candidate'], 'additionalProperties': False})
 async def add_event_from_mail(args: dict[str, Any]) -> dict[str, Any]:
     return await _call('inbox_add', args)
 

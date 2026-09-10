@@ -1222,8 +1222,9 @@ calendar under a scope the owner approves in Chart. Its first milestone, the
 preview, landed on 2026-09-09 in `email_calendar.py`, and the calendar writer,
 the inbox watch, and the standing grant followed the same day: one previewed
 candidate can be added under the owner's approval of that exact event, and,
-under a grant approved in Chart, confirmed commitments from approved senders
-are added as they arrive, with no question asked.
+under a grant approved in Chart, confirmed commitments are added as they
+arrive, with no question asked, and what is on the edge is asked at the
+start of the next conversation.
 
 **A preview is an ordinary finite task, and it writes nothing.** With
 `[email_calendar].enabled = true` beside a running task runner, a private
@@ -1242,13 +1243,14 @@ message word for word; every time must parse as a wall time in the zone the
 message names, or the owner's `timezone`, or it stays unresolved; a wall time
 daylight-saving time skipped or repeated, an end before its start, and a
 missing end are unresolved and named. Then policy, never confidence, decides:
-a confirmed commitment with nothing unresolved from an address on
-`allowed_senders` is *ready*; an invitation, an unresolved field, a citation
-that is not in the text, or a sender not on the list is *review*; a
-promotion is *ignored*. Two events in one message are two candidates. A
-sender match filters scope and certifies nothing: a display name, a matching
-address, or a header the message carries about itself is not proof it is
-genuine, and the ready reason says so.
+a confirmed commitment with nothing unresolved is *ready*; an invitation, an
+unresolved field, a citation that is not in the text, or a change to an
+event is *review*; a promotion is *ignored*. Two events in one message are
+two candidates. The sender is a criterion only when `allowed_senders` names
+some: then a confirmed commitment from an address not on it is *review* too.
+Either way a sender certifies nothing: a display name, a matching address,
+or a header the message carries about itself is not proof it is genuine,
+and the ready reason says so.
 
 **An event is added once, under a name only Ciel would choose.** With a
 `destination_calendar` configured, `add_event_from_mail` takes a candidate
@@ -1284,20 +1286,34 @@ adds it again, and a second preview of the window reads it no more.
 **Automatic means the same, without the question.** With a destination
 calendar configured, the feature offers a grant setup to Chart's *Standing
 grants* form: the operations it would be granted, the calendar and the
-mailbox as targets, the approved senders as what it acts on with the caution
-that a matching address is not proof a message is genuine, and the day's
+mailbox as targets, the senders it acts on — the list, or any sender — with
+the caution that a message reading as genuine is not proof it is, and the day's
 `max_creates_per_day` and the grant's `grant_lifetime_s` as its limits, each
 capped by `[tasks]`. The owner's yes activates the grant and its mandate, and
 the feature's first move under it is the watch, as the turn that approved.
 Each ready candidate the watch extracts is proposed as a derived add task;
 the store admits it only inside the grant, once per message, within the
 allowances, and the runner dispatches it under the grant's authority with no
-question, sending exactly what a per-action add would. A candidate that
-needs review is recorded and not derived; the owner adds it by hand or
-dismisses it. Pausing the mandate pauses the watch, resuming it resumes the
-watch, and revoking the grant ends it. An empty sender list makes automatic
-mode add nothing, which is the point: the list is built from what preview
-shows, and enrolling a sender is a new draft and a fresh approval.
+question, sending exactly what a per-action add would. Pausing the mandate
+pauses the watch, resuming it resumes the watch, and revoking the grant ends
+it.
+
+**On the edge, Ciel asks next time you talk.** A candidate the watch finds
+that is a real commitment with a gap — an invitation, an end time the email
+never gave, a zone it never named — is not added and not left to be found in
+the roster: its record carries a question, and the task notifier hands it to
+Vigil as news (importance one), so it is never spoken into an empty room and
+opens the next conversation instead, in the message's own words, quoted:
+*"An email from sam@friends.test reads as 'Dinner with Sam' on 2026-09-20 at
+19:00 — unsettled: end. Does it go on the calendar?"* Your yes is
+`add_event_from_mail`, which can now take the `end` or `timezone` you just
+gave — those two fields and no other; the date and the start are the
+message's or nothing — and writes them on the candidate's record, at the
+revision it read, with the add task. Your no is `dismiss_candidate`. Either
+answer given before the question was put retires it. At most
+`[tasks].max_held_questions` wait as held notes at once; the rest stay owed
+in the store and are asked after those, oldest first. A preview you asked
+for in person asks nothing: its roster is the answer.
 
 **A change is a proposal until the owner says so.** A later message from
 the sender of an event Ciel added, about that event by title, saying it moved
@@ -1330,7 +1346,7 @@ public lane can neither ask for a preview nor read one.
 enabled = false              # register the inbox adapter with the task runner
 mailbox = ""                 # the identity expected; empty accepts the connector's account
 timezone = ""                # the owner's IANA zone for messages that name none; empty keeps them unresolved
-allowed_senders = []         # exact addresses whose confirmed commitments are ready without review
+allowed_senders = []         # empty: any sender's confirmed commitment is ready; listed: only these are
 max_messages_per_preview = 25
 max_body_chars = 32000       # of one message's text, to the extraction call
 max_extractions_per_day = 100
@@ -1808,7 +1824,13 @@ budgets decide when and where it is said, and a spoken nudge, a text, or a
 held note read into the next conversation is recorded as sent. A notice
 that was sent is not offered again; one Vigil holds is not a failure, it is
 still owed and rides the next conversation. A delivery that failed outright
-is offered again after `notice_retry_s`. The notice switch is its own
+is offered again after `notice_retry_s`. A feature's questions ride the
+same notifier by a convention of the record: a feature record whose payload
+carries a `question` and no `asked_at` is owed, `owed_questions` lists them
+oldest key first, and the notifier hands each to Vigil as news of source
+`question` at importance one — held for the next conversation, never
+spoken into a room — marking the record asked as Vigil takes it, with at
+most `max_held_questions` waiting at once. The notice switch is its own
 control, persisted in the store and reachable from Chart and by voice as
 `mute_task_notices`; muted means nothing is offered, every task keeps
 running, and the view says so without any task reading as paused. A public
@@ -1928,6 +1950,7 @@ dispatch_deadline_s = 60.0  # a committed intent unsent past this is abandoned, 
 mutation_timeout_s = 60.0   # the longest one send may take before its outcome is unknown
 max_reconcile_reads = 3     # reads that cannot tell before the owner is asked
 notice_retry_s = 900.0      # after a delivery that reached no lane, offer the notice again
+max_held_questions = 3      # feature questions (a candidate on the edge) waiting as held notes at once
 extraction_model = ""       # empty: the brain's model
 extraction_timeout_s = 90.0
 extraction_max_chars = 32000

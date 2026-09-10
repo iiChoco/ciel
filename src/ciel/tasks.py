@@ -2530,6 +2530,31 @@ class TaskStore:
             return tuple(FeatureRecord(r['namespace'], r['record_key'], r['revision'], json.loads(r['payload_json'])) for r in rows)
         return await self._run(lambda: self._transaction(read))
 
+    async def owed_questions(self, owner: str, *, limit: int = 32) -> tuple[FeatureRecord, ...]:
+        """Feature records that carry a question the owner has not been asked.
+
+        The convention is the payload's: a non-empty ``question`` string is
+        a thing to put to the owner at the next conversation, and ``asked_at``
+        is the notifier's mark that it was. The store decides what is owed;
+        it never reads the question itself. In key order within namespace,
+        so a flood is asked oldest-key first and the cap in the notifier
+        holds."""
+        if type(limit) is not int or limit < 1:
+            raise ValueError('limit must be a positive integer')
+        def read() -> tuple[FeatureRecord, ...]:
+            assert self._db is not None
+            rows = self._db.execute("SELECT * FROM feature_records WHERE owner=? AND payload_json LIKE '%\"question\"%' ORDER BY namespace, record_key",
+                                    (owner,)).fetchall()
+            found = []
+            for r in rows:
+                payload = json.loads(r['payload_json'])
+                if isinstance(payload.get('question'), str) and payload['question'].strip() and not payload.get('asked_at'):
+                    found.append(FeatureRecord(r['namespace'], r['record_key'], r['revision'], payload))
+                    if len(found) >= limit:
+                        break
+            return tuple(found)
+        return await self._run(lambda: self._transaction(read))
+
     async def write_records(self, owner: str, records: RecordSet, *, fence: Fence | None = None) -> None:
         """A write-set on its own, for work that has no task transition to ride on."""
         self._namespace(records.namespace)

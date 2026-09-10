@@ -2222,9 +2222,13 @@ class EmailCalendarConfig:
     Empty means such a commitment stays unresolved rather than assumed."""
 
     allowed_senders: tuple[str, ...] = ()
-    """Exact addresses whose confirmed commitments are ready without review.
-    Empty by default: preview shows everything, automatic mode adds nothing.
-    A match filters scope; it is not proof the message is genuine."""
+    """Exact addresses whose confirmed commitments alone are ready without
+    review. Empty, the default, means the sender is not a criterion: any
+    message that reads as a confirmed commitment with nothing unresolved is
+    ready, and anything on the edge — an invitation, a missing end time — is
+    a question held for the next conversation. A match filters scope; it is
+    not proof the message is genuine, and with the list empty a forged
+    confirmation would be added under a grant, bounded by the day's cap."""
 
     max_messages_per_preview: int = 25
     """Messages one preview may list; the owner asks again for more."""
@@ -2317,6 +2321,11 @@ class TasksConfig:
     notice_retry_s: float = 900.0
     """How long after a delivery that failed to reach any private lane a
     notice is offered to Vigil again."""
+
+    max_held_questions: int = 3
+    """How many questions from features (a candidate on the edge of the
+    calendar policy, say) may wait as held notes for the next conversation
+    at once. The rest stay owed in the store and are asked after those."""
 
     extraction_model: str = ""
     """The model the isolated extraction call uses; empty means the brain's."""

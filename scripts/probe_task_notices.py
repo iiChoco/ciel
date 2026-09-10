@@ -15,7 +15,10 @@ switch; the event Vigil gets carries the outcome in spoken English and only
 identifiers in its payload; the detail view shows authority, unresolved
 effects, and notices with their deliveries; a version-six store is lifted
 with every notice it held still owed; and everything validates after
-reopening.
+reopening. A feature record with a question and no asked mark is owed, listed in
+key order for its owner alone; the notifier hands each to Vigil as importance-one
+news of source question, marks it asked, holds the rest under the cap, and records
+nothing for a delivered question.
 
     uv run --no-sync python scripts/probe_task_notices.py
 """
@@ -35,7 +38,7 @@ from ciel.proactive.events import ProactiveEvent
 from ciel.task_context import TaskBinding
 from ciel.task_controls import TaskController
 from ciel.task_runner import Outcome, Preparation, StepContext, TaskNotifier, TaskRunner
-from ciel.tasks import Criterion, Evidence, Namespace, Origin, Scope, Specification, Step, Task, TaskConflict, TaskStore
+from ciel.tasks import Criterion, Evidence, Namespace, Origin, RecordSet, RecordWrite, Scope, Specification, Step, Task, TaskConflict, TaskStore
 
 CHECKS: list[str] = []
 OWNER = 'fixture-owner'
@@ -82,6 +85,9 @@ class FakeQueue:
         self.keys.add(event.dedupe_key)
         self.events.append(event)
         return True
+
+    def count_source(self, source: str) -> int:
+        return sum(e.source == source for e in self.events)
 
 
 async def finished(store: TaskStore, name: str, now: float) -> Task:
@@ -195,6 +201,37 @@ async def probe_notifier(root: Path) -> None:
           await TaskNotifier(controller.config, lambda: None, lambda: None).poll_now(1) == 0)
 
 
+async def probe_questions(root: Path) -> None:
+    print('\na question on a record is owed until it is put')
+    namespace = Namespace('fixture-feature', 1, lambda payload: None)
+    store = TaskStore(config(root / 'questions', enabled=True))
+    store.register(namespace)
+    await store.start()
+    await store.write_records(OWNER, RecordSet(namespace.name, (
+        RecordWrite('thing:b', {'kind': 'thing', 'question': 'Second: yes or no?'}, 0),
+        RecordWrite('thing:a', {'kind': 'thing', 'question': 'First: yes or no?'}, 0),
+        RecordWrite('thing:c', {'kind': 'thing', 'question': '   '}, 0),
+        RecordWrite('thing:d', {'kind': 'thing', 'question': 'Already put', 'asked_at': 5.0}, 0),
+        RecordWrite('thing:e', {'kind': 'thing', 'note': 'no question here'}, 0),
+    )))
+    check('owed questions are the records with a question and no asked mark, in key order; a blank question is none',
+          [r.key for r in await store.owed_questions(OWNER)] == ['thing:a', 'thing:b'])
+    check('another owner\'s records are not read', await store.owed_questions('someone-else') == ())
+    queue = FakeQueue()
+    notifier = TaskNotifier(config(root / 'questions', enabled=True, max_held_questions=1), lambda: store, lambda: queue, clock=lambda: 50.0)
+    check('the notifier puts one as importance-one news with the key in its payload, marks it asked, and holds the rest under the cap',
+          await notifier.poll_now(50.0) == 1 and queue.events[0].importance == 1 and queue.events[0].source == 'question' and queue.events[0].summary == 'First: yes or no?'
+          and queue.events[0].payload == {'question': 'thing:a', 'namespace': namespace.name}
+          and [r.key for r in await store.owed_questions(OWNER)] == ['thing:b']
+          and (await store.records(OWNER, namespace.name, ('thing:a',)))[0].payload['asked_at'] == 50.0)
+    check('a delivered question is a receipt-free note: recording its delivery is a no-op, not an error',
+          await notifier.delivered(queue.events[0], 'held-note') is None)
+    queue.events.clear()
+    check('with the held note gone the next is put', await notifier.poll_now(51.0) == 1 and queue.events[0].summary == 'Second: yes or no?'
+          and await store.owed_questions(OWNER) == ())
+    await store.close()
+
+
 async def probe_migration(root: Path) -> None:
     print('\nversion six is lifted, not reset')
     cfg = config(root / 'schema')
@@ -217,6 +254,7 @@ async def main() -> None:
         root = Path(tmp)
         await probe_owed(root)
         await probe_notifier(root)
+        await probe_questions(root)
         await probe_migration(root)
     print(f'\nall {len(CHECKS)} checks passed')
 

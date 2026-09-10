@@ -6,7 +6,7 @@ Pins: normalization prefers text over HTML, drops scripts, lowercases the
 sender, reads the message's own date and zone, bounds the text, and calls a
 list-unsubscribe or bulk message bulk; interpretation makes a confirmed
 commitment from an approved sender ready and says a match is not proof,
-sends an unapproved sender, an invitation, cited evidence that is not in
+sends an unapproved sender (when a list is given), an invitation, cited evidence that is not in
 the message word for word, a missing end, a missing zone, a skipped
 daylight-saving wall time, and an end before its start to review with the
 field named, ignores a promotion, keeps two events as two candidates, and
@@ -34,6 +34,13 @@ id of its own, reads it back, changes it at its version, proves a stale
 version is refused, removes it at its version, and reads it back as gone.
 It sends no mail, invites nobody, and touches no other event. Its state is
 the calendar's for the minute it runs; nothing is written under ~/.ciel.
+
+With no sender list, Ciel decides: a stranger's confirmed commitment is ready and
+derived under the grant, an invitation on the edge carries a question the task
+notifier hands to Vigil as importance-one news of its own source and marks asked,
+the cap on waiting questions holds against notices in the same queue, an end or
+zone the owner gives settles the record with the add task, and a dismissal before
+the asking retires the question.
 """
 from __future__ import annotations
 
@@ -52,11 +59,12 @@ from ciel.brain.extract import ExtractionLimits
 from ciel.config import EmailCalendarConfig, JournalConfig, TasksConfig
 from ciel.email_calendar import (CANDIDATE_SCHEMA, CalendarConflict, CalendarMoved, CalendarUnavailable, Changes, EmailCalendarAdapter, NAMESPACE,
                                  RawMessage, add_request, approve_proposal_request, calendar_body, dismiss, event_id_for, extraction_payload,
-                                 interpret, normalize, preview_request, watch_request)
+                                 interpret, normalize, preview_request, question_for, watch_request)
 from ciel.journal import ActionJournal
 from ciel.task_context import TaskBinding
 from ciel.task_controls import TaskController
-from ciel.task_runner import TaskRunner
+from ciel.proactive.events import ProactiveEvent
+from ciel.task_runner import TaskNotifier, TaskRunner
 from ciel.tasks import DerivedOrigin, HumanOrigin, Origin, Scope, TaskConflict, TaskStore
 
 CHECKS: list[str] = []
@@ -345,8 +353,18 @@ def probe_interpretation() -> None:
     check('a confirmed commitment from an approved sender with nothing unresolved is ready, and the reason says a match is not proof',
           len(ready) == 1 and ready[0].decision == 'ready' and ready[0].sender_approved and 'not proof' in ready[0].reason
           and ready[0].timezone == 'America/Los_Angeles' and ready[0].start == '2026-09-15T14:00')
-    unapproved = interpret(CONFIRMED_ANSWER, message, replace(CONFIG, allowed_senders=()))
-    check('the same message from a sender not on the list is for review', unapproved[0].decision == 'review' and 'approved list' in unapproved[0].reason)
+    unapproved = interpret(CONFIRMED_ANSWER, message, replace(CONFIG, allowed_senders=('other@clinic.test',)))
+    check('with a list configured, the same message from a sender not on it is for review', unapproved[0].decision == 'review' and 'approved list' in unapproved[0].reason)
+    judged = interpret(CONFIRMED_ANSWER, message, replace(CONFIG, allowed_senders=()))
+    check('with no list, the sender is not a criterion: a confirmed commitment with nothing unresolved is ready, and the reason says reading as genuine is not proof',
+          judged[0].decision == 'ready' and not judged[0].sender_approved and 'not proof' in judged[0].reason)
+    judged_invitation = interpret(INVITED_ANSWER, normalize(INVITATION, 32000), replace(CONFIG, allowed_senders=()))
+    check('with no list, an invitation with a missing end is still on the edge: review, the end unresolved',
+          judged_invitation[0].decision == 'review' and 'end' in judged_invitation[0].unresolved)
+    question = question_for(judged_invitation[0], 'candidate:m3:0')
+    check('the question quotes the message\'s words, names what is unsettled, and gives the two answers as the tools',
+          '"sam@friends.test"' in question and '"Dinner with Sam"' in question and 'unsettled: end)' in question
+          and 'add_event_from_mail with candidate candidate:m3:0 with the end the owner gives' in question and 'dismiss_candidate' in question)
     no_zone = interpret(CONFIRMED_ANSWER, message, replace(CONFIG, timezone=''))
     check('without a zone in the message or in config, the zone is unresolved', 'timezone' in no_zone[0].unresolved and no_zone[0].decision == 'review')
     invented = interpret(HOSTILE_ANSWER, normalize(HOSTILE, 32000), CONFIG)
@@ -810,6 +828,101 @@ async def probe_automatic(root: Path) -> None:
     await controller.close()
 
 
+class FakeQueue:
+    """Vigil's queue as the notifier sees it."""
+
+    def __init__(self) -> None:
+        self.events: list[ProactiveEvent] = []
+        self.keys: set[str] = set()
+        self._n = 0
+
+    def next_id(self) -> str:
+        self._n += 1
+        return f'e{self._n}'
+
+    def push(self, event: ProactiveEvent) -> bool:
+        if event.dedupe_key in self.keys:
+            return False
+        self.keys.add(event.dedupe_key)
+        self.events.append(event)
+        return True
+
+    def count_source(self, source: str) -> int:
+        return sum(e.source == source for e in self.events)
+
+
+async def probe_judgement(root: Path) -> None:
+    print('\nno list: Ciel decides, and asks on the edge')
+    turn = HumanOrigin(OWNER, 'activation-turn', 'web', ingress_ids=('web:1',))
+    base = time.time()
+    stranger = mail('s1', 'Someone <someone@else.test>', 'Your table is confirmed', 'Confirmed for Tuesday, September 15, 2026 from 2:00 PM to 3:00 PM.')
+    dinner = mail('d1', 'Sam <sam@friends.test>', 'Dinner?', "Let's meet for dinner on September 20 at 7 PM if you are free. Let me know!")
+    dinner_answer = {**INVITED_ANSWER, 'events': [{**INVITED_ANSWER['events'][0], 'excerpts': ['dinner on September 20 at 7 PM']}]}
+    backend = ScriptedBackend({'Your table is confirmed': CONFIRMED_ANSWER, 'Dinner?': dinner_answer})
+    config = replace(ADD_CONFIG, allowed_senders=(), poll_s=60.0, max_creates_per_day=2)
+    f = Fixture(root, 'judge', [], backend=backend, config=config, calendar=FakeCalendar(), max_held_questions=1)
+    setup = f.adapter.setup
+    assert setup is not None
+    check('the setup says any sender is acted on and what is on the edge is asked',
+          any(name == 'approved senders' and 'any sender' in value and 'asked' in value for name, value in setup.bindings))
+    store = await f.open()
+    draft = await store.save_grant_draft(OWNER, setup.host, setup.namespace, setup.outcome, Scope(tuple(o for o, _ in setup.operations), tuple(t for t, _ in setup.targets)),
+                                         setup.limits, setup.bindings, now=base)
+    grant, mandate = await store.activate_grant(turn, draft.id, draft.revision, draft.digest, 'chart:fixture', now=base)
+    await f.adapter.activated(store, turn, grant, mandate)
+    watch = await store.get(OWNER, (await store.records(OWNER, NAMESPACE.name, (f'watch:{mandate.id}',)))[0].payload['task_id'])
+    await f.run(watch.id, now=base)
+    f.inbox.arrive(stranger)
+    f.inbox.arrive(dinner)
+    await f.run(watch.id, now=base + 61)
+    records = await store.records(OWNER, NAMESPACE.name)
+    children = [t for t in await store.list(OWNER) if isinstance(t.origin, DerivedOrigin)]
+    stranger_candidate = next(r.payload for r in records if r.key == 'candidate:s1:0')
+    dinner_record = next(r for r in records if r.key == 'candidate:d1:0')
+    check('a confirmed commitment from a sender never seen is ready and derived as an add under the grant',
+          stranger_candidate['decision'] == 'ready' and len(children) == 1 and children[0].origin.event_key == 'candidate:s1:0:calendar.create'
+          and 'question' not in stranger_candidate)
+    check('the invitation with no end is on the edge: not added, its record carries the question, not yet asked',
+          dinner_record.payload['decision'] == 'review' and 'question' in dinner_record.payload and not dinner_record.payload.get('asked_at')
+          and [r.key for r in await store.owed_questions(OWNER)] == ['candidate:d1:0'])
+    queue = FakeQueue()
+    notifier = TaskNotifier(f.tasks, lambda: f.store, lambda: queue, clock=lambda: base + 62)
+    pushed = await notifier.poll_now(base + 62)
+    asked = [e for e in queue.events if e.payload.get('question')]
+    check('the notifier hands the question to Vigil as news of its own source, importance one, held for the next conversation, with only the key in its payload',
+          len(asked) == 1 and asked[0].importance == 1 and asked[0].source == 'question' and asked[0].summary == dinner_record.payload['question']
+          and asked[0].payload == {'question': 'candidate:d1:0', 'namespace': NAMESPACE.name} and asked[0].dedupe_key == f'ask:{NAMESPACE.name}:candidate:d1:0')
+    check('the record is marked asked and the question is owed no more',
+          next(r.payload for r in await store.records(OWNER, NAMESPACE.name) if r.key == 'candidate:d1:0').get('asked_at') == base + 62
+          and await store.owed_questions(OWNER) == () and await notifier.poll_now(base + 63) == 0)
+    records = await store.records(OWNER, NAMESPACE.name)
+    await refused('the owner\'s yes with no end is still refused as unresolved', _raise(lambda: add_request(config, 'candidate:d1:0', records)), ValueError)
+    await refused('an end before the start is refused', _raise(lambda: add_request(config, 'candidate:d1:0', records, end='2026-09-20T18:00')), ValueError)
+    await refused('a bad zone is refused', _raise(lambda: add_request(config, 'candidate:d1:0', records, timezone='Mars/Olympus')), ValueError)
+    built = add_request(config, 'candidate:d1:0', records, end='2026-09-20T21:00')
+    check('an end the owner gives settles the record with the task: end set, unresolved cleared, the owner named as the source, the question retired',
+          isinstance(built, dict) and built['step'].operation == 'calendar.check'
+          and built['records'].writes[0].payload['end'] == '2026-09-20T21:00' and built['records'].writes[0].payload['unresolved'] == []
+          and built['records'].writes[0].payload['settled_by_owner'] == ['end'] and built['records'].writes[0].payload['start'] == '2026-09-20T19:00'
+          and built['records'].writes[0].expected_revision == dinner_record.revision + 1)
+    lunch = mail('l1', 'Sam <sam@friends.test>', 'Lunch?', "Let's meet for lunch on September 21 at 12 PM if you are free.")
+    backend.answers['Lunch?'] = {**INVITED_ANSWER, 'events': [{**INVITED_ANSWER['events'][0], 'title': 'Lunch', 'start': '2026-09-21T12:00', 'excerpts': ['lunch on September 21 at 12 PM']}]}
+    brunch = mail('b1', 'Sam <sam@friends.test>', 'Brunch?', "Let's meet for brunch on September 22 at 11 AM if you are free.")
+    backend.answers['Brunch?'] = {**INVITED_ANSWER, 'events': [{**INVITED_ANSWER['events'][0], 'title': 'Brunch', 'start': '2026-09-22T11:00', 'excerpts': ['brunch on September 22 at 11 AM']}]}
+    f.inbox.arrive(lunch)
+    f.inbox.arrive(brunch)
+    await f.run(watch.id, now=base + 130)
+    check('two more on the edge are owed', len(await store.owed_questions(OWNER)) == 2)
+    check('the cap holds: with one question already waiting as a held note, no more are handed over', await notifier.poll_now(base + 131) == 0)
+    queue.events[:] = [e for e in queue.events if e.source != 'question']
+    check('once Vigil has delivered it, the next is asked, and only one', await notifier.poll_now(base + 132) == 1 and len(await store.owed_questions(OWNER)) == 1)
+    remaining = (await store.owed_questions(OWNER))[0].key
+    result = await dismiss(store, OWNER, remaining)
+    check('a dismissal before the question was put is the answer: the record is marked asked and nothing is owed',
+          result['decision'] == 'dismissed' and await store.owed_questions(OWNER) == () and await notifier.poll_now(base + 133) == 0)
+    await f.close()
+
+
 MOVED_ANSWER = {'category': 'confirmation', 'commitment': 'cancelled', 'events': [{
     'title': 'Appointment with Dr. Lee', 'start': '2026-09-16T10:00', 'end': '2026-09-16T11:00', 'timezone': '', 'location': '500 Main St',
     'excerpts': ['your appointment has been moved to Wednesday, September 16, 2026 from 10:00 AM to 11:00 AM'], 'unresolved': []}]}
@@ -945,6 +1058,7 @@ async def main() -> None:
         await probe_watch(root)
         await probe_dismissal(root)
         await probe_automatic(root)
+        await probe_judgement(root)
         await probe_proposals(root)
     print(f'\nall {len(CHECKS)} checks passed')
 

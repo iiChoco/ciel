@@ -1027,7 +1027,8 @@ class Pipeline:
                     if store is None:
                         raise ValueError('Tasks are unavailable.')
                     records = await store.records(config.tasks.owner, adapter.namespace.name)
-                    return add_request(config.email_calendar, str(args.get('candidate') or ''), records)
+                    return add_request(config.email_calendar, str(args.get('candidate') or ''), records,
+                                       end=str(args.get('end') or ''), timezone=str(args.get('timezone') or ''))
                 async def dismiss_candidate(store: Any, owner: str, args: dict[str, Any]) -> Any:
                     from ciel.email_calendar import dismiss
                     return await dismiss(store, owner, str(args.get('candidate') or ''))

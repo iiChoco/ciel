@@ -2,6 +2,46 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — On the edge, Ciel asks next time you talk
+
+**Why.** Automatic mode added nothing until senders were enrolled one by
+one, and the owner did not want to keep a list: let Ciel judge what reads
+as a real commitment, put it on the calendar, and ask about the doubtful
+ones at the next conversation rather than leave them in a roster nobody
+opens.
+
+**What.**
+
+- *The sender is a criterion only when a list is given.* With
+  `allowed_senders` empty, a confirmed commitment with nothing unresolved
+  is ready from any sender; the policy's other lines — evidence word for
+  word, every field settled, not an invitation, not a change — still
+  decide, never the model's confidence. The trade is stated in the config
+  docstring and the README: a forged confirmation would be added under a
+  grant, bounded by the day's cap and journaled.
+- *A question on the record.* A watch writes a `question` on a review
+  candidate it cannot add. The store's `owed_questions` lists records
+  with a question and no `asked_at`; the task notifier hands each to
+  Vigil as news of source `question` at importance one — held for the
+  next conversation, never spoken into a room — and marks it asked as
+  Vigil takes it. At most `[tasks].max_held_questions` wait at once.
+- *The yes can settle two fields.* `add_event_from_mail` takes an `end`
+  or a `timezone` the owner gives, validated as the message's times are,
+  written on the candidate's record at the revision read with the add
+  task; nothing else can be settled by word. An add or a dismissal before
+  the question was put retires it. An absent end is one gap, `end`, not
+  also a malformed time.
+
+**Probes.** `probe_email_calendar.py 92 → 108: no list makes a stranger's
+confirmed commitment ready and derived, an invitation on the edge carries
+the question, the notifier hands it over as importance-one news of its own
+source and marks it asked, the cap holds against notices in the same
+queue, an end the owner gives settles the record and an end before the
+start or a bad zone is refused, a dismissal before the asking retires it.
+probe_task_notices.py 23 → 28: owed questions in key order and per owner,
+a blank question is none, the notifier marks asked and holds the rest
+under the cap, a delivered question records nothing.`
+
 ## 2026-09-09 — The asking switch answers to its own words
 
 **Why.** Naming the phrase in the prompt was not enough: a conversation

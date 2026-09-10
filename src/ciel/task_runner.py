@@ -57,7 +57,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, P
 from ciel.brain.extract import ExtractionBackend, ExtractionError, ExtractionLimits, Lease, extract_json
 from ciel.config import TasksConfig
 from ciel.proactive.events import EventQueue, ProactiveEvent
-from ciel.tasks import (Attempt, Notice, Specification, DerivedOrigin, Evidence, FeatureRecord, GrantSetup, Intent, Namespace, NoAuthority, RecordSet, Step,
+from ciel.tasks import (Attempt, Notice, Specification, DerivedOrigin, Evidence, FeatureRecord, GrantSetup, Intent, Namespace, NoAuthority, RecordSet, RecordWrite, Step,
                         Task, TaskConflict, TaskLimit, TaskStore, TaskStoreError, WaitReason)
 
 if TYPE_CHECKING:
@@ -619,6 +619,39 @@ class TaskNotifier:
                 self.pushed.append(notice.id)
                 del self.pushed[:-32]
                 pushed += 1
+        return pushed + await self._ask(store, events, stamp)
+
+    async def _ask(self, store: TaskStore, events: EventQueue, stamp: float) -> int:
+        """A feature's questions go to Vigil as news — importance one, held
+        for the next conversation, never spoken into a room — at most
+        ``max_held_questions`` waiting at once; each is marked asked on its
+        record the moment Vigil takes it, so it is put once."""
+        try:
+            owed = await store.owed_questions(self._config.owner)
+        except (TaskStoreError, ValueError):
+            log.debug('owed questions could not be read', exc_info=True)
+            return 0
+        pushed = 0
+        for record in owed:
+            # Its own source, so the cap counts questions and not the
+            # task notices that share the queue.
+            if events.count_source('question') >= self._config.max_held_questions:
+                break
+            event = ProactiveEvent(
+                id=events.next_id(), source='question', importance=1, created_at=stamp, expires_at=None,
+                summary=str(record.payload['question']), dedupe_key=f'ask:{record.namespace}:{record.key}',
+                payload={'question': record.key, 'namespace': record.namespace},
+            )
+            if not events.push(event):
+                continue
+            try:
+                await store.write_records(self._config.owner, RecordSet(record.namespace, (
+                    RecordWrite(record.key, {**record.payload, 'asked_at': stamp}, record.revision),)))
+            except (TaskStoreError, TaskConflict, ValueError):
+                log.warning('a question was handed to Vigil but could not be marked asked', exc_info=True)
+            self.pushed.append(record.key)
+            del self.pushed[:-32]
+            pushed += 1
         return pushed
 
     async def delivered(self, event: ProactiveEvent, destination: str) -> None:
