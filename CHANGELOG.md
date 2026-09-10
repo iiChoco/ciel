@@ -2,6 +2,23 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — The project-awareness plan is revised for any project
+
+**Why.** The review of the plan asked for five edits, and the owner said
+the feature is for anything in general, with homework as the example.
+
+**What.**
+
+- *The plan says so.* Atlas gains rename with the lazily minted id; six
+  record kinds become resource, reading, and statement, with resources in
+  the notebook's own file and readings in the task store; dependency
+  roots are the registered folder; "current" may be proposed from the
+  highest-numbered folder and confirmed once; the unused `\answerbox`
+  macro is a not-started signal; the sequence splits by what it waits on,
+  and steps 3 and 4 are unblocked since the foundation landed.
+
+**Probes.** Documentation only; `git diff --check` clean.
+
 ## 2026-09-09 — The candidates are in Chart
 
 **Why.** The email feature's candidates were visible only as a task's

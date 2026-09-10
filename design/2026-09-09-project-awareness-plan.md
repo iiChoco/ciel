@@ -1,16 +1,19 @@
 # Atlas stays connected to the work
 
-2026-09-09. Implementation plan; no new behavior is active.
+2026-09-09. Implementation plan. Revised the same day after review (the
+revisions are marked *Revised*); step 1 began the same day.
 
 Ciel should know where an ongoing piece of work lives, which sources belong
 to it, what changed, and what the evidence says about its current state.
 “Pull it up,” “where did I leave off?”, and “get the latest one” should work
 across conversations without the owner repeating the same paths and context.
 
-This plan extends Atlas with reusable project awareness. Homework is the
-first application: its source, LaTeX reader, retrieval behavior, and acceptance
-checks are included alongside the shared architecture and implementation
-sequence.
+This plan extends Atlas with reusable project awareness for any project —
+a course, a proposal, an analysis, a repository. Homework is the first
+example and the first reader, not the feature: its source, LaTeX reader,
+retrieval behavior, and acceptance checks are included beside the shared
+architecture so the shared parts are built against something real. Nothing
+in the runtime knows what a course is.
 
 ## What the capability knows
 
@@ -49,6 +52,16 @@ project list. Preserve its existing prose and dated log. Its current
 name-based identity needs a backward-compatible stable binding ID for
 observations; a project rename must not orphan its tracked files.
 
+*Revised.* Atlas has no rename today; identity is the slug in the filename.
+Rename is added with the binding id: the id is minted lazily into the
+frontmatter the first time a file is written or bound, a rename moves the
+file and keeps the id, and the old name becomes an alias so it still
+resolves. The owner's statements about where the work lives — aliases,
+resources with their roles, the current selection — are written into the
+project's own file as frontmatter lines, inspectable and editable like the
+rest of the notebook and available without the task store. What the
+machine observes (readings) goes to the task store, below.
+
 The [independent-action foundation](2026-09-08-independent-action-plan.md)
 owns mandates, task lifecycle, authorization, scheduling, recovery, and
 receipts. This feature supplies sources, resource selection, readers, and
@@ -83,12 +96,16 @@ background extraction must not overwrite the owner's narrative.
 
 | Record | Shared contents |
 |---|---|
-| Project binding | Stable Atlas identity, aliases, scope, selected resources, owner preferences, observation state |
-| Resource | Stable identity, source, locator, role, related resources, preferred opener |
-| Observation | Resource revision/hash, snapshot time, received time, freshness, coverage and failure state |
-| Assessment | Claims about state, supporting revision/locations, uncertainty, reader/schema version |
-| Expectation | Owner-supplied or sourced requirements, scope, provenance and optional domain structure |
-| Declaration | Owner corrections or assertions, time, and what they supersede |
+| Resource | Stable key under the project's id, source, locator, role, whether current, preferred opener — in the notebook's frontmatter |
+| Reading | The revision set it depended on (hash per resource), snapshot and received times, coverage and failure state, and the claims about state with their locations, uncertainty, and reader/schema version — in the task store |
+| Statement | An owner correction, assertion, or expectation with its time and what it supersedes — in the task store, quoted from the owner's own words |
+
+*Revised.* Six kinds became three. An assessment already carries the
+revision set it depended on, so observation and assessment are one
+reading; expectation and declaration are both owner statements with
+provenance. Resources are owner statements too, and live with the
+notebook; readings and statements are machine-kept records in a versioned
+``atlas`` namespace of the task store, linked by the project's id.
 
 A source location is not proof of provenance or a permission grant. A fact
 learned from a document cannot widen scope. Store the distinction between
@@ -136,6 +153,12 @@ runs off the audio loop, debounces saves, and hashes stable contents. Ignore
 format-specific build noise through reader rules. Identical content causes no
 new model call. Dependency changes count: a LaTeX include or a linked input
 can alter meaning while the main file stays unchanged.
+
+*Revised.* Watching on the spoke stays a poll: the work watcher's stat loop
+is the base for a stat-plus-hash poll on registered files, which needs no
+dependency and survives the spoke's constant re-exec. Dependency roots are
+the registered source folder — the folder the owner bound to the project —
+not the brain's workspace guard; both halves re-run that check.
 
 Handle atomic replacement, rename, deletion, sleep, and restart. Source
 adapters state which identities survive moves; do not assume arbitrary
@@ -193,6 +216,13 @@ there is no separate coursework runtime.
 `hw01/hw01.tex` and a sibling PDF. H104 is the candidate for “analysis,”
 pending owner confirmation and identification of the current term. The owner
 saves LaTeX. The assignment source and editor preference are still unknown.
+
+*Revised.* "Current" will become a weekly ritual: each course holds one
+`hwNN` folder now. Numbered folders are source evidence, not modification
+time, so the reader may propose the highest-numbered folder as current and
+the owner confirms once; the prohibition on modification time stands. The
+template's preamble also defines an unused `\answerbox` macro that expands
+to an empty framed box; its presence in an answer is a not-started signal.
 
 Register the course as an Atlas project, its familiar names as aliases, the
 folder as a local source, and the actual assignment page/service as a remote
@@ -284,6 +314,15 @@ progress previews can proceed; automatic fetching must not claim to be active.
    editor, and save-to-assessment loop. The application is complete only when
    “pull up my analysis homework,” missing-download fallback, and later progress
    questions work together. Reusability does not defer those original needs.
+
+*Revised.* The sequence splits by what it waits on. Steps 1 and 2 are
+buildable at once and deliver "pull up my analysis homework" and an
+on-demand "where did I leave off"; live acceptance of that on-demand
+experience comes before anything else. Steps 3 and 4 waited on the
+foundation's milestones 2 and 3, which landed on 2026-09-09, so they are
+unblocked; step 4's real source is still the owner's to name, and a plain
+URL source (a direct link to a document, validated as the plan says) is the
+general adapter built first. Reusability never defers the original need.
 
 Use existing project/config/tool modules and add a small observation service
 and readers/source modules as responsibilities demand. Do not introduce
