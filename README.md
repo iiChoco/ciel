@@ -1608,6 +1608,35 @@ Three mechanisms, deliberately separate:
 Only the one-line summaries go into the prompt each turn. Full contents load on
 demand, which is what keeps memory affordable as it grows.
 
+**A project is bound to the work it is about.** Since 2026-09-09 a project
+also carries, as lines in its own frontmatter, the owner's statements about
+where its work lives: an `id` minted the first time the file is written or
+bound and kept across a rename; `aliases`, the other names the owner uses
+("analysis homework", "h104"), which `open_project` honours before any
+guess; and `resource.<key>` lines, each a role (solution, handout, folder,
+draft, dataset), a source (`local` or `url`), whether it is the current one
+of its role, an optional opener, and the path or URL. "Pull up my analysis
+homework" resolves the phrase to the project by exact name, then exact
+alias, then a unique partial match; several matches are a question, never
+a guess. `bind_resource`, `select_resource`, `unbind_resource`, and
+`rename_project` write these only on the owner's own words — a place Ciel
+found in a listing is something to ask about, not to bind — and only the
+private brain has them. A file from before this date loads exactly as it
+did, its prose untouched, until it is bound; a rename keeps the old name
+as an alias. `scripts/probe_atlas.py` drives all of it. What Ciel then
+*observes* about a bound resource is the [project-awareness
+plan](design/2026-09-09-project-awareness-plan.md)'s next step.
+
+```toml
+[projects]
+enabled = true
+dir = "~/.ciel/projects"    # one Markdown file per project
+max_index_entries = 30      # projects named in every system prompt; close the rest
+max_state_chars = 4000      # an opened project's state, whole; more is refused, not truncated
+log_tail = 15               # log lines returned on open; the file keeps them all
+max_resources = 24          # places one project may be bound to
+```
+
 ### Quick notes
 
 An idea does not have to become a conversation to be remembered. On the Mac,
@@ -2483,6 +2512,7 @@ uv run --no-sync python scripts/probe_speaker.py     # Barn Door: diagnostic pol
 uv run --no-sync python scripts/probe_files.py       # file/search boundaries and session credentials
 uv run --no-sync python scripts/probe_tool_rpc.py    # Mac snapshots, undo, and process cancellation
 uv run scripts/probe_closure.py       # Closure + Atlas: rotation, turn lock, atomic writes
+uv run scripts/probe_atlas.py         # Atlas bindings: ids, aliases, rename, resources, resolution
 uv run scripts/probe_vigil.py         # Vigil: queue, policy, presence, the Witness guard
 uv run scripts/probe_discord.py       # the Discord lane's scripted checks
 uv run scripts/probe_discord.py --live  # connect for real and echo your DMs

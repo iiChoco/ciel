@@ -144,6 +144,7 @@ def build_tool_server(
             config.projects.max_index_entries,
             config.projects.max_state_chars,
             config.projects.log_tail,
+            config.projects.max_resources,
         )
         bind_projects(projects)
     else:

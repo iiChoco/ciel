@@ -780,6 +780,11 @@ class ProjectsConfig:
     """Log lines returned when a project is opened. The file keeps all of
     them; the tail is what fits a working context."""
 
+    max_resources: int = 24
+    """Places one project may be bound to — files, folders, URLs, each with
+    a role. Past this the owner unbinds one first; a project with more
+    places than that is two projects."""
+
 
 @dataclass(frozen=True, slots=True)
 class JournalConfig:

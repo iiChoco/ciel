@@ -2,6 +2,37 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — A project is bound to the work it is about
+
+**Why.** Atlas knew a project by name and description and nothing of
+where its work lived, so "pull up my analysis homework" had no file to
+land on and no name but the exact one. This is step 1 of the
+project-awareness plan, for any project; homework is the example.
+
+**What.**
+
+- *Frontmatter lines, the owner's own.* An `id` minted on the first write
+  or binding and kept across a rename; `aliases`, one line; and
+  `resource.<key>` lines — role, source (`local` or `url`), current,
+  optional opener, locator with spaces allowed — parsed positionally and
+  skipped with a warning when they do not fit. A file from before loads as
+  it did, prose byte-exact, and no id is minted for a log append.
+- *Resolution before guessing.* `ProjectStore.resolve`: exact name, exact
+  alias, unique partial name or alias, description last; several matches
+  are candidates for a question. `rename` moves the file, keeps the id,
+  and leaves the old name as an alias.
+- *The tools.* `open_project` resolves by alias and lists resources;
+  `update_project` takes `aliases`; `bind_resource`, `select_resource`,
+  `unbind_resource`, and `rename_project` are new, each described as
+  acting on the owner's words alone. The index names aliases and counts
+  resources. `[projects].max_resources` bounds a project's places.
+
+**Probes.** `probe_atlas.py 38, new: the legacy file, the minted id, the
+untouched body, aliases across a fresh store, the resolution ladder and
+its refusal to guess, resource round-trips and one-current-per-role, the
+bound, the skipped bad line, the rename, and the tools end to end.
+probe_closure.py 56, unchanged.`
+
 ## 2026-09-09 — The project-awareness plan is revised for any project
 
 **Why.** The review of the plan asked for five edits, and the owner said
