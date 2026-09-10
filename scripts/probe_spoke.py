@@ -607,6 +607,42 @@ async def probe_speak_back_turn() -> None:
     check("other lanes are still ignored", s._hub_turn is None)
 
 
+async def probe_forced_reload() -> None:
+    print("\nthe reload has a deadline")
+    s = make_spoke()
+    s._state = State.BUSY
+    s._reload_forced = False
+    s._run_task = None
+    s._reload_stuck()
+    check("with no run task on record nothing is forced", not s.reload_requested and not s._reload_forced)
+
+    async def loop():
+        await asyncio.sleep(10)
+
+    task = asyncio.create_task(loop())
+    s._run_task = task
+    await asyncio.sleep(0)
+    s._reload_stuck()
+    check("a busy room past the grace is cancelled and marked as a forced reload",
+          s.reload_requested and s._reload_forced and task.cancelling())
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    s = make_spoke()
+    s.reload_requested = True
+    task = asyncio.create_task(loop())
+    s._run_task = task
+    await asyncio.sleep(0)
+    s._reload_stuck()
+    check("a loop already leaving for its reload is left alone", not task.cancelling() and not s._reload_forced)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 async def main() -> None:
     await probe_voice_turn()
     await probe_prelude()
@@ -618,6 +654,7 @@ async def main() -> None:
     await probe_offline()
     await probe_ack_filler()
     await probe_speak_back_turn()
+    await probe_forced_reload()
     print(f"\nall {len(CHECKS)} checks passed")
 
 

@@ -15,14 +15,26 @@ reload and the previous conversation resumes via the session file, so the
 cost is a few seconds of startup — automated, rather than manual.
 
 Touching ``~/.ciel/reload`` forces one without editing any source.
+
+**A reload has a deadline.** The loops exit for a reload only from idle, so
+an edit during a conversation waits for it to end — but a room that never
+returns to idle (a turn that never finishes, a player that never stops, a
+microphone that stops delivering frames) would hold the old code forever,
+and on 2026-09-09 one did until a hand restarted it. So the watcher keeps
+a clock from the change it saw: past ``grace_s`` it calls ``stuck`` once,
+and the app decides — if its loop is already leaving, nothing; otherwise it
+cancels its own run task, which unwinds the audio and the link the way any
+shutdown does, and the re-exec happens anyway. The grace is long enough
+for a real conversation and short enough that a wedge fixes itself.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 log = logging.getLogger(__name__)
 
@@ -38,17 +50,28 @@ class SourceWatcher:
     platform-specific code.
     """
 
-    def __init__(self, roots: Iterable[Path], poll_s: float = POLL_S) -> None:
+    def __init__(self, roots: Iterable[Path], poll_s: float = POLL_S, *,
+                 grace_s: float | None = None, stuck: Callable[[], None] | None = None) -> None:
         self._roots = list(roots)
         self._poll = poll_s
+        self._grace = grace_s
+        self._stuck = stuck
+        """Called once, ``grace_s`` after a change was seen, unless the
+        watcher was closed first — the app's cue that its loop never left."""
         self._task: asyncio.Task[None] | None = None
         self._baseline: dict[Path, float] = {}
         self._changed: Path | None = None
+        self._changed_at: float | None = None
 
     @property
     def changed(self) -> Path | None:
         """The first path seen to change, or ``None`` if nothing has."""
         return self._changed
+
+    @property
+    def changed_at(self) -> float | None:
+        """Monotonic time the change was seen, for the app's own clocks."""
+        return self._changed_at
 
     def _snapshot(self) -> dict[Path, float]:
         snap: dict[Path, float] = {}
@@ -87,8 +110,13 @@ class SourceWatcher:
             if snap != self._baseline:
                 edited = {p for p, m in snap.items() if self._baseline.get(p) != m}
                 removed = set(self._baseline) - set(snap)
+                self._changed_at = time.monotonic()
                 self._changed = sorted(edited | removed)[0]
                 log.info("source changed: %s", self._changed)
+        if self._stuck is not None and self._grace is not None and self._grace > 0:
+            await asyncio.sleep(self._grace)
+            log.warning("source changed %.0f s ago and the loop has not left — the app decides", self._grace)
+            self._stuck()
 
     async def close(self) -> None:
         if self._task is not None:

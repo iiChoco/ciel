@@ -104,6 +104,8 @@ class Spoke:
     _notes: NoteWindow | None = None
     _note_relay: NoteRelay | None = None
     _talk_requested = False
+    _reload_forced = False
+    _run_task: asyncio.Task[None] | None = None
     _cancel_next_voice_turn = False
     _silenced_turn: str | None = None
     _shortcut_quiet = False
@@ -252,15 +254,18 @@ class Spoke:
 
         self._last_wall = time.time()
         self._watcher: SourceWatcher | None = (
-            SourceWatcher(default_roots(config.state_dir))
+            SourceWatcher(default_roots(config.state_dir), grace_s=config.dev.reload_grace_s, stuck=self._reload_stuck)
             if config.dev.autoreload
             else None
         )
         self.reload_requested = False
+        self._reload_forced = False
+        self._run_task = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
+        self._run_task = asyncio.current_task()
         await self._startup()
         try:
             microphone, player = build_audio(
@@ -375,6 +380,11 @@ class Spoke:
                             and (self._playing is None or self._playing.done())
                         ):
                             self._finish_turn(mic)
+        except asyncio.CancelledError:
+            if not self._reload_forced:
+                raise
+            # The forced reload: the cancel was ours, and the process is
+            # about to be replaced — a clean exit, not a crash.
         finally:
             self._confirm = None
             for task in (self._prelude, self._playing, self._ack_task):
@@ -383,6 +393,17 @@ class Spoke:
             self._player = None
             self._mic = None
             await self._shutdown()
+
+    def _reload_stuck(self) -> None:
+        """The watcher's grace ran out with the room still busy: leave
+        anyway. Nothing to do when the loop is already on its way out."""
+        if self.reload_requested or self._run_task is None or self._run_task.done():
+            return
+        print(f"\nsource changed and the room stayed busy for {self._config.dev.reload_grace_s:.0f} s — reloading anyway", flush=True)
+        log.warning("reload forced from state %s after %.0f s", self._state.name, self._config.dev.reload_grace_s)
+        self.reload_requested = True
+        self._reload_forced = True
+        self._run_task.cancel()
 
     async def _startup(self) -> None:
         started = time.monotonic()

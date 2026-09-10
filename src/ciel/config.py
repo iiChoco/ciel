@@ -1793,6 +1793,14 @@ class DevConfig:
     resumes through the session file, so the only cost is startup time.
     ``touch ~/.ciel/reload`` forces one without editing any source."""
 
+    reload_grace_s: float = 120.0
+    """How long after a source change the room may stay busy before the
+    reload is forced. The loop leaves for a reload only from idle; a room
+    that never returns there — a turn that never ends, a player that never
+    stops, a microphone gone quiet — would hold the old code forever. Past
+    this the run is cancelled cleanly and the re-exec happens anyway, so an
+    edit mid-conversation still waits, up to this long. 0 disables it."""
+
 
 @dataclass(frozen=True, slots=True)
 class InterviewConfig:

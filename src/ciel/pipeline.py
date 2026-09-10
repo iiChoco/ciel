@@ -775,6 +775,8 @@ class Pipeline:
 
     _shortcuts: GlobalShortcuts | None = None
     _task_notifier: TaskNotifier | None = None
+    _reload_forced = False
+    _run_task: asyncio.Task[None] | None = None
     _notes: NoteWindow | None = None
     _talk_requested = False
     _shortcut_quiet = False
@@ -1260,13 +1262,16 @@ class Pipeline:
             )
 
         self._watcher: SourceWatcher | None = (
-            SourceWatcher(default_roots(config.state_dir))
+            SourceWatcher(default_roots(config.state_dir), grace_s=config.dev.reload_grace_s, stuck=self._reload_stuck)
             if config.dev.autoreload
             else None
         )
         self.reload_requested = False
         """Set when the source changed and the loop exited to be re-exec'd.
         The entry point reads this after run() returns."""
+        self._reload_forced = False
+        """The exit was the watcher's deadline, not idle: run() swallows its own cancel."""
+        self._run_task = None
         self._reload_pending = False
         self._reload_waiting_since: float | None = None
         """A spoken or typed "reload" landed; the frame loop performs it from
@@ -1327,6 +1332,7 @@ class Pipeline:
         )
 
     async def run(self) -> None:
+        self._run_task = asyncio.current_task()
         if self._role == "hub":
             await self._run_hub()
             return
@@ -1513,6 +1519,10 @@ class Pipeline:
                                     self._enter_followup()
                                 else:
                                     self._enter_waiting()
+        except asyncio.CancelledError:
+            if not self._reload_forced:
+                raise
+            # The forced reload: the cancel was ours; a clean exit, not a crash.
         finally:
             # Resolve any pending confirmation to deny *before* cancelling the
             # turn: the Agent SDK subprocess is awaiting that hook's decision,
@@ -1862,6 +1872,17 @@ class Pipeline:
                 )
         return False
 
+    def _reload_stuck(self) -> None:
+        """The watcher's grace ran out with the loop still busy: leave
+        anyway. Nothing to do when the loop is already on its way out."""
+        if self.reload_requested or self._run_task is None or self._run_task.done():
+            return
+        print(f"\nsource changed and the loop stayed busy for {self._config.dev.reload_grace_s:.0f} s — reloading anyway", flush=True)
+        log.warning("reload forced from state %s after %.0f s", self._state.name, self._config.dev.reload_grace_s)
+        self.reload_requested = True
+        self._reload_forced = True
+        self._run_task.cancel()
+
     async def _run_hub(self) -> None:
         """The hub's main loop: the ladder on a tick, no microphone anywhere.
 
@@ -1930,6 +1951,10 @@ class Pipeline:
                         self.reload_requested = True
                         log.info("hub loop ending for a reload")
                         break
+        except asyncio.CancelledError:
+            if not self._reload_forced:
+                raise
+            # The forced reload: the cancel was ours; a clean exit, not a crash.
         finally:
             log.info("hub loop ended (reload=%s)", self.reload_requested)
             self._confirm.cancel("shutting down")

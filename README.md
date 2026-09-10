@@ -781,6 +781,23 @@ be unreachable.
 `scripts/probe_confirm_wire.py` drive each half with fakes and a fake
 other half.
 
+**A reload has a deadline.** Both processes watch their own source
+(Analytic Continuation, `reload.py`) and re-exec on an edit — from idle
+only, so an edit mid-conversation waits for it to end, announced with
+"Reloading." in the room. A room that never returns to idle would hold
+the old code forever, and on 2026-09-09 one did until a hand restarted
+it. So the watcher keeps a clock from the change it saw: past
+`reload_grace_s` it tells the app, which leaves anyway — cancelling its
+own run, which closes the audio and the link the way any shutdown does —
+and the re-exec happens. The log says `reload forced from state BUSY`.
+`scripts/probe_reload.py` drives the watcher and its deadline.
+
+```toml
+[dev]
+autoreload = true           # watch src/ciel and ~/.ciel/reload; re-exec on a change
+reload_grace_s = 120.0      # how long the room may stay busy before the reload is forced; 0 never
+```
+
 **The hub needs no Mac in it.** Everything Mac-bound reaches the machine
 over the same socket. The brain's tools for the screen, Messages, the
 location, and background watches bind the wire on the hub and run on
@@ -2438,6 +2455,7 @@ uv run --no-sync python scripts/probe_task_wire.py --live  # synthetic task stat
 uv run --no-sync python scripts/probe_turns.py       # lane contract, trusted ingress, public/private clients
 uv run --no-sync python scripts/probe_hub_imports.py # Linux imports and temporary task-store lifecycle
 uv run --no-sync python scripts/probe_shellguard.py  # confirmation and mutating command options
+uv run --no-sync python scripts/probe_reload.py      # the source watcher and its deadline
 uv run --no-sync python scripts/probe_shortcuts.py   # global Mac controls, note chord and backslash pair, lifecycle, interruption, mute
 uv run --no-sync python scripts/probe_notes.py       # private drafts, receipts, recent history, context, bounded dictation; temporary state only
 uv run --no-sync python scripts/probe_note_window.py # native bar: save, discard, Undo, Recent, Context, Dictate, focus and narrow layouts

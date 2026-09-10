@@ -31,6 +31,7 @@ from ciel.config import BrainConfig, Config
 from ciel.brain.agent import user_message
 from ciel.pipeline import Pipeline, _DiscordSink, _TextSink, _VoiceSink
 from ciel.remote.discord import RemoteUnavailable
+from ciel.schedule import State
 from ciel.turn import (
     Attachment, attachment_prompt,
     _REMOTE_NOTE,
@@ -241,6 +242,7 @@ def make_pipeline(script, *, error=None, events=None, muted=False,
     p._pending_text = None
     p._continue_listening = False
     p._reload_pending = False
+    p.reload_requested = False
     p._journal = None
     return p
 
@@ -902,6 +904,44 @@ async def probe_ask_first() -> None:
               and tomllib.loads(path.read_text())["confirm"]["ask_first"] is True)
 
 
+async def probe_forced_reload() -> None:
+    print("\nthe reload has a deadline")
+    p = make_pipeline(STREAM)
+    p._reload_forced = False
+    p._run_task = None
+    p._state = State.BUSY
+    p._reload_stuck()
+    check("with no run task on record nothing is forced", not p.reload_requested and not p._reload_forced)
+
+    async def loop():
+        await asyncio.sleep(10)
+
+    task = asyncio.create_task(loop())
+    p._run_task = task
+    await asyncio.sleep(0)
+    p._reload_stuck()
+    check("a busy loop past the grace is cancelled and marked as a forced reload",
+          p.reload_requested and p._reload_forced and task.cancelling())
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    p = make_pipeline(STREAM)
+    p._reload_forced = False
+    p._state = State.WAITING
+    p.reload_requested = True
+    task = asyncio.create_task(loop())
+    p._run_task = task
+    await asyncio.sleep(0)
+    p._reload_stuck()
+    check("a loop already leaving for its reload is left alone", not task.cancelling() and not p._reload_forced)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 async def main() -> int:
     probe_registry()
     await probe_labels_and_rows()
@@ -917,6 +957,7 @@ async def main() -> int:
     await probe_keyboard()
     await probe_speak_back()
     await probe_ask_first()
+    await probe_forced_reload()
     print(f"\nall {len(CHECKS)} checks passed")
     return 0
 

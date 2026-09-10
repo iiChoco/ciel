@@ -2,6 +2,34 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — A reload has a deadline
+
+**Why.** After an edit to `gmail.py` on 2026-09-09 the spoke logged the
+change and never came back; `launchctl kickstart` brought it up. The
+loops leave for a reload only from idle, which is right for a
+conversation in flight and wrong for a room that never returns to idle
+— a turn that never finishes, a player that never stops, a microphone
+gone quiet.
+
+**What.**
+
+- *The watcher keeps a clock.* `SourceWatcher` takes a grace and a
+  `stuck` callback: past the grace after a change it calls back once,
+  unless closed first. `[dev].reload_grace_s` (120 s; 0 disables) sets it.
+- *The app leaves anyway.* The spoke and both pipeline loops answer the
+  callback by cancelling their own run task when the loop is not already
+  on its way out; the cancel unwinds the audio and the link as a shutdown
+  would, the run swallows its own cancellation as a clean exit, and the
+  entry point re-execs as it does for every reload. The log names the
+  state it was forced from.
+
+**Probes.** `probe_reload.py 9, new: a change under a root and a touched
+sentinel are seen and stamped, the callback fires once after the grace
+and never before or again, no grace means no call, closing inside the
+grace cancels it. probe_spoke.py 56 → 59 and probe_turns.py 96 → 99: a
+busy loop past the grace is cancelled and marked forced, one already
+leaving is left alone, no run task means nothing.`
+
 ## 2026-09-09 — The smaller number governs at the draft
 
 **Why.** The first attempt to save the email feature's grant in Chart came
