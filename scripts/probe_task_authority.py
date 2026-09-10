@@ -348,6 +348,14 @@ async def probe_approval_surface(root: Path) -> None:
           and saved['bindings'] == (('account', 'me@example.test'),) and saved['outcome'] == OUTCOME and saved['limits']['max_per_window'] == 2)
     edited = (await controller.apply(binding, 'grant_draft_save', {'namespace': NAMESPACE.name, 'operations': ['calendar.create', 'inbox.read'], 'targets': ['calendar:primary', 'inbox:main'], 'draft_id': saved['id']}, revision=saved['revision']))['draft']
     check('editing through the form moves the revision', edited['revision'] == 2 and edited['scope']['operations'] == ('calendar.create', 'inbox.read'))
+    capped = TaskController(config(root / 'surface-caps', enabled=True, max_grant_children=3, max_grant_per_window=1, max_grant_lifetime_s=1800.0),
+                            journal, namespaces=(NAMESPACE,), setups=(SETUP,))
+    await capped.start()
+    small = (await capped.apply(binding, 'grant_draft_save', {'namespace': NAMESPACE.name, 'operations': ['calendar.create'], 'targets': ['calendar:primary']}))['draft']
+    check('a setup asking for more than [tasks] allows is drafted at the caps, the smaller number governing, instead of refused',
+          small['limits']['max_children'] == 3 and small['limits']['max_per_window'] == 1 and small['limits']['lifetime_s'] == 1800.0
+          and small['limits']['window_s'] == LIMITS.window_s)
+    await capped.close()
     shown: list[str] = []
     async def send(text: str) -> None:
         shown.append(text)

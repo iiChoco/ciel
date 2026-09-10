@@ -1797,7 +1797,9 @@ its title, outcome, execution host, the operations and targets it can be
 granted with their labels, the accounts it would act as, and its limits. The
 owner narrows the operations and targets; everything else is shown, not
 chosen, and the saved draft carries the setup's host, account, outcome, and
-limits, so the draft holds nothing the owner did not see. Approve sends the
+limits — lowered to the `[tasks]` caps where a setup asks for more, the
+smaller number governing — so the draft holds nothing the owner did not see
+and the question names what will actually be allowed. Approve sends the
 revision and digest the page rendered. The controller refuses before any
 question when they are not the current draft, then asks through the
 pipeline's broker on that one private session: the question arrives as the

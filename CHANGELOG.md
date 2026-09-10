@@ -2,6 +2,25 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — The smaller number governs at the draft
+
+**Why.** The first attempt to save the email feature's grant in Chart came
+back "grant limits exceed the configured caps": ten a day for thirty days
+is three hundred children, above the store's cap of 256. The config
+docstrings and the README promised that the caps cap a setup's numbers,
+the smaller governing; the controller passed them through unchanged and
+the store refused.
+
+**What.**
+
+- *The draft is made at the caps.* The controller lowers a setup's
+  children, per-window, and lifetime limits to `[tasks]`'s before saving
+  the draft, so the question names what will actually be allowed. The
+  store's refusal stays as the defence it was.
+
+**Probes.** `probe_task_authority.py 93 → 94: a setup above the caps is
+drafted at them, not refused.`
+
 ## 2026-09-09 — On the edge, Ciel asks next time you talk
 
 **Why.** Automatic mode added nothing until senders were enrolled one by

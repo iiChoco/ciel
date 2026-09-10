@@ -198,8 +198,15 @@ class TaskController:
         draft_id = args.get('draft_id')
         if draft_id is not None and (not isinstance(draft_id, str) or not draft_id):
             raise ValueError('A draft ID is a string.')
+        # The smaller number governs: a setup asking for more than [tasks]
+        # allows is drafted at the caps, so the question names what will
+        # actually be allowed, and the store's own refusal stays a defence.
+        caps = self.config
+        limits = replace(setup.limits, max_children=min(setup.limits.max_children, caps.max_grant_children),
+                         max_per_window=min(setup.limits.max_per_window, caps.max_grant_per_window),
+                         lifetime_s=min(setup.limits.lifetime_s, caps.max_grant_lifetime_s))
         return await store.save_grant_draft(binding.origin.owner, setup.host, setup.namespace, setup.outcome,
-                                            Scope(chosen['operations'], chosen['targets']), setup.limits, setup.bindings,
+                                            Scope(chosen['operations'], chosen['targets']), limits, setup.bindings,
                                             draft_id=draft_id, expected_revision=revision, fence=binding.fence)
 
     def _question(self, draft: GrantDraft) -> str:
