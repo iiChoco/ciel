@@ -668,6 +668,7 @@ enabled = true
 # port = 8765        # the page lives at http://127.0.0.1:8765
 # max_upload_bytes = 8388608   # the largest file the page may send with a message
 # max_files_per_turn = 8       # files one message may carry
+# upload_keep_days = 14.0      # the Chart's own uploads older than this are pruned; 0 keeps all
 # max_inline_chars = 16000     # a text file this small is quoted into the prompt as data
 # image_prompt_chars = 900000  # the base64 budget for images shown to the model in one turn
 ```
@@ -707,6 +708,10 @@ file under `max_inline_chars` is quoted there, an image within
 `image_prompt_chars` of base64 is shown to it, and anything past either
 bound is named for it to read. The transcript row names what was attached
 and never its contents, and a public Discord turn never carries a file.
+The folder does not grow forever: at startup and after each new file, the
+Chart's own files older than `upload_keep_days` are removed — only files
+in its `<id>-<name>` shape, so anything the owner put in the workspace by
+hand is never touched; 0 keeps everything.
 The hello says whether the server takes files and how large; an older
 server hides the button.
 

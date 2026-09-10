@@ -307,6 +307,25 @@ def probe_files() -> None:
         link._on_frame(json.dumps({"type": "say", "text": "second", "files": ["4" * 32]}), peer)
         batch = link.pop_batch()
         check("a burst keeps every file it carried", batch is not None and [a.name for a in batch.attachments] == ["passwd", "notes.md"])
+        import os
+        old_file = uploads / ("e" * 32 + "-old.txt")
+        old_file.write_bytes(b"stale")
+        theirs = uploads / "notes-by-hand.txt"
+        theirs.write_bytes(b"the owner's own")
+        ancient = time.time() - 40 * 86400
+        for path in (old_file, theirs):
+            os.utime(path, (ancient, ancient))
+        keeper = WebLink(replace(WebConfig(), max_upload_bytes=4096, upload_keep_days=0))
+        keeper.bind_uploads(uploads)
+        check("with the keep window off, binding prunes nothing", old_file.exists() and stored.exists())
+        put("1" * 32, "passwd", b"x")  # the link above still holds the id; a resend touches nothing
+        link.bind_uploads(uploads)
+        check("binding the folder prunes the Chart's own files past the keep window, keeps fresh ones, and never touches a file in another shape",
+              not old_file.exists() and stored.exists() and theirs.read_bytes() == b"the owner's own")
+        os.utime(stored, (ancient, ancient))
+        put("f" * 32, "fresh.txt", b"new")
+        check("a new file prunes the stale ones and forgets their ids, so a say naming one reads as not found",
+              not stored.exists() and (uploads / ("f" * 32 + "-fresh.txt")).exists() and "1" * 32 not in link._files)
         many = replace(WebConfig(), max_upload_bytes=4096, max_files_per_turn=1)
         bounded = WebLink(many)
         bounded.bind_uploads(uploads)

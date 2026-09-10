@@ -1507,6 +1507,13 @@ class WebConfig:
     max_files_per_turn: int = 8
     """Files one message may carry; more are dropped with the page told so."""
 
+    upload_keep_days: float = 14.0
+    """How long a file the Chart sent stays under the workspace's uploads
+    folder. Pruned at startup and after each new file: only files in the
+    Chart's own ``<id>-<name>`` shape, older than this by modification
+    time, are removed; anything else in the folder is never touched. 0
+    keeps everything."""
+
     max_inline_chars: int = 16000
     """A text file this small is quoted into the prompt as data; a longer
     one is named by path for the model to read if it needs to."""

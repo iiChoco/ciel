@@ -314,6 +314,10 @@ def _sniff(data: bytes, claimed: str) -> str:
     return "application/octet-stream"
 
 
+_UPLOAD_NAME = re.compile(r"^[0-9a-f]{32}-")
+"""The Chart's own files: the page's id, then the safe basename."""
+
+
 def _safe_name(raw: str) -> str:
     """A basename that cannot leave the uploads folder or confuse a shell."""
     base = Path(raw.replace("\\", "/")).name
@@ -406,6 +410,33 @@ class WebLink:
     def bind_uploads(self, directory: Path) -> None:
         """Take files from the Chart into ``directory``, created owner-only."""
         self._uploads = directory.expanduser()
+        self._prune_uploads()
+
+    def _prune_uploads(self, now: float | None = None) -> int:
+        """Forget what the Chart sent long ago: files in its own ``<id>-<name>``
+        shape past ``upload_keep_days`` by modification time go, and nothing
+        else in the folder is touched — the folder is the brain's workspace,
+        and a file the owner put there by hand is theirs. Returns the count."""
+        keep_s = self._config.upload_keep_days * 86400.0
+        if self._uploads is None or keep_s <= 0 or not self._uploads.is_dir():
+            return 0
+        cutoff = (time.time() if now is None else now) - keep_s
+        pruned = 0
+        for path in self._uploads.iterdir():
+            if not _UPLOAD_NAME.match(path.name) or not path.is_file():
+                continue
+            try:
+                if path.stat().st_mtime > cutoff:
+                    continue
+                path.unlink()
+            except OSError:
+                log.debug("could not prune a Chart file", exc_info=True)
+                continue
+            pruned += 1
+            self._files.pop(path.name[:32], None)
+        if pruned:
+            log.info("pruned %d Chart file(s) older than %g days", pruned, self._config.upload_keep_days)
+        return pruned
 
     def _store_file(self, frame: dict[str, Any], ws: Any) -> None:
         """One file from an admitted page, saved before its say arrives.
@@ -460,6 +491,7 @@ class WebLink:
             return
         self._files[file_id] = Attachment(name, mime, str(path), len(data))
         self._send_to(ws, {"type": "file.result", "file_id": file_id, "ok": True, "name": name, "size": len(data)})
+        self._prune_uploads()
 
     def _attachments_for(self, ids: Any) -> tuple[tuple[Attachment, ...], int]:
         """The stored files a say names, and how many it named that are not here."""

@@ -2,6 +2,25 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-09 — The uploads folder does not grow forever
+
+**Why.** Every file sent from the Chart was written under the workspace's
+uploads folder and nothing ever removed one; a few screenshots a day is a
+folder that only grows.
+
+**What.**
+
+- *A keep window.* `[web].upload_keep_days` (fourteen; 0 keeps all). At
+  startup and after each new file the link removes the Chart's own files
+  — those in its `<id>-<name>` shape — older than that by modification
+  time, and forgets their ids, so a say naming one reads as not found.
+  Anything else in the folder is never touched: the workspace is the
+  brain's, and a file the owner put there by hand is theirs.
+
+**Probes.** `probe_web.py 59 → 62: the window off prunes nothing, binding
+prunes stale Chart files and keeps fresh ones and a hand-made file, a new
+file prunes and forgets.`
+
 ## 2026-09-09 — A reload has a deadline
 
 **Why.** After an edit to `gmail.py` on 2026-09-09 the spoke logged the
