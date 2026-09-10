@@ -497,6 +497,13 @@ async def probe_documents(config: Config) -> None:
 
         said = await remote.mac.open_document(str(course / "hw03.tex"), "TeXShop")
         check("open goes through the Mac's open with the app named", said == "opened hw03.tex with TeXShop" and opened[-1][:3] == ["/usr/bin/open", "-a", "TeXShop"])
+        import subprocess as _subprocess
+        real_calls: list[list[str]] = []
+        with patch.object(_subprocess, "run", lambda args, **kwargs: real_calls.append(list(args)) or Ran()):
+            pair.executor._open_runner = None
+            said = await remote.mac.open_document(str(course / "hw03.tex"), "TeXShop")
+        pair.executor._open_runner = runner
+        check("with no runner planted the real one is used, not None", said == "opened hw03.tex with TeXShop" and real_calls and real_calls[-1][0] == "/usr/bin/open")
         said = await remote.mac.open_document("https://example.test/hw03.pdf", "")
         check("a URL opens the page in the browser", said == "opened the page" and opened[-1] == ["/usr/bin/open", "https://example.test/hw03.pdf"])
         said = await remote.mac.open_document(str(course / "nope.tex"), "")
@@ -525,6 +532,9 @@ async def probe_documents(config: Config) -> None:
               "outside the folders bound" in out)
         out = text_of(await project_tools.open_document.handler({"project": "analysis", "role": "solution"}))
         check("open_document opens the current solution with its opener", out.endswith("opened hw03.tex with TeXShop") and opened[-1][2] == "TeXShop")
+        store.bind("analysis", "solution", str(course / "hw03.tex"), key="odd", opener="TeX;Shop")
+        out = text_of(await project_tools.open_document.handler({"project": "analysis", "key": "odd"}))
+        check("a refusal on the Mac reads as the Mac's own words, not as unreachable", "the Mac answered" in out and "one app name" in out)
         pair.leave()
         out = text_of(await project_tools.project_progress.handler({"project": "analysis"}))
         check("with the Mac gone, the reading says so instead of reading the server", "could not be reached" in out or "not connected" in out)

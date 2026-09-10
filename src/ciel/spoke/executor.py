@@ -34,6 +34,7 @@ import contextlib
 import logging
 import os
 import signal
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -336,11 +337,14 @@ class Executor:
         opener = " ".join(str(opener or "").split())
         if any(ch in opener for ch in " ;&|$`"):
             raise RuntimeError("refused on the Mac — an opener is one app name")
-        return await asyncio.to_thread(open_target, str(target), opener, home=Path.home(), state_dir=self._config.state_dir, runner=self._open_runner,
+        runner = self._open_runner if self._open_runner is not None else subprocess.run
+        return await asyncio.to_thread(open_target, str(target), opener, home=Path.home(), state_dir=self._config.state_dir, runner=runner,
                                        terminal=self._config.projects.terminal)
 
     _open_runner: Any = None
-    """The subprocess runner ``open`` goes through; the probes plant one."""
+    """The subprocess runner ``open`` and zellij go through; None is the
+    real one, and the probes plant a fake. (The first live open found this
+    None being passed as the runner itself.)"""
 
     async def _project_watch(self, paths: list[str]) -> dict[str, Any]:
         """The hub's watched set, replaced whole. Each path passes the same

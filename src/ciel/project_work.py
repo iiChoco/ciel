@@ -246,14 +246,23 @@ class RemoteWorkbench:
     async def read(self, path: str, max_bytes: int) -> tuple[bytes | None, str | None]:
         try:
             return await self._mac.read_document(path, max_bytes)
-        except Exception as exc:  # noqa: BLE001 - the Mac may be gone; that is a sentence
-            return None, f"the Mac could not be reached: {exc}"
+        except Exception as exc:  # noqa: BLE001 - the Mac may be gone, or may have refused; either is a sentence
+            return None, _mac_words(exc)
 
     async def open(self, target: str, opener: str) -> str:
         try:
             return str(await self._mac.open_document(target, opener))
         except Exception as exc:  # noqa: BLE001
-            return f"the Mac could not be reached: {exc}"
+            return _mac_words(exc)
+
+
+def _mac_words(exc: Exception) -> str:
+    """What the Mac's failure means: the spoke's own refusal in its words,
+    or, when nothing answered, that it could not be reached."""
+    text = str(exc)
+    if "not connected" in text or "did not answer" in text or "left" in text or not text:
+        return f"the Mac could not be reached: {text or exc.__class__.__name__}"
+    return f"the Mac answered: {text}"
 
 
 def roots_for(project: Project, resource: Resource) -> tuple[Path, ...]:

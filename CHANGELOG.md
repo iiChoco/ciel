@@ -2,6 +2,26 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-10 — The Mac's open runs for real
+
+**Why.** The first live "pull up my analysis homework" came back "the Mac
+connection isn't responding" with the spoke seated. The spoke's open
+handler took its subprocess runner from a slot the probes plant and
+production never fills, so every open raised before running anything,
+and the hub's workbench reported every error as the Mac being
+unreachable.
+
+**What.**
+
+- *A real runner by default.* The slot's None now means `subprocess.run`;
+  a planted fake still replaces it in the probes.
+- *The Mac's words.* A spoke-side refusal ("not opened", "busy with") is
+  reported as what the Mac answered; only a spoke that is not connected
+  or did not answer reads as unreachable.
+
+**Probes.** `probe_tool_rpc.py 78 → 80: with no runner planted the real
+one is used, and a refusal on the Mac reads as its own words.`
+
 ## 2026-09-10 — Pull it up in the terminal already open
 
 **Why.** The owner works in vim inside zellij inside iTerm2 and asked
