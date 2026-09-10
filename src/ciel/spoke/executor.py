@@ -336,7 +336,8 @@ class Executor:
         opener = " ".join(str(opener or "").split())
         if any(ch in opener for ch in " ;&|$`"):
             raise RuntimeError("refused on the Mac — an opener is one app name")
-        return await asyncio.to_thread(open_target, str(target), opener, home=Path.home(), state_dir=self._config.state_dir, runner=self._open_runner)
+        return await asyncio.to_thread(open_target, str(target), opener, home=Path.home(), state_dir=self._config.state_dir, runner=self._open_runner,
+                                       terminal=self._config.projects.terminal)
 
     _open_runner: Any = None
     """The subprocess runner ``open`` goes through; the probes plant one."""

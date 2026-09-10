@@ -809,6 +809,13 @@ class ProjectsConfig:
     reading_lifetime_s: float = 30 * 86400.0
     """How long the readings grant runs before it expires; [tasks] caps it."""
 
+    terminal: str = "zellij"
+    """How a terminal editor named as a resource's opener (vim, nvim, hx…)
+    reaches the terminal the owner already has open: ``zellij`` types the
+    line into the live session's focused pane through zellij's own CLI,
+    and only when that pane is at a shell prompt. Empty refuses terminal
+    openers; an app name still opens a window through ``open``."""
+
 
 @dataclass(frozen=True, slots=True)
 class JournalConfig:

@@ -2,6 +2,31 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-10 — Pull it up in the terminal already open
+
+**Why.** The owner works in vim inside zellij inside iTerm2 and asked
+whether Ciel could open the homework there — not a new window, the
+terminal already open.
+
+**What.**
+
+- *A terminal editor as an opener.* A binding whose opener is vim, nvim,
+  vi, hx, nano, micro, or emacs is typed into the focused pane of the
+  live zellij session through zellij's own CLI: `write-chars` with the
+  editor and the quoted path, then enter. Never AppleScript, never the
+  shell.
+- *Only at a prompt.* The session's client listing says what the pane is
+  running; anything but a shell is refused in words and nothing is
+  typed. No live session, or no zellij on the Mac, is said the same way.
+  `[projects].terminal` names the door; empty refuses terminal openers,
+  and an app name still opens a window through `open`.
+
+**Probes.** `probe_atlas.py 51 → 56: at a prompt the quoted line and
+enter are typed into the live session and not the exited one, a busy
+pane is refused with nothing typed, no live session is said, the door
+closes by config, and open_target routes editors to the terminal and
+apps to open.`
+
 ## 2026-09-10 — Readings are kept under a grant
 
 **Why.** Step 3 of the project-awareness plan. A reading answered on

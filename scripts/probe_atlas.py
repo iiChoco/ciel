@@ -260,6 +260,48 @@ async def document_checks(root: Path) -> None:
     tools.bind_workbench(None)
     check("without a workbench the tools say the machine is not reachable", "not reachable" in text(await tools.open_document.handler({"project": "analysis", "role": "solution"})))
 
+    print("\nthe terminal already open")
+    from ciel.project_work import open_in_terminal
+    typed: list[list[str]] = []
+
+    def zellij(sessions: str, clients: str):
+        def runner(args, **kwargs):
+            typed.append(list(args))
+            out = ""
+            if args[1] == "list-sessions":
+                out = sessions
+            elif "list-clients" in args:
+                out = clients
+            class R:
+                returncode = 0
+                stdout = out
+                stderr = ""
+            return R()
+        return runner
+
+    sessions = "zippy-magpie [Created 12days ago] (EXITED - attach to resurrect)\nchatty-salamander [Created 23h ago]\n"
+    at_prompt = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n1         terminal_1     zsh\n"
+    doc = course / "hw 03.tex"
+    doc.write_text("x")
+    said = open_in_terminal(doc, "vim", runner=zellij(sessions, at_prompt), zellij="/fake/zellij")
+    check("at a prompt, vim and the quoted path are typed into the live session's focused pane, then enter, and nothing else",
+          said == "opened hw 03.tex in vim in your terminal (zellij session chatty-salamander)"
+          and typed[-2] == ["/fake/zellij", "--session", "chatty-salamander", "action", "write-chars", f"vim '{doc}'"]
+          and typed[-1] == ["/fake/zellij", "--session", "chatty-salamander", "action", "write", "13"]
+          and all("zippy-magpie" not in a for a in typed[-2]))
+    typed.clear()
+    busy = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n1         terminal_1     vi hw01.tex\n"
+    said = open_in_terminal(doc, "vim", runner=zellij(sessions, busy), zellij="/fake/zellij")
+    check("a pane running something other than a shell is refused in words, and nothing is typed",
+          said.startswith("not opened: your terminal is busy with 'vi hw01.tex'") and not any("write" in a for a in typed))
+    typed.clear()
+    said = open_in_terminal(doc, "vim", runner=zellij("zippy-magpie [Created 12days ago] (EXITED - attach to resurrect)\n", at_prompt), zellij="/fake/zellij")
+    check("no live session is said, not typed", said.startswith("not opened: no zellij session is attached") and not any("write" in a for a in typed))
+    check("the door can be closed by config", open_in_terminal(doc, "vim", runner=zellij(sessions, at_prompt), zellij="/fake/zellij", terminal="").startswith("not opened: a terminal editor needs"))
+    said = open_target(str(doc), "vim", home=home, state_dir=state, runner=zellij(sessions, at_prompt), zellij="/fake/zellij")
+    check("open_target routes a terminal editor opener to the terminal, an app name to open",
+          said.startswith("opened hw 03.tex in vim in your terminal") and open_target(str(doc), "TeXShop", home=home, state_dir=state, runner=lambda a, **k: Ran()) == "opened hw 03.tex with TeXShop")
+
 
 async def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ciel-atlas-probe-") as tmp:

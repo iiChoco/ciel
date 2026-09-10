@@ -1035,7 +1035,7 @@ class Pipeline:
                 bench: Any = RemoteWorkbench(self._remote.mac)
                 watch: Any = self._remote.mac.watch_resources
             else:
-                bench = LocalWorkbench(state_dir=config.state_dir, forbidden=forbidden_names(config))
+                bench = LocalWorkbench(state_dir=config.state_dir, forbidden=forbidden_names(config), terminal=config.projects.terminal)
                 watch = self._watch_locally
             self._project_adapter = ProjectAdapter(self._projects, bench, work_limits, host=self._role, watch=watch)
             self._project_adapter.bind_store(lambda: self._task_controller.store, config.tasks.owner)

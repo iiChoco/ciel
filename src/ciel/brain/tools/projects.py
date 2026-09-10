@@ -188,7 +188,9 @@ async def log_progress(args: dict[str, Any]) -> dict[str, Any]:
         "folder, draft, reference, dataset, notebook, published…); `locator` "
         "is the path or URL as given. `current` marks it the current one of "
         "its role (one per role); `key` names it (defaults to the role) and "
-        "binding a known key replaces it; `opener` is an app to open it with. "
+        "binding a known key replaces it; `opener` is an app to open it with, "
+        "or a terminal editor (vim, nvim, hx…) to be typed into the terminal "
+        "the owner already has open. "
         "A place you found in a listing is something to ask about, never to "
         "bind on your own."
     ),

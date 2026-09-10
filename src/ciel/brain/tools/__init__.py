@@ -157,7 +157,7 @@ def build_tool_server(
         if remote is not None:
             bind_workbench(RemoteWorkbench(remote.mac), limits)
         else:
-            bind_workbench(LocalWorkbench(state_dir=config.state_dir, forbidden=forbidden_names(config)), limits)
+            bind_workbench(LocalWorkbench(state_dir=config.state_dir, forbidden=forbidden_names(config), terminal=config.projects.terminal), limits)
     else:
         # Same reasoning as memory: an always-unavailable tool wastes turns.
         tools = [t for t in tools if t not in PROJECT_TOOLS]

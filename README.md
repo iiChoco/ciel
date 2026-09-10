@@ -1652,6 +1652,16 @@ reachable rather than reading the server. `scripts/probe_readers.py`
 drives the readers, and the documents ride in `probe_atlas.py` and
 `probe_tool_rpc.py`.
 
+**Or in the terminal you already have open.** A binding whose opener is
+a terminal editor — `vim`, `nvim`, `vi`, `hx`, `nano`, `micro`, `emacs` —
+is not opened in a window: the line `vim '<path>'` is typed into the
+focused pane of the live zellij session, through zellij's own CLI (never
+AppleScript, never the shell), and only when that pane reports a shell
+as its running command. Into vim, a REPL, or a running command it would
+be keystrokes, so those are refused in words: *your terminal is busy
+with 'vi hw01.tex'*. No live session is said, not typed. `[projects].terminal`
+names the door (`zellij`; empty refuses terminal openers).
+
 **Readings are kept under a grant, and only then.** Opening or remembering
 a project never starts watching it. Under **Tasks → Standing grants**, the
 feature *Readings of bound documents* offers one target per project with a
@@ -1695,6 +1705,7 @@ watch_poll_s = 15.0         # on the Mac, between looks at the watched documents
 observe_poll_s = 60.0       # on the brain's host, between the watch task's looks at settled changes
 max_reads_per_day = 200     # what the readings grant asks for; [tasks] caps it
 reading_lifetime_s = 2592000.0 # thirty days; [tasks] caps it
+terminal = "zellij"         # how a terminal editor opener reaches the open terminal; "" refuses
 ```
 
 ### Quick notes

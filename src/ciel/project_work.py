@@ -130,10 +130,11 @@ def read_document_bytes(path: Path, max_bytes: int) -> tuple[bytes | None, str |
 class LocalWorkbench:
     """The single process: the owner's machine is this one."""
 
-    def __init__(self, *, home: Path | None = None, state_dir: Path, forbidden: frozenset[str] = frozenset()) -> None:
+    def __init__(self, *, home: Path | None = None, state_dir: Path, forbidden: frozenset[str] = frozenset(), terminal: str = "zellij") -> None:
         self._home = (home or Path.home()).expanduser()
         self._state_dir = state_dir
         self._forbidden = forbidden
+        self._terminal = terminal
 
     async def read(self, path: str, max_bytes: int) -> tuple[bytes | None, str | None]:
         resolved, why = check_document_path(path, home=self._home, state_dir=self._state_dir, forbidden=self._forbidden)
@@ -142,12 +143,21 @@ class LocalWorkbench:
         return await asyncio.to_thread(read_document_bytes, resolved, max_bytes)
 
     async def open(self, target: str, opener: str) -> str:
-        return await asyncio.to_thread(open_target, target, opener, home=self._home, state_dir=self._state_dir)
+        return await asyncio.to_thread(open_target, target, opener, home=self._home, state_dir=self._state_dir, terminal=self._terminal)
 
 
-def open_target(target: str, opener: str, *, home: Path, state_dir: Path, runner: Any = subprocess.run) -> str:
+TERMINAL_EDITORS = ("vim", "nvim", "vi", "hx", "nano", "micro", "emacs")
+"""An opener that is one of these means the terminal the owner already has
+open, not an app window: the editor is typed into the focused pane."""
+
+SHELLS = ("zsh", "bash", "fish", "sh", "nu", "-zsh", "-bash", "-fish")
+
+
+def open_target(target: str, opener: str, *, home: Path, state_dir: Path, runner: Any = subprocess.run,
+                terminal: str = "zellij", zellij: str | None = None) -> str:
     """``open`` on the Mac: a URL to the browser, a path to its app or the
-    one named. Nothing under the state directory, nothing that is not there."""
+    one named — or, for a terminal editor, typed into the terminal already
+    open. Nothing under the state directory, nothing that is not there."""
     if target.lower().startswith(("http://", "https://")):
         args = ["/usr/bin/open", *(["-a", opener] if opener else []), target]
         what = "the page"
@@ -165,6 +175,8 @@ def open_target(target: str, opener: str, *, home: Path, state_dir: Path, runner
             pass
         if not resolved.exists():
             return f"not opened: {resolved} does not exist"
+        if opener in TERMINAL_EDITORS:
+            return open_in_terminal(resolved, opener, runner=runner, terminal=terminal, zellij=zellij)
         args = ["/usr/bin/open", *(["-a", opener] if opener else []), str(resolved)]
         what = resolved.name
     try:
@@ -174,6 +186,55 @@ def open_target(target: str, opener: str, *, home: Path, state_dir: Path, runner
     if result.returncode != 0:
         return f"could not open {what}: {(result.stderr or '').strip() or f'open exited {result.returncode}'}"
     return f"opened {what}" + (f" with {opener}" if opener else "")
+
+
+def open_in_terminal(path: Path, editor: str, *, runner: Any = subprocess.run, terminal: str = "zellij", zellij: str | None = None) -> str:
+    """Type ``<editor> <path>`` into the terminal the owner already has open.
+
+    Through zellij's own CLI, never AppleScript and never the shell: the
+    live session's focused pane is asked what it is running, and the line
+    is typed only when that is a shell prompt — into vim, a REPL, or a
+    running command it would be keystrokes, so those are refused in words.
+    The path is quoted; nothing else is typed."""
+    import shlex
+    import shutil
+
+    if terminal != "zellij":
+        return f"not opened: a terminal editor needs a terminal door, and [projects].terminal is {terminal!r}"
+    binary = zellij or shutil.which("zellij") or next((c for c in ("/opt/homebrew/bin/zellij", "/usr/local/bin/zellij") if Path(c).exists()), None)
+    if binary is None:
+        return "not opened: zellij was not found on the Mac, and that is the door to the open terminal"
+
+    def run(*args: str) -> tuple[int, str]:
+        try:
+            result = runner([binary, *args], capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return 1, exc.__class__.__name__
+        return int(result.returncode), (result.stdout or "") + (result.stderr or "")
+
+    code, out = run("list-sessions", "--no-formatting")
+    live = [line.split()[0] for line in out.splitlines() if line.strip() and "EXITED" not in line]
+    if code != 0 or not live:
+        return "not opened: no zellij session is attached — open your terminal first"
+    session = live[0]
+    code, out = run("--session", session, "action", "list-clients")
+    running = ""
+    for line in out.splitlines()[1:]:
+        parts = line.split(None, 2)
+        if len(parts) >= 3:
+            running = parts[2].strip()
+            break
+    command = running.split()[0].rsplit("/", 1)[-1] if running else ""
+    if running and command not in SHELLS:
+        return f"not opened: your terminal is busy with {running!r} — leave it at a prompt and ask again"
+    line = f"{editor} {shlex.quote(str(path))}"
+    code, out = run("--session", session, "action", "write-chars", line)
+    if code != 0:
+        return f"could not type into the terminal: {out.strip() or 'zellij refused'}"
+    code, out = run("--session", session, "action", "write", "13")
+    if code != 0:
+        return f"typed the command but could not press enter: {out.strip() or 'zellij refused'}"
+    return f"opened {path.name} in {editor} in your terminal (zellij session {session})"
 
 
 class RemoteWorkbench:
@@ -618,6 +679,6 @@ def reading_request(project_id: str, key: str, digest: str, path: str) -> tuple[
     return spec, Step("read", "resource.read", target, (("project", project_id), ("key", key), ("digest", digest), ("path", path)))
 
 
-__all__ = ["DOCUMENT_SUFFIXES", "LocalWorkbench", "NAMESPACE", "NAMESPACE_NAME", "Observed", "ProjectAdapter", "RemoteWorkbench", "WorkLimits",
-           "Workbench", "age_words", "check_document_path", "observe", "open_target", "read_document_bytes", "reading_payload", "reading_request",
-           "roots_for", "watch_request", "within"]
+__all__ = ["DOCUMENT_SUFFIXES", "LocalWorkbench", "NAMESPACE", "NAMESPACE_NAME", "Observed", "ProjectAdapter", "RemoteWorkbench", "SHELLS",
+           "TERMINAL_EDITORS", "WorkLimits", "Workbench", "age_words", "check_document_path", "observe", "open_in_terminal", "open_target",
+           "read_document_bytes", "reading_payload", "reading_request", "roots_for", "watch_request", "within"]
