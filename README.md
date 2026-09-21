@@ -296,9 +296,10 @@ Ciel is doing without your having to find the terminal.
 | Error | Red — the turn failed |
 
 It ignores mouse clicks, never takes focus, and follows you across Spaces. It
-wears the Chart's state chip — the same cut-corner shape, the same six colours,
-the same breathing dot and wide-tracked capitals — so the corner of the screen
-and the browser tab read as one instrument. The dot, the border, and the tint
+wears the Chart's state vocabulary — the same six colours and wide-tracked
+capitals, on the cut-corner chip with a breathing dot that the Chart itself
+wore before Iris — so the corner of the screen and the browser tab read as
+one instrument. The dot, the border, and the tint
 over the ground all carry the state colour: a dark chip with only a small dot
 vanishes against a dark terminal, which is exactly where it sits. The chip is
 sized to its label, so it grows and shrinks a little as the word changes.
@@ -645,18 +646,40 @@ Off by default. Turn it on and Ciel serves a small chat page on loopback —
 a live window onto the whole conversation, and a place to type when the
 room must stay quiet: a lecture, a library, a call. Every lane's turns
 appear as they happen (spoken ones included — you see what Ciel heard),
-the status pill mirrors the HUD and, while listening, says what opened the
-window — `listening · spoken`, `listening · snap`, `listening · clap twice`,
-and bare `listening` for a follow-up window nothing opened — confirm-tier
-questions become Yes/No buttons, and the mute switch lives in the header. Next to the status
-pill, an agents chip counts everything working on your behalf right now
-— a deep-thought pass mid-flight, background watches, running timers —
-and expands into a list with live countdowns; it disappears when
-nothing is running. Under the header, a strip of readings mirrors the
-world table (Phase Space, below): whether the Mac holds the seat and
-whether you're at it, the place, the timers and watches, what's next on
-the calendar, the ring — each chip with its age, dimmed once its reading
-has gone stale.
+the state line in the header mirrors the HUD and, while listening, says what
+opened the window — `listening · spoken`, `listening · snap`,
+`listening · clap twice`, and bare `listening` for a follow-up window nothing
+opened — confirm-tier questions become Yes/No buttons, and the mute switch
+lives in the header. In the header, an agents chip counts everything working
+on your behalf right now — a deep-thought pass mid-flight, background
+watches, running timers — and opens a list with live countdowns at the
+mark's right hand; it disappears when nothing is running. At the mark's left
+hand, the readings mirror the world table (Phase Space, below): whether the
+Mac holds the seat and whether you're at it, the place, the timers and
+watches, what's next on the calendar, the ring — each a label, a white
+value, and a line of age that turns red, under a dashed label, once the
+reading has gone stale.
+
+The look is Iris. The mark is the interface: a living symbol drawn on a
+canvas in the middle of the room — an eclipse disc behind twelve iris
+blades, a corona, and an instrument ring with ticks and cardinal marks —
+whose core changes with the state: an armillary when idle, thinking, or
+speaking, a knot when listening, an infinity strand when reasoning, a dashed
+lens with the blades shut on an error. The page has no colour of its own. It
+borrows the state's light for its labels, hairlines, and caret, cross-fading
+in 600 ms, a little slower than the mark re-lights, so the room follows the
+mark rather than leading it. Instrument text is mono; Ciel's sentences are
+the one serif voice. The same renderer draws the small glyphs — the header,
+the asking bar, each agent — with only the core showing; an agent wears the
+core of the state its kind works in, a deep thought the Möbius band. A
+question turns the asking bar to the listening green whatever the room is
+doing, and Yes is the only filled shape on the page. The mark's engine is
+inlined, so the Chart is still one file that renders with no network. No
+level reaches the page, so the voice in the tick scale while Ciel speaks is
+the engine's own envelope, not the room's sound. On a phone the mark stands
+above the readings and the roster stays folded until asked for; a short
+window, or an open task panel, gives the mark less room before the
+conversation loses any; with reduced motion the marks hold still.
 
 ```bash
 uv sync --extra web

@@ -4,10 +4,11 @@
      self-contained file with zero external assets: it must render in a
      library basement with no network beyond the loopback.
 
-     The look is "Instrument" (design 2a): a holographic HUD where cyan is
-     structure and gold is voice — cut-corner chips, mono meta, scanlines,
-     corner brackets around the viewport; Ciel answers in a serif, you in
-     cut-corner glass. -->
+     The look is "Iris" (Instrument, take E): the mark is the interface and
+     everything else is a readout on its instrument ring. The page has no
+     colour of its own — it borrows the state the mark is in (--st) for its
+     labels, hairlines and caret, and lets go of it when the mark moves on.
+     Instrument text is mono; Ciel's sentences are the one serif voice. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -15,472 +16,423 @@
 <title>Ciel</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Ccircle cx='64' cy='64' r='58' fill='none' stroke='%23e8c98a' stroke-opacity='.5' stroke-width='7' stroke-dasharray='4 12'/%3E%3Ccircle cx='64' cy='64' r='34' fill='none' stroke='%23a0f0ff' stroke-opacity='.7' stroke-width='7'/%3E%3Ccircle cx='64' cy='64' r='12' fill='%23e8c98a'/%3E%3C/svg%3E">
 <style>
+  /* --st cross-fades a little slower than the mark re-lights, so the room
+     follows the mark rather than leading it. */
+  @property --st { syntax: '<color>'; inherits: true; initial-value: #8fa8b3; }
   :root {
-    /* cyan is structure */
+    /* Instrument base tokens. The names and values above the Iris line are
+       what nutrition.html and the website's Instrument stylesheet vendored;
+       they stay as they were so those copies remain a true subset. */
     --line: rgba(140, 240, 255, .14);
     --line-strong: rgba(140, 240, 255, .22);
     --glass-border: rgba(160, 240, 255, .28);
     --text: #dfe6e6;
     --text-dim: rgba(223, 230, 230, .65);
     --text-faint: rgba(223, 230, 230, .34);
-    /* gold is voice and anything that wants you */
     --gold: #e8c98a;
     --gold-dim: rgba(232, 201, 138, .45);
     --gold-line: rgba(232, 201, 138, .16);
     --serif: Georgia, "Times New Roman", serif;
-    --mono: ui-monospace, Menlo, Consolas, monospace;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
-    /* the HUD's state vocabulary */
+    /* the state vocabulary: the mark engine's own seven lights */
     --st-idle: #8fa8b3;
     --st-listening: #7adea8;
     --st-thinking: #e8c98a;
     --st-reasoning: #b89be8;
+    --st-deep: #8f9cff;
     --st-speaking: #a0f0ff;
     --st-error: #e88a8a;
+    /* Iris: seven lights, one dark */
+    --void: #020507;
+    --room: #08141b;
+    --ink: #ffffff;      /* values: every number */
+    --ink-2: #c9d6dc;    /* prose */
+    --ink-3: #8fa8b3;    /* secondary labels; idle grey doubles as the neutral */
+    --ink-4: #6f8590;    /* labels */
+    --say: "Iowan Old Style", Georgia, "Times New Roman", serif;
+    --hair: color-mix(in srgb, var(--st) 25%, transparent);
+    --rule: color-mix(in srgb, var(--st) 45%, transparent);
   }
+  body[data-state="idle"] { --st: #8fa8b3; }
+  body[data-state="listening"] { --st: #7adea8; }
+  body[data-state="thinking"] { --st: #e8c98a; }
+  body[data-state="reasoning"] { --st: #b89be8; }
+  body[data-state="speaking"] { --st: #a0f0ff; }
+  body[data-state="error"] { --st: #e88a8a; }
+
   * { box-sizing: border-box; margin: 0; }
   html, body { height: 100%; }
   body {
-    background: radial-gradient(120% 85% at 50% -10%, #0b1922 0%, #050c11 55%, #030608 100%) #030608;
-    color: var(--text);
-    font: 14.5px/1.55 var(--sans);
+    background: radial-gradient(70% 40% at 50% 18%, var(--room) 0%, var(--void) 100%) var(--void);
+    color: var(--ink);
+    font: 400 15px/1.5 var(--mono);
     display: flex;
     flex-direction: column;
+    transition: --st 600ms ease;
   }
   button { font: inherit; background: none; border: none; color: inherit; cursor: pointer; padding: 0; }
-  :focus-visible { outline: 1px solid rgba(160, 240, 255, .55); outline-offset: 2px; }
+  a { color: var(--st-thinking); } a:hover { color: var(--st-speaking); }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 
-  @keyframes br { 0%, 100% { opacity: .45; transform: scale(.88); } 50% { opacity: 1; transform: scale(1.08); } }
-  @keyframes ha { 0%, 100% { opacity: .5; } 50% { opacity: .95; } }
+  @keyframes caret { 0%, 100% { opacity: 1; } 50% { opacity: .15; } }
 
-  /* the projection: scanlines over everything, brackets at the corners */
-  #scan {
-    position: fixed; inset: 0; z-index: 50;
-    pointer-events: none; opacity: .3;
-    background: repeating-linear-gradient(180deg, rgba(160, 240, 255, .05) 0 1px, transparent 1px 3px);
-  }
-  .corner { position: fixed; z-index: 51; width: 13px; height: 13px; pointer-events: none; }
-  .corner.tl { top: 10px; left: 10px;  border-left: 1px solid rgba(232, 201, 138, .6);  border-top: 1px solid rgba(232, 201, 138, .6); }
-  .corner.tr { top: 10px; right: 10px; border-right: 1px solid rgba(232, 201, 138, .6); border-top: 1px solid rgba(232, 201, 138, .6); }
-  .corner.bl { bottom: 10px; left: 10px;  border-left: 1px solid rgba(232, 201, 138, .35);  border-bottom: 1px solid rgba(232, 201, 138, .35); }
-  .corner.br { bottom: 10px; right: 10px; border-right: 1px solid rgba(232, 201, 138, .35); border-bottom: 1px solid rgba(232, 201, 138, .35); }
+  canvas.mark { display: block; width: 100%; height: 100%; }
 
-  /* cut-corner chips — the one shape the whole instrument is made of */
+  /* chips: square, hairline, in the instrument's voice */
   .chip {
     display: flex; align-items: center; gap: 8px;
-    padding: 6px 12px;
-    border: 1px solid var(--line-strong);
-    clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
-    font: 600 10px/1 var(--mono);
-    letter-spacing: .2em;
+    min-height: 32px; padding: 0 12px;
+    border: 1px solid var(--ink-4);
+    font: 500 11px/1 var(--mono);
+    letter-spacing: .24em;
     text-transform: uppercase;
-    color: var(--text-dim);
+    text-decoration: none;
+    color: var(--ink-3);
     white-space: nowrap;
   }
-  .chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--st-idle); flex: none; }
+  a.chip:hover, button.chip:hover { border-color: var(--ink); color: var(--ink); }
 
   header {
-    display: flex; align-items: center; gap: 14px;
-    padding: 14px 28px;
-    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px 24px; flex-wrap: wrap;
+    padding: 18px 28px 0;
+    font: 500 11px/1 var(--mono);
+    letter-spacing: .3em; text-transform: uppercase;
     flex: none;
   }
-  .brand { display: flex; align-items: center; gap: 12px; }
-  .wordmark { font: 400 18px/1 var(--serif); letter-spacing: .24em; color: #f3efe6; }
-  .aperture .c-outer { stroke: rgba(232, 201, 138, .35); }
-  .aperture .c-mid   { stroke: rgba(160, 240, 255, .5); }
-  .aperture .c-core  { fill: rgba(232, 201, 138, .85); }
-  body[data-state="thinking"] .aperture,
-  body[data-state="reasoning"] .aperture { animation: ha 4s ease-in-out infinite; }
-  body[data-state="thinking"] .aperture .c-outer,
-  body[data-state="reasoning"] .aperture .c-outer { stroke: rgba(232, 201, 138, .5); }
-  body[data-state="thinking"] .aperture .c-mid,
-  body[data-state="reasoning"] .aperture .c-mid { stroke: rgba(232, 201, 138, .6); }
-  body[data-state="thinking"] .aperture .c-core,
-  body[data-state="reasoning"] .aperture .c-core { fill: var(--gold); }
-  .spacer { flex: 1; }
+  .brand { display: flex; align-items: center; gap: 10px; color: var(--st); }
+  .brand .glyph { width: 22px; height: 22px; display: block; flex: none; }
+  .controls { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; }
+  #now { color: var(--ink); padding-left: 12px; font-variant-numeric: tabular-nums; }
 
-  /* the state pill: six values, color is the message */
-  #state { padding: 6px 13px 6px 10px; letter-spacing: .22em; background: rgba(143, 168, 179, .1); border-color: rgba(143, 168, 179, .42); color: #b6c6cd; }
-  #state .dot { background: var(--st-idle); }
-  body[data-state="listening"] #state { background: rgba(122, 222, 168, .1); border-color: rgba(122, 222, 168, .5); color: #a6ecc7; }
-  body[data-state="listening"] #state .dot { background: var(--st-listening); box-shadow: 0 0 9px var(--st-listening); animation: br 3.4s ease-in-out infinite; }
-  body[data-state="thinking"] #state { background: rgba(232, 201, 138, .12); border-color: rgba(232, 201, 138, .55); color: #f0dbaf; }
-  body[data-state="thinking"] #state .dot { background: var(--st-thinking); box-shadow: 0 0 9px var(--st-thinking); animation: br 3.4s ease-in-out infinite; }
-  body[data-state="reasoning"] #state { background: rgba(184, 155, 232, .12); border-color: rgba(184, 155, 232, .55); color: #d2bef4; }
-  body[data-state="reasoning"] #state .dot { background: var(--st-reasoning); box-shadow: 0 0 9px var(--st-reasoning); animation: br 3.4s ease-in-out infinite; }
-  body[data-state="speaking"] #state { background: rgba(160, 240, 255, .12); border-color: rgba(160, 240, 255, .6); color: #c7f4fd; }
-  body[data-state="speaking"] #state .dot { background: var(--st-speaking); box-shadow: 0 0 9px var(--st-speaking); animation: br 1.6s ease-in-out infinite; }
-  body[data-state="error"] #state { background: rgba(232, 138, 138, .12); border-color: rgba(232, 138, 138, .6); color: #f3b7b7; }
-  body[data-state="error"] #state .dot { background: var(--st-error); box-shadow: 0 0 9px var(--st-error); }
-
-  /* the active-agent roster: a chip that counts, a panel that lists */
-  #agentsbtn { border-color: rgba(232, 201, 138, .4); color: var(--gold); }
-  #agentsbtn:hover { border-color: rgba(232, 201, 138, .7); }
+  /* a lit control takes the state's colour; nothing else is ever filled */
+  #agentsbtn { border-color: color-mix(in srgb, var(--st) 50%, transparent); }
+  #agentsbtn:hover { border-color: var(--st); }
   #agentsbtn[hidden] { display: none; }
   #agentsbtn .arr { opacity: .6; letter-spacing: 0; }
-  #agentsbtn.deep { background: rgba(184, 155, 232, .12); border-color: rgba(184, 155, 232, .55); color: #d2bef4; }
-
-  #mute:hover { border-color: rgba(140, 240, 255, .45); color: var(--text); }
-  body.muted #mute { background: rgba(143, 168, 179, .12); border-color: rgba(143, 168, 179, .45); color: #b6c6cd; }
-  #speakback:hover { border-color: rgba(140, 240, 255, .45); color: var(--text); }
-  body.speakback #speakback { border-color: rgba(232, 201, 138, .5); color: var(--gold); }
-
-  /* the restart chip: quiet until armed, gold while it wants a second click */
-  #restart:hover { border-color: rgba(232, 201, 138, .5); color: var(--gold); }
-  #restart.arming { background: rgba(232, 201, 138, .12); border-color: rgba(232, 201, 138, .6); color: #f0dbaf; }
+  body.agentsopen #agentsbtn, body:not(.muted) #mute, body.speakback #speakback { color: var(--st); border-color: color-mix(in srgb, var(--st) 50%, transparent); }
+  #restart.arming { color: var(--st-thinking); border-color: var(--st-thinking); box-shadow: 0 0 16px -4px var(--st-thinking); }
 
   /* visually hidden, read aloud: the armed state must reach ears too */
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
-  #agentsbar {
-    display: none;
-    border-bottom: 1px solid rgba(184, 155, 232, .22);
-    background: linear-gradient(180deg, rgba(26, 22, 40, .55), rgba(5, 12, 17, .2));
+  /* the room: readings at the mark's left hand, the working agents at its right */
+  #roomgrid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    grid-template-areas: "place mark ring";
+    align-items: center; gap: 8px 32px;
+    padding: 4px 28px 0;
+    max-width: 1080px; width: 100%; margin: 0 auto;
     flex: none;
   }
-  body.agentsopen #agentsbar { display: block; }
+  #markbox { grid-area: mark; width: min(240px, 50vw); aspect-ratio: 1; position: relative; }
+
+  /* the readings: the world table (world.py). A reading is not a card: a
+     label with its bearing, a white value, one line of age. Only the age
+     carries colour; the value stays white however old. */
+  #world {
+    grid-area: place;
+    display: grid; grid-template-columns: auto auto; justify-content: end;
+    gap: 12px 24px; text-align: right; align-self: center;
+  }
+  #world .reading { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  #world .reading .k { font: 500 10px/1 var(--mono); letter-spacing: .3em; text-transform: uppercase; color: var(--ink-4); }
+  #world .reading .v { font: 300 17px/1.1 var(--mono); color: var(--ink); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  #world .reading .age { font: 500 10px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--ink-3); }
+  #world .reading.warn .k { color: var(--st-thinking); }
+  #world .reading.stale .age { color: var(--st-error); }
+  #world .reading.stale .k { text-decoration: underline dashed color-mix(in srgb, var(--st-error) 60%, transparent); text-underline-offset: 4px; }
+
+  /* the active-agent roster: a chip that counts, a column that lists */
+  #agentsbar { grid-area: ring; display: none; flex-direction: column; gap: 14px; text-align: left; max-width: 360px; min-width: 0; }
+  body.agentsopen.hasagents #agentsbar { display: flex; }
   #agentsbar .caption {
     display: flex; align-items: center; gap: 12px;
-    padding: 13px 28px 6px;
-    font: 500 9.5px/1 var(--mono);
+    font: 500 10px/1 var(--mono);
+    letter-spacing: .3em; text-transform: uppercase;
+    color: var(--ink-4);
+  }
+  #agentsbar .caption::after { content: ""; flex: 1; height: 1px; background: var(--hair); }
+  #agentrows { display: flex; flex-direction: column; }
+  .agent { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px 14px; align-items: center; padding: 4px 0; --kc: var(--ink-3); }
+  .agent .glyph { width: 18px; height: 18px; display: block; }
+  .agent .main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .agent .kind { font: 500 10px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--kc); }
+  .agent .label { font: 400 15px/1.35 var(--say); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agent .detail { font: 400 11px/1.3 var(--mono); color: var(--ink-4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agent .meta { font: 300 15px/1 var(--mono); color: var(--ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .agent.deep { --kc: var(--st-deep); }
+  .agent.watch { --kc: var(--st-listening); }
+  .agent.timer { --kc: var(--st-speaking); }
+
+  /* banners: the machine's own condition, a pane that is barely there */
+  #conn, #mutebanner {
+    display: none;
+    align-items: center; gap: 12px; flex-wrap: wrap;
+    margin-top: 12px; padding: 10px 28px;
+    font: 500 10px/1.4 var(--mono);
     letter-spacing: .26em; text-transform: uppercase;
-    color: rgba(210, 190, 244, .6);
-  }
-  #agentsbar .caption::after { content: ""; flex: 1; height: 1px; background: rgba(184, 155, 232, .18); }
-  #agentrows { display: flex; flex-direction: column; padding: 0 28px 14px; }
-  .agent { display: flex; align-items: center; gap: 16px; padding: 11px 0; border-bottom: 1px solid rgba(255, 255, 255, .05); }
-  .agent:last-child { border-bottom: none; }
-  .agent .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: rgba(143, 168, 179, .9); }
-  .agent .kind {
-    width: 112px; flex: none;
-    font: 600 9.5px/1.3 var(--mono);
-    letter-spacing: .2em; text-transform: uppercase;
-    color: rgba(182, 198, 205, .8);
-    overflow: hidden; text-overflow: ellipsis;
-  }
-  .agent .main { flex: 1; min-width: 0; }
-  .agent .label { font: 400 15px/1.4 var(--serif); color: #eef4f1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .agent .detail { margin-top: 3px; font: 400 10.5px/1.4 var(--mono); color: rgba(223, 230, 230, .35); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .agent .meta { flex: none; font: 400 12px/1 var(--mono); color: var(--text-dim); font-variant-numeric: tabular-nums; }
-  .agent.deep .dot { background: var(--st-reasoning); box-shadow: 0 0 10px var(--st-reasoning); animation: br 3.4s ease-in-out infinite; }
-  .agent.deep .kind { color: #c8b2f0; }
-  .agent.deep .meta { color: rgba(210, 190, 244, .8); }
-  .agent.watch .dot { background: var(--st-listening); box-shadow: 0 0 9px var(--st-listening); }
-  .agent.watch .kind { color: #a6ecc7; }
-  .agent.watch .meta { color: rgba(166, 236, 199, .8); }
-  .agent.timer .dot { background: var(--st-speaking); box-shadow: 0 0 9px var(--st-speaking); }
-  .agent.timer .kind { color: #c7f4fd; }
-  .agent.timer .meta { font-size: 15px; color: #c7f4fd; }
-  .agent.alarm .meta { color: rgba(182, 198, 205, .6); }
-
-  /* the readings strip: the world table (world.py), one chip per fact */
-  #world {
-    display: none;
-    flex-wrap: wrap; align-items: center; gap: 8px 10px;
-    padding: 8px 28px;
-    border-bottom: 1px solid var(--line);
-    background: rgba(160, 240, 255, .025);
     flex: none;
   }
-  body.hasworld #world { display: flex; }
-  #world .reading {
-    display: inline-flex; align-items: baseline; gap: 7px;
-    padding: 4px 9px;
-    border: 1px solid var(--line);
-    clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 6px 100%, 0 calc(100% - 6px));
-    font: 500 9.5px/1.3 var(--mono);
-    letter-spacing: .14em; text-transform: uppercase;
-    color: var(--text-dim);
-    white-space: nowrap;
-  }
-  #world .reading .k { color: rgba(160, 214, 235, .55); }
-  #world .reading .age { color: var(--text-faint); letter-spacing: .06em; }
-  #world .reading.warn { border-color: rgba(232, 201, 138, .45); color: #f0dbaf; }
-  #world .reading.stale { opacity: .55; }
-  #world .reading.stale .age { color: rgba(232, 138, 138, .7); }
-
-  /* banners: the machine's own condition, in mono */
-  #conn {
-    display: none;
-    align-items: center; gap: 12px;
-    padding: 10px 28px;
-    border-bottom: 1px solid rgba(232, 201, 138, .3);
-    background: rgba(232, 201, 138, .07);
-    font: 500 10.5px/1.4 var(--mono);
-    letter-spacing: .16em; text-transform: uppercase;
-    color: #f0dbaf;
-    flex: none;
-  }
+  #conn { border-top: 1px solid var(--st-thinking); background: color-mix(in srgb, var(--st-thinking) 6%, transparent); color: var(--st-thinking); }
   body.disconnected #conn, body.needtoken #conn { display: flex; }
-  #conn .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); animation: br 2.2s ease-in-out infinite; flex: none; }
+  #conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--st-thinking); box-shadow: 0 0 12px var(--st-thinking); animation: caret 1.1s ease-in-out infinite; flex: none; }
   body.needtoken #conn .dot { animation: none; }
   /* the token form: shown only when the server closed with 4401 */
   #tokenform { display: none; align-items: center; gap: 8px; margin-left: auto; }
   body.needtoken #tokenform { display: flex; }
   #tokenin {
-    font: 500 12px/1.4 var(--mono); letter-spacing: .04em;
-    background: rgba(6, 18, 24, .7); color: #dfe6e6;
-    border: 1px solid rgba(232, 201, 138, .4); border-radius: 4px;
-    padding: 4px 8px; width: 220px; max-width: 45vw;
+    font: 400 13px/1.4 var(--mono); letter-spacing: .04em;
+    background: color-mix(in srgb, var(--st-thinking) 4%, transparent); color: var(--ink);
+    border: 1px solid color-mix(in srgb, var(--st-thinking) 45%, transparent);
+    padding: 6px 10px; width: 220px; max-width: 45vw; outline: none;
   }
-  #tokenin:focus { outline: none; border-color: var(--gold); }
-  #tokenbtn { border: 1px solid rgba(232, 201, 138, .5); border-radius: 4px; padding: 4px 10px; color: #f0dbaf; }
-  #tokenbtn:hover { background: rgba(232, 201, 138, .12); }
+  #tokenin:focus { border-color: var(--st-thinking); box-shadow: 0 0 16px -4px var(--st-thinking); }
+  #tokenbtn { min-height: 32px; padding: 0 12px; border: 1px solid var(--st-thinking); color: var(--st-thinking); font: inherit; letter-spacing: inherit; }
+  #tokenbtn:hover { border-color: var(--ink); color: var(--ink); }
 
-  #mutebanner {
-    display: none;
-    align-items: center; gap: 12px;
-    padding: 10px 28px;
-    border-bottom: 1px solid rgba(143, 168, 179, .22);
-    background: rgba(143, 168, 179, .08);
-    font: 500 10.5px/1.4 var(--mono);
-    letter-spacing: .16em; text-transform: uppercase;
-    color: #a9bfc8;
-    flex: none;
-  }
+  #mutebanner { border-top: 1px solid var(--ink-4); background: color-mix(in srgb, var(--st-idle) 6%, transparent); color: var(--ink-3); }
   body.muted #mutebanner { display: flex; }
   #mutebanner .spacer { flex: 1; }
-  #unmute { color: var(--gold); border-bottom: 1px solid rgba(232, 201, 138, .5); padding-bottom: 2px; font: inherit; letter-spacing: inherit; }
+  #unmute { color: var(--ink); border-bottom: 1px solid var(--ink-4); padding-bottom: 2px; font: inherit; letter-spacing: inherit; text-transform: inherit; }
+  #unmute:hover { border-bottom-color: var(--ink); }
 
-  #log { flex: 1; overflow-y: auto; padding: 26px 0 20px; scrollbar-width: thin; scrollbar-color: rgba(140, 240, 255, .2) transparent; }
-  .inner { max-width: 760px; margin: 0 auto; padding: 0 20px; }
+  #log { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 0 24px; scrollbar-width: thin; scrollbar-color: var(--hair) transparent; }
+  .inner { max-width: 760px; margin: 0 auto; padding: 0 28px; }
   #rows { display: flex; flex-direction: column; gap: 22px; }
 
   .row .body { white-space: pre-wrap; overflow-wrap: break-word; }
+  .row .cap { font: 500 10px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--ink-4); }
 
-  /* you: cut-corner glass, cyan */
+  /* you: a pane — 8% fill, a top rule, a fainter right rule */
   .row.you { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
   .row.you .body {
-    max-width: 66%;
+    max-width: 70%;
     padding: 11px 16px;
-    background: linear-gradient(180deg, rgba(160, 240, 255, .13), rgba(160, 240, 255, .04));
-    border: 1px solid var(--glass-border);
-    clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
-    color: #eaf9fb;
+    background: color-mix(in srgb, var(--st) 8%, transparent);
+    border-top: 1px solid var(--rule);
+    border-right: 1px solid var(--hair);
+    color: var(--ink);
     text-wrap: pretty;
-  }
-  .row.you .cap {
-    font: 500 9.5px/1 var(--mono);
-    letter-spacing: .18em; text-transform: uppercase;
-    color: rgba(160, 214, 235, .42);
   }
 
-  /* ciel: typeset speech — a serif against a gold hairline */
-  .row.ciel .body {
-    max-width: 82%;
-    padding-left: 18px;
-    border-left: 1px solid rgba(232, 201, 138, .5);
-    font: 400 18px/1.62 var(--serif);
-    color: #f7f2e7;
-    text-wrap: pretty;
-  }
+  /* ciel: the only non-instrument voice — a serif against a lit rule */
+  .row.ciel { display: flex; flex-direction: column; gap: 8px; max-width: 82%; padding-left: 18px; border-left: 1px solid var(--st); box-shadow: -9px 0 12px -11px var(--st); }
+  .row.ciel .cap { letter-spacing: .24em; color: var(--st); }
+  .row.ciel .body { font: 400 18px/1.6 var(--say); color: var(--ink); text-wrap: pretty; }
 
   /* ciel, under its breath: the working notes */
-  .row.thinking { display: flex; align-items: baseline; gap: 9px; }
-  .row.thinking::before { content: ""; width: 14px; height: 1px; background: rgba(223, 230, 230, .25); flex: none; align-self: center; }
-  .row.thinking .body { font: 400 12px/1.5 var(--mono); color: var(--text-faint); }
+  .row.thinking { display: flex; align-items: baseline; gap: 10px; }
+  .row.thinking::before { content: ""; width: 14px; height: 1px; background: var(--ink-4); flex: none; align-self: center; }
+  .row.thinking .body { font: 400 12px/1.5 var(--mono); color: var(--ink-4); }
 
-  /* the historical record of a question that wanted you */
-  .row.confirmrow .body {
-    max-width: 82%;
-    padding-left: 18px;
-    border-left: 1px solid rgba(232, 201, 138, .5);
-  }
-  .row.confirmrow .cap {
-    font: 500 9.5px/1 var(--mono);
-    letter-spacing: .22em; text-transform: uppercase;
-    color: var(--gold);
-    margin-bottom: 7px;
-  }
-  .row.confirmrow .q { font: 400 17px/1.5 var(--serif); color: #fbf4e4; text-wrap: pretty; }
+  /* the historical record of a question that wanted you: always listening green */
+  .row.confirmrow .body { max-width: 82%; padding-left: 18px; border-left: 1px solid var(--st-listening); }
+  .row.confirmrow .cap { letter-spacing: .24em; color: var(--st-listening); margin-bottom: 8px; }
+  .row.confirmrow .q { font: 400 17px/1.5 var(--say); color: var(--ink); text-wrap: pretty; white-space: pre-wrap; }
 
-  /* events: a labelled hairline across the projection */
+  /* events: a labelled hairline across the room */
   .row.event { display: flex; align-items: center; gap: 14px; }
-  .row.event::before, .row.event::after { content: ""; flex: 1; height: 1px; background: var(--gold-line); }
+  .row.event::before, .row.event::after { content: ""; flex: 1; height: 1px; background: color-mix(in srgb, var(--st) 20%, transparent); }
   .row.event .body {
-    font: 500 9.5px/1.5 var(--mono);
+    font: 500 10px/1.5 var(--mono);
     letter-spacing: .26em; text-transform: uppercase;
-    color: var(--gold-dim);
+    color: var(--ink-4);
     text-align: center;
     max-width: 70%;
   }
 
-  /* the live question: gold, glowing, waiting on you */
+  /* the caret: blinks while a turn is being worked on, and says which way */
+  #busy { display: none; align-items: center; gap: 10px; margin-top: 22px; padding-left: 18px; border-left: 1px solid var(--st); height: 24px; font: 500 10px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--st); }
+  #busy .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--st); box-shadow: 0 0 12px var(--st); animation: caret 1.1s ease-in-out infinite; }
+  body[data-state="thinking"] #busy, body[data-state="reasoning"] #busy { display: flex; }
+
+  /* the live question: the mark goes to listening and waits on you. Yes is
+     the only filled shape on the page, filled with the listening light. */
   #ask {
+    --st: #7adea8;
     display: none;
-    padding: 18px 28px;
-    border-top: 1px solid rgba(232, 201, 138, .6);
-    background: linear-gradient(180deg, rgba(232, 201, 138, .12), rgba(232, 201, 138, .03));
-    box-shadow: 0 -14px 50px rgba(232, 201, 138, .1);
+    padding: 16px 28px;
+    background: color-mix(in srgb, var(--st) 7%, transparent);
+    border-top: 1px solid var(--st);
+    box-shadow: 0 -1px 28px -10px var(--st);
     flex: none;
   }
   body.asking #ask { display: block; }
-  #ask .arrange { display: flex; align-items: center; gap: 22px; max-width: 1000px; margin: 0 auto; }
-  #ask .bar { width: 3px; align-self: stretch; background: var(--gold); box-shadow: 0 0 14px var(--gold); flex: none; }
-  #ask .qwrap { flex: 1; min-width: 0; }
-  #ask .cap {
-    font: 500 9.5px/1 var(--mono);
-    letter-spacing: .24em; text-transform: uppercase;
-    color: var(--gold);
-    margin-bottom: 8px;
-  }
-  #ask .q { font: 400 19px/1.45 var(--serif); color: #fdf5e5; text-wrap: pretty; overflow-wrap: break-word; }
-  #ask .btns { display: flex; gap: 11px; flex: none; }
+  #ask .arrange { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 20px; align-items: center; max-width: 1000px; margin: 0 auto; }
+  #ask .askmark { position: relative; width: 56px; aspect-ratio: 1; }
+  #ask .askmark svg { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+  #ask .qwrap { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  #ask .cap { font: 500 10px/1 var(--mono); letter-spacing: .3em; text-transform: uppercase; color: var(--st); }
+  #ask .q { font: 400 19px/1.45 var(--say); color: var(--ink); text-wrap: pretty; overflow-wrap: break-word; white-space: pre-wrap; }
+  #ask .btns { display: flex; gap: 10px; }
   #ask .btns button {
-    padding: 14px 32px;
-    clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
-    font: 700 11px/1 var(--mono);
-    letter-spacing: .22em;
+    min-width: 96px; min-height: 44px; padding: 0 22px;
+    border-radius: 22px;
+    font: 600 11px/1 var(--mono);
+    letter-spacing: .3em; text-transform: uppercase;
   }
-  #ask button.yes { background: rgba(232, 201, 138, .92); color: #231b0c; }
-  #ask button.yes:hover { background: var(--gold); }
-  #ask button.no { border: 1px solid rgba(223, 230, 230, .3); color: rgba(223, 230, 230, .78); }
-  #ask button.no:hover { border-color: rgba(223, 230, 230, .55); color: var(--text); }
+  #ask button.yes { background: var(--st); color: var(--void); box-shadow: 0 0 20px color-mix(in srgb, var(--st) 50%, transparent); }
+  #ask button.yes:hover { background: #a6f0c8; }
+  #ask button.no { border: 1px solid var(--ink-4); color: var(--ink); }
+  #ask button.no:hover { border-color: var(--ink); }
 
+  #composer { display: flex; flex-direction: column; border-top: 1px solid var(--hair); background: #03090dcc; flex: none; }
+  body.dropping #composer { border-top-color: var(--st); box-shadow: 0 -1px 28px -10px var(--st); }
   footer {
     display: flex; align-items: flex-end; gap: 12px;
-    padding: 14px 28px calc(14px + env(safe-area-inset-bottom));
-    border-top: 1px solid var(--line);
-    background: rgba(6, 18, 24, .55);
-    flex: none;
+    padding: 14px 28px calc(16px + env(safe-area-inset-bottom));
   }
   #text {
     flex: 1;
     resize: none;
-    max-height: 160px;
-    padding: 11px 15px;
-    background: rgba(160, 240, 255, .03);
-    border: 1px solid rgba(140, 240, 255, .2);
-    clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
-    color: var(--text);
-    font: 400 14px/1.4 var(--sans);
+    min-height: 44px; max-height: 160px;
+    padding: 12px 15px;
+    background: color-mix(in srgb, var(--st) 4%, transparent);
+    border: 1px solid color-mix(in srgb, var(--st) 35%, transparent);
+    border-radius: 0;
+    color: var(--ink);
+    font: 400 15px/1.4 var(--mono);
     outline: none;
   }
-  #text::placeholder { color: rgba(223, 230, 230, .32); }
-  #text:focus { border-color: rgba(140, 240, 255, .45); }
-  #send {
-    padding: 12px 22px;
-    border: 1px solid rgba(232, 201, 138, .55);
-    clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
+  #text::placeholder { color: var(--ink-4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #text:focus { border-color: var(--st); box-shadow: 0 0 16px -4px var(--st); }
+  #send, #attach {
+    min-width: 44px; min-height: 44px; padding: 0 20px;
+    border: 1px solid var(--ink-4);
     font: 600 10px/1 var(--mono);
-    letter-spacing: .22em;
-    color: var(--gold);
+    letter-spacing: .24em; text-transform: uppercase;
+    color: var(--ink-3);
   }
-  #send:hover:not(:disabled) { background: rgba(232, 201, 138, .12); }
-  #send:disabled { opacity: .35; cursor: default; }
-  #attach {
-    padding: 12px 14px;
-    border: 1px solid var(--glass-border);
-    clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
-    font: 600 10px/1 var(--mono);
-    letter-spacing: .22em;
-    color: var(--text-dim);
-  }
-  #attach:hover { color: var(--text); background: rgba(160, 240, 255, .06); }
+  #attach { padding: 0 14px; }
+  #attach:hover { border-color: var(--ink); color: var(--ink); }
   #attach[hidden] { display: none; }
-  #attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 28px 8px; flex: none; }
+  #send:not(:disabled) { color: var(--st); }
+  #send:hover:not(:disabled) { border-color: var(--st); box-shadow: 0 0 16px -4px var(--st); }
+  #send:disabled { color: var(--ink-4); cursor: default; }
+  #attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 28px 0; }
   #attachments:empty { display: none; }
   #attachments .chip {
-    display: inline-flex; align-items: center; gap: 8px; max-width: 100%;
-    padding: 5px 9px; border: 1px solid var(--glass-border);
-    font: 12px var(--mono); color: var(--text-dim); overflow-wrap: anywhere;
+    display: inline-flex; gap: 10px; max-width: 100%; min-height: 0;
+    padding: 5px 6px 5px 10px; border-color: color-mix(in srgb, var(--st) 40%, transparent);
+    font: 400 12px/1.3 var(--mono); letter-spacing: 0; text-transform: none; white-space: normal;
+    color: var(--ink-2); overflow-wrap: anywhere;
   }
   #attachments .chip.error { border-color: var(--st-error); color: var(--st-error); }
-  #attachments .chip button { color: inherit; font: inherit; padding: 0 2px; }
-  body.dropping footer { border-top-color: var(--gold); }
+  #attachments .chip button { color: var(--ink-3); font: 400 14px/1 var(--mono); padding: 2px 6px; }
+  #attachments .chip button:hover { color: var(--ink); }
 
-  @media (max-width: 640px) {
-    .corner { display: none; }
-    header { gap: 9px; padding: 13px 15px; flex-wrap: wrap; } /* five chips beat 375px — wrap, never clip */
-    .brand { gap: 9px; }
-    .aperture { width: 22px; height: 22px; }
-    .wordmark { font-size: 15px; letter-spacing: .2em; }
-    .chip { padding: 5px 10px; font-size: 8.5px; letter-spacing: .16em; gap: 6px; }
-    .chip .dot { width: 5px; height: 5px; }
+  /* saved responsibilities: the same material — hairlines, mono, no cards */
+  #taskpanel { margin: 12px auto 0; width: calc(100% - 56px); max-width: 1024px; border-top: 1px solid var(--hair); padding: 8px 0; flex-shrink: 0; max-height: 42vh; overflow: auto; font: 400 13px/1.6 var(--mono); color: var(--ink-2); scrollbar-width: thin; scrollbar-color: var(--hair) transparent; }
+  #taskpanel[hidden] { display: none; }
+  #taskpanel summary { color: var(--ink-4); font: 500 10px/1 var(--mono); letter-spacing: .3em; text-transform: uppercase; cursor: pointer; padding: 8px 0; }
+  #taskpanel summary:hover, #taskpanel[open] summary { color: var(--st); }
+  #taskstatus { color: var(--ink-3); font: 400 12px/1.5 var(--mono); margin: 8px 0; overflow-wrap: anywhere; }
+  #taskstatus.error { color: var(--st-error); }
+  #tasklist, #taskdetail { overflow-wrap: anywhere; }
+  #tasklist button { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; width: 100%; text-align: left; border-top: 1px solid var(--hair); padding: 8px 0 0; margin-bottom: 8px; color: var(--ink-2); }
+  #tasklist button:hover { color: var(--ink); }
+  #tasklist button[aria-pressed="true"] { color: var(--st); }
+  #taskdetail { padding-top: 12px; }
+  #taskdetail h3, #grants h3, #features h3 { font: 400 18px/1.4 var(--say); color: var(--ink); margin-bottom: 6px; }
+  #taskdetail p, #taskdetail li { margin-bottom: 6px; }
+  #taskdetail ol { padding-left: 20px; color: var(--ink-3); }
+  .task-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+  .task-actions button, #taskrefresh, .notice-switch { min-height: 32px; border: 1px solid var(--ink-4); padding: 0 12px; font: 500 10px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--ink-3); }
+  .task-actions button:hover, #taskrefresh:hover, .notice-switch:hover { border-color: var(--ink); color: var(--ink); }
+  #tasklist .notice-switch { display: inline-block; width: auto; border: 1px solid var(--ink-4); margin: 8px 0; padding: 9px 12px; }
+  #taskpanel button:disabled { opacity: .45; cursor: wait; }
+  #grants { padding-top: 12px; border-top: 1px solid var(--hair); margin-top: 8px; overflow-wrap: anywhere; }
+  #grants p, #grants li { margin-bottom: 6px; }
+  #grants .dim, #features .dim { color: var(--ink-4); }
+  #features .row { margin: 8px 0 0; }
+  #grants form { border-top: 1px solid var(--rule); background: color-mix(in srgb, var(--st) 6%, transparent); padding: 10px 12px; margin: 8px 0; }
+  #grants fieldset { border: none; padding: 0; margin: 6px 0; }
+  #grants legend { color: var(--ink-4); font: 500 10px/1 var(--mono); letter-spacing: .3em; text-transform: uppercase; margin-bottom: 6px; }
+  #grants label { display: block; margin: 3px 0; cursor: pointer; }
+  #grants input[type="checkbox"] { accent-color: var(--st-listening); margin-right: 6px; }
+  #grants select { font: 400 12px/1.4 var(--mono); color: var(--ink); background: var(--void); border: 1px solid var(--ink-4); border-radius: 0; padding: 5px 8px; max-width: 100%; }
+
+  /* a short window gives the mark less of it, so the transcript keeps room */
+  @media (max-height: 760px) { #markbox { width: min(168px, 40vw); } }
+  /* and an open task panel takes more still: the mark gives way before the conversation does */
+  body:has(#taskpanel[open]) #markbox { width: min(132px, 36vw); }
+
+  @media (max-width: 760px) {
+    header { padding: 13px 16px 0; gap: 8px 12px; letter-spacing: .24em; } /* five chips beat 375px — wrap, never clip */
+    .chip { min-height: 28px; padding: 0 9px; font-size: 9.5px; letter-spacing: .16em; gap: 6px; }
     .long { display: none; }
     #restart.arming .long { display: inline; } /* SURE? must be readable to mean anything */
-    #agentsbar .caption, #agentrows { padding-left: 15px; padding-right: 15px; }
-    .agent .kind { width: 84px; letter-spacing: .14em; }
+    #now { display: none; } /* a phone already wears a clock */
+    #roomgrid { grid-template-columns: 1fr; grid-template-areas: "mark" "place" "ring"; justify-items: center; padding: 0 16px; gap: 6px; }
+    #markbox { width: min(148px, 40vw); }
+    #world { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 18px; text-align: center; }
+    #world .reading { align-items: center; gap: 4px; }
+    #world .reading .v { font-size: 14px; }
+    #agentsbar { width: 100%; max-width: none; gap: 8px; padding-top: 6px; }
     .agent .label { white-space: normal; font-size: 14px; }
-    #conn, #mutebanner { padding: 9px 15px; font-size: 9px; letter-spacing: .14em; }
-    #world { padding: 7px 15px; gap: 6px 8px; }
-    #world .reading { font-size: 8.5px; letter-spacing: .1em; padding: 3px 7px; }
-    #log { padding: 20px 0 16px; }
+    #conn, #mutebanner { padding: 9px 16px; letter-spacing: .16em; }
+    #taskpanel { width: calc(100% - 32px); }
+    #log { padding: 16px 0; }
     .inner { padding: 0 16px; }
     #rows { gap: 18px; }
     .row.you .body { max-width: 90%; padding: 10px 14px; font-size: 14px; }
-    .row.ciel .body { max-width: 100%; padding-left: 14px; font-size: 17px; line-height: 1.6; }
+    .row.ciel { max-width: 100%; padding-left: 14px; }
+    .row.ciel .body { font-size: 17px; }
     .row.thinking .body { font-size: 11.5px; }
-    #ask { padding: 16px; }
-    #ask .arrange { flex-direction: column; align-items: stretch; gap: 14px; }
-    #ask .bar { display: none; }
+    #ask { padding: 14px 16px; }
+    #ask .arrange { grid-template-columns: auto minmax(0, 1fr); gap: 12px 14px; }
+    #ask .askmark { width: 40px; }
     #ask .q { font-size: 16px; }
-    #ask .btns button { flex: 1; padding: 14px; }
-    footer { gap: 10px; padding: 12px 15px calc(12px + env(safe-area-inset-bottom)); }
-    #send { padding: 13px 17px; font-size: 9.5px; }
+    #ask .btns { grid-column: 1 / -1; }
+    #ask .btns button { flex: 1; }
+    #attachments { padding: 8px 16px 0; }
+    footer { gap: 8px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+    #send { padding: 0 14px; }
   }
-  #taskpanel { margin: 0 18px 8px; border: 1px solid var(--line); padding: 8px 12px; flex-shrink: 0; max-height: 42vh; overflow: auto; }
-  #taskpanel[hidden] { display: none; }
-  #taskpanel summary { color: var(--gold); font: 12px var(--mono); cursor: pointer; padding: 4px 0; }
-  #taskstatus { color: var(--text-dim); font: 12px var(--mono); margin: 8px 0; overflow-wrap: anywhere; }
-  #taskstatus.error { color: var(--st-error); }
-  #tasklist, #taskdetail { overflow-wrap: anywhere; }
-  #tasklist button { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; width: 100%; text-align: left; border-bottom: 1px solid var(--line); padding: 8px 0; }
-  #tasklist button[aria-pressed="true"] { color: var(--gold); }
-  #taskdetail { padding-top: 12px; }
-  #taskdetail h3 { font: 16px var(--serif); margin-bottom: 6px; }
-  #taskdetail p, #taskdetail li { margin-bottom: 6px; }
-  #taskdetail ol { padding-left: 20px; color: var(--text-dim); }
-  .task-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
-  .task-actions button, #taskrefresh, .notice-switch { border: 1px solid var(--glass-border); padding: 5px 9px; font: 12px var(--mono); }
-  #tasklist .notice-switch { display: inline-block; width: auto; border-bottom: 1px solid var(--glass-border); margin: 6px 0; }
-  #taskpanel button:disabled { opacity: .45; cursor: wait; }
-  #grants { padding-top: 12px; border-top: 1px solid var(--line); margin-top: 8px; overflow-wrap: anywhere; }
-  #grants h3 { font: 16px var(--serif); margin-bottom: 6px; }
-  #grants p, #grants li { margin-bottom: 6px; }
-  #grants .dim, #features .dim { color: var(--text-dim); }
-  #features .row { margin: 8px 0 0; }
-  #grants form { border: 1px solid var(--line); padding: 8px 10px; margin: 8px 0; }
-  #grants fieldset { border: none; padding: 0; margin: 6px 0; }
-  #grants legend { color: var(--gold); font: 12px var(--mono); margin-bottom: 4px; }
-  #grants label { display: block; margin: 3px 0; cursor: pointer; }
-  #grants input[type="checkbox"] { accent-color: var(--gold); margin-right: 6px; }
-  #grants select { font: 12px var(--mono); color: var(--text); background: rgba(0, 0, 0, .3); border: 1px solid var(--glass-border); padding: 4px 6px; max-width: 100%; }
-  @media (max-width: 480px) { #taskpanel { margin: 0 10px 6px; padding: 8px; } }
+  /* a phone on its side, or a very short window: the mark steps aside entirely */
+  @media (max-height: 520px) { #markbox { display: none; } #world { display: flex; flex-wrap: wrap; gap: 8px 18px; } }
+
+  @media (prefers-reduced-motion: reduce) {
+    body { transition: none; }
+    #busy .dot, #conn .dot { animation: none; }
+  }
 </style>
 </head>
 <body data-state="idle">
 
-<div id="scan"></div>
-<div class="corner tl"></div><div class="corner tr"></div>
-<div class="corner bl"></div><div class="corner br"></div>
-
 <header>
-  <div class="brand">
-    <svg class="aperture" width="26" height="26" viewBox="0 0 128 128" aria-hidden="true">
-      <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
-      <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
-      <circle class="c-core" cx="64" cy="64" r="10"/>
-    </svg>
-    <span class="wordmark">Ciel</span>
+  <div class="brand" id="state">
+    <span class="glyph"><canvas class="mark" id="glyph" aria-hidden="true"></canvas></span>
+    <span>Ciel · <span id="statelabel">idle</span></span>
   </div>
-  <span class="chip" id="state"><span class="dot"></span><span id="statelabel">idle</span></span>
-  <span class="spacer"></span>
-  <button class="chip" id="agentsbtn" hidden title="Everything working on your behalf right now">
-    <span id="agentscount"></span><span class="arr" id="agentsarr">▾</span>
-  </button>
-  <button class="chip" id="mute" title="While muted, Ciel neither speaks nor listens for its name">
-    <span>MIC</span><span class="long" id="mutelabel"> · ON</span>
-  </button>
-  <button class="chip" id="speakback" aria-pressed="false" title="Speak typed replies aloud in the room too — to hear the voice from somewhere you can't talk">
-    <span>VOICE</span><span class="long" id="speakbacklabel"> · OFF</span>
-  </button>
-  <button class="chip" id="restart" style="display: none" aria-pressed="false" title="Restart Ciel — waits for the current exchange to finish, then relaunches">
-    <span aria-hidden="true">↻</span><span class="long" id="restartlabel">RESTART</span>
-  </button>
+  <div class="controls">
+    <button class="chip" id="agentsbtn" hidden title="Everything working on your behalf right now">
+      <span id="agentscount"></span><span class="arr" id="agentsarr">▾</span>
+    </button>
+    <button class="chip" id="mute" title="While muted, Ciel neither speaks nor listens for its name">
+      <span>MIC</span><span class="long" id="mutelabel"> · ON</span>
+    </button>
+    <button class="chip" id="speakback" aria-pressed="false" title="Speak typed replies aloud in the room too — to hear the voice from somewhere you can't talk">
+      <span>VOICE</span><span class="long" id="speakbacklabel"> · OFF</span>
+    </button>
+    <button class="chip" id="restart" style="display: none" aria-pressed="false" title="Restart Ciel — waits for the current exchange to finish, then relaunches">
+      <span aria-hidden="true">↻</span><span class="long" id="restartlabel">RESTART</span>
+    </button>
+    <span id="now" aria-hidden="true"></span>
+  </div>
   <span id="srstatus" class="sr" aria-live="assertive"></span>
 </header>
+
+<div id="roomgrid">
+  <div id="world" title="The system's own readings — what Ciel currently holds true, with its age"></div>
+  <div id="markbox"><canvas class="mark" id="mark" role="img" aria-label="Ciel's mark"></canvas></div>
+  <div id="agentsbar">
+    <div class="caption">working on your behalf</div>
+    <div id="agentrows"></div>
+  </div>
+</div>
 
 <div id="conn"><span class="dot"></span><span id="connlabel">reconnecting to Ciel</span>
   <form id="tokenform" autocomplete="off">
@@ -489,7 +441,12 @@
   </form>
 </div>
 
-<div id="world" title="The system's own readings — what Ciel currently holds true, with its age"></div>
+<div id="mutebanner">
+  <span>mic muted — Ciel can't hear you</span>
+  <span class="spacer"></span>
+  <button id="unmute">unmute</button>
+</div>
+
 <details id="taskpanel" hidden>
   <summary>Tasks · saved responsibilities</summary>
   <p id="taskstatus" role="status" aria-live="polite">Loading tasks…</p>
@@ -500,39 +457,461 @@
   <section id="features" aria-label="From your features" tabindex="-1"></section>
 </details>
 
-
-<div id="agentsbar">
-  <div class="caption">working on your behalf</div>
-  <div id="agentrows"></div>
-</div>
-
-<div id="mutebanner">
-  <span>mic muted — Ciel can't hear you</span>
-  <span class="spacer"></span>
-  <button id="unmute">unmute</button>
-</div>
-
-<div id="log"><div class="inner" id="rows"></div></div>
+<div id="log"><div class="inner">
+  <div id="rows"></div>
+  <div id="busy"><span class="dot"></span><span id="busylabel">thinking</span></div>
+</div></div>
 
 <div id="ask"><div class="arrange">
-  <div class="bar"></div>
+  <div class="askmark">
+    <canvas class="mark" id="askmark" aria-hidden="true"></canvas>
+    <svg viewBox="0 0 56 56" width="100%" height="100%" aria-hidden="true"><circle cx="28" cy="28" r="27" fill="none" stroke="#7adea8" stroke-width="1" opacity=".35"/></svg>
+  </div>
   <div class="qwrap">
     <div class="cap">Ciel is asking · waiting on you</div>
     <div class="q" id="askq"></div>
   </div>
   <div class="btns">
-    <button class="yes" onclick="answer('yes')">YES</button>
-    <button class="no" onclick="answer('no')">NO</button>
+    <button class="yes" onclick="answer('yes')">Yes</button>
+    <button class="no" onclick="answer('no')">No</button>
   </div>
 </div></div>
 
-<div id="attachments" aria-label="Files to send"></div>
-<footer>
-  <button id="attach" type="button" hidden title="Attach files to your message">FILE</button>
-  <input id="files" type="file" multiple hidden>
-  <textarea id="text" rows="1" placeholder="Type to Ciel — or just speak"></textarea>
-  <button id="send" disabled>SEND</button>
-</footer>
+<div id="composer">
+  <div id="attachments" aria-label="Files to send"></div>
+  <footer>
+    <button id="attach" type="button" hidden title="Attach files to your message">FILE</button>
+    <input id="files" type="file" multiple hidden>
+    <textarea id="text" rows="1" placeholder="Type to Ciel — or just speak"></textarea>
+    <button id="send" disabled>SEND</button>
+  </footer>
+</div>
+
+<script>
+/* Ciel symbol engine v2 — the living mark. 2D canvas, additive light, no deps.
+   Inlined from the design project's ciel-engine2.js so the Chart stays one
+   file; the aurora concept the Chart never draws is left out, the rest is
+   as designed. Edit there first, then carry the change here.
+   new CielSymbol2(canvas, {concept, autoVoice, reducedMotion}) .setState() .wake() .setAmplitude() .tick(dt) .resize() */
+(function (root) {
+'use strict';
+const TAU = Math.PI*2;
+const COLORS = { idle:[143,168,179], listening:[122,222,168], thinking:[232,201,138], reasoning:[184,155,232], deep:[143,156,255], speaking:[160,240,255], error:[232,138,138] };
+const HEX = { idle:'#8fa8b3', listening:'#7adea8', thinking:'#e8c98a', reasoning:'#b89be8', deep:'#8f9cff', speaking:'#a0f0ff', error:'#e88a8a' };
+const ORDER = ['idle','listening','thinking','reasoning','speaking','error'];
+const ORDER7 = ['idle','listening','thinking','reasoning','deep','speaking','error'];
+const clamp = (v,a,b) => v<a?a:v>b?b:v, lerp = (a,b,t) => a+(b-a)*t, frac = x => x-Math.floor(x), sq = x => x*x;
+const approach = (c,t,r,dt) => c+(t-c)*(1-Math.exp(-r*dt));
+const smooth = x => x*x*(3-2*x);
+const rgba = (c,a) => 'rgba('+(c[0]|0)+','+(c[1]|0)+','+(c[2]|0)+','+clamp(a,0,1).toFixed(3)+')';
+const mix = (c,d,t) => [lerp(c[0],d[0],t), lerp(c[1],d[1],t), lerp(c[2],d[2],t)];
+const WHITE = [255,255,255];
+
+const TARGETS = {
+  knot: {
+    idle:      { r0:0.45, spin:0.25, tilt:0.9,  bSpeed:0.04, bAlpha:0.5, voiceR:0,   bright:0.75, fade:0.3,  rev:0 },
+    listening: { r0:0.3,  spin:0,    tilt:0.35, bSpeed:0.12, bAlpha:0.9, voiceR:0.4, bright:1,    fade:0.3,  rev:0 },
+    thinking:  { r0:0.5,  spin:1.2,  tilt:1.1,  bSpeed:0.3,  bAlpha:0.7, voiceR:0,   bright:0.7,  fade:0.34, rev:0 },
+    reasoning: { r0:0.42, spin:0.12, tilt:0.18, bSpeed:0.1,  bAlpha:1,   voiceR:0,   bright:1.15, fade:0.2,  rev:1 },
+    speaking:  { r0:0.4,  spin:0.15, tilt:0.5,  bSpeed:0.06, bAlpha:0.7, voiceR:1,   bright:1,    fade:0.3,  rev:0 },
+    error:     { r0:0.15, spin:0,    tilt:1.5,  bSpeed:0,    bAlpha:0.2, voiceR:0,   bright:0.55, fade:0.5,  rev:0 }
+  },
+  eclipse: {
+    idle:      { Rd:0.22, ring:0.35, corona:0.6, spin:0.05, prom:0, dbl:0, off:0,    bright:0.75, voiceL:0.1, beads:0, bias:0, fade:0.25, shim:1   },
+    listening: { Rd:0.2,  ring:1,    corona:0.9, spin:0,    prom:0, dbl:0, off:0,    bright:1,    voiceL:0.5, beads:0, bias:1, fade:0.3,  shim:0.4 },
+    thinking:  { Rd:0.22, ring:0.4,  corona:0.7, spin:0.9,  prom:1, dbl:0, off:0,    bright:0.7,  voiceL:0,   beads:0, bias:0, fade:0.35, shim:2   },
+    reasoning: { Rd:0.21, ring:0.7,  corona:0.5, spin:0.15, prom:0, dbl:1, off:0,    bright:0.9,  voiceL:0,   beads:1, bias:0, fade:0.25, shim:0.6 },
+    speaking:  { Rd:0.22, ring:0.8,  corona:0.7, spin:0.03, prom:0, dbl:0, off:0,    bright:1,    voiceL:1.2, beads:0, bias:0, fade:0.3,  shim:1   },
+    error:     { Rd:0.22, ring:0.5,  corona:0.3, spin:0,    prom:0, dbl:0, off:0.16, bright:0.6,  voiceL:0,   beads:0, bias:0, fade:0.4,  shim:0.2 }
+  }
+};
+const HUD = {
+  idle:      { hudSpin:0.12, hudArcs:0.5,  hudSpec:0,   hudSplit:0, hudDash:0, hudBright:0.55 },
+  listening: { hudSpin:0.02, hudArcs:0.9,  hudSpec:0.7, hudSplit:0, hudDash:0, hudBright:0.9 },
+  thinking:  { hudSpin:1.6,  hudArcs:0.35, hudSpec:0,   hudSplit:0, hudDash:0, hudBright:0.7 },
+  reasoning: { hudSpin:-0.3, hudArcs:0.6,  hudSpec:0,   hudSplit:1, hudDash:0, hudBright:0.8 },
+  speaking:  { hudSpin:0.05, hudArcs:0.7,  hudSpec:1.3, hudSplit:0, hudDash:0, hudBright:0.9 },
+  error:     { hudSpin:0,    hudArcs:0.3,  hudSpec:0,   hudSplit:0, hudDash:1, hudBright:0.45 }
+};
+TARGETS.armillary = {
+  idle:      { align:0,   spread:1,   spin:0.2,  split:0, voiceR:0,   face:0.25, bright:0.75, fade:0.3 },
+  listening: { align:1,   spread:1,   spin:0.05, split:0, voiceR:0.3, face:1.5,  bright:1,    fade:0.3 },
+  thinking:  { align:0,   spread:1.4, spin:1.3,  split:0, voiceR:0,   face:0.25, bright:0.7,  fade:0.34 },
+  reasoning: { align:0,   spread:0.8, spin:0.3,  split:1, voiceR:0,   face:0.25, bright:0.9,  fade:0.25 },
+  speaking:  { align:0.6, spread:1,   spin:0.15, split:0, voiceR:1,   face:1.5,  bright:1,    fade:0.3 },
+  error:     { align:1,   spread:1,   spin:0,    split:0, voiceR:0,   face:0.02, bright:0.55, fade:0.5 }
+};
+const IRIS = { idle:{ open:0.35 }, listening:{ open:1 }, thinking:{ open:0.6 }, reasoning:{ open:0.5 }, speaking:{ open:0.8 }, error:{ open:0.1 } };
+const merge = (core, extra) => { const o = {}; for (const s in core) o[s] = Object.assign({}, core[s], HUD[s], extra ? extra[s] : null); return o; };
+TARGETS.armillary = merge(TARGETS.armillary); TARGETS.iris = merge(TARGETS.eclipse, IRIS);
+const IRIS4 = {
+  idle:      { spike:0.5,  ringDash:0, corona:0.7 },
+  listening: { spike:0.55, ringDash:0, corona:0.9 },
+  thinking:  { spike:0.5,  ringDash:0, corona:0.8 },
+  reasoning: { spike:0.45, ringDash:0, corona:0.6 },
+  speaking:  { spike:0.6,  ringDash:0, corona:0.8 },
+  error:     { spike:0.3,  ringDash:1, corona:0.35, off:0, open:0, ring:0.4, bright:0.5, shim:0.15, hudArcs:0.25 }
+};
+const merge2 = (base, extra) => { const o = {}; for (const s in base) o[s] = Object.assign({}, base[s], extra[s]); return o; };
+TARGETS.irisKnot = merge2(TARGETS.iris, IRIS4);
+for (const s in TARGETS.knot) { const k = TARGETS.knot[s]; Object.assign(TARGETS.irisKnot[s], { r0:k.r0, tilt:k.tilt, bSpeed:k.bSpeed, bAlpha:k.bAlpha, voiceR:k.voiceR, rev:k.rev, kspin:k.spin }); }
+TARGETS.final = merge2(TARGETS.irisKnot, {});
+{ const W = { idle:[1,0,0], listening:[0,1,0], thinking:[1,0,0], reasoning:[0,1,0], speaking:[1,0,0], error:[0,0,1] };
+  for (const s in TARGETS.final) { const a = TARGETS.armillary[s], k = TARGETS.knot[s], f = TARGETS.final[s];
+    Object.assign(f, { align:a.align, spread:a.spread, split:a.split, face:a.face, kspinA:a.spin, kspinK:k.spin, wArm:W[s][0], wKnot:W[s][1], wLens:W[s][2], voiceR: W[s][0] ? a.voiceR : k.voiceR }); }
+  TARGETS.final.error.open = 0; TARGETS.final.reasoning.open = 1; TARGETS.final.reasoning.corona = 0.45; TARGETS.final.reasoning.Rd = 0.29; TARGETS.final.reasoning.ring = 0.55; }
+TARGETS.final.deep = Object.assign({}, TARGETS.final.reasoning, { open:1, Rd:0.3, fade:0.25, kspinK:0.18, bSpeed:0.14 });
+const KNOTS = { idle:[2,3], listening:[1,3], thinking:[3,7], reasoning:'inf', deep:'mob', speaking:[2,3], error:[1,0] };
+const RATES = { wArm:3, wKnot:3, wLens:2, ringDash:2, spike:2, align:2, split:1, face:3, open:2.5, hudArcs:2, hudSplit:1.2, hudDash:2, tilt:3, off:2.5, dbl:1.2, prom:2, Rd:3, r0:2, corona:2.5 };
+
+class CielSymbol2 {
+  constructor(canvas, opts) {
+    opts = opts || {};
+    this.canvas = canvas; this.ctx = canvas.getContext('2d');
+    this.concept = 'final';
+    this.state = 'idle'; this.amp = 0; this.ampS = 0; this.t = 0; this.clock = 0; this.breathT = 0; this.wakeT = 9; this.dt = 0.016;
+    this.reduced = opts.reducedMotion != null ? opts.reducedMotion : (typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches);
+    this.autoVoice = !!opts.autoVoice;
+    this.col = COLORS.idle.slice(); this.p = {}; this.spr = {}; this.spin = 0;
+    this.beads = []; for (let i = 0; i < 36; i++) this.beads.push({ u: Math.random(), s: 0.7+0.6*Math.random() });
+    this.dpr = Math.min(2, (typeof devicePixelRatio !== 'undefined' ? devicePixelRatio : 1) || 1);
+    this.resize();
+  }
+  resize() {
+    const c = this.canvas, r = c.getBoundingClientRect();
+    const w = Math.max(1, r.width || c.clientWidth || 300), h = Math.max(1, r.height || c.clientHeight || 300);
+    this.w = w; this.h = h;
+    const pw = Math.round(w*this.dpr), ph = Math.round(h*this.dpr);
+    if (c.width !== pw || c.height !== ph) { c.width = pw; c.height = ph; }
+  }
+  setState(s) { if (COLORS[s] && s !== this.state) this.state = s; }
+  wake() { this.wakeT = 0; this.setState('listening'); }
+  setAmplitude(a) { this.amp = clamp(+a || 0, 0, 1); }
+  voice(t) {
+    const phrase = Math.sin(t*0.5)+0.6*Math.sin(t*0.23) > -0.2 ? 1 : 0;
+    const syll = Math.max(0, 0.45*Math.sin(t*5.8)+0.35*Math.sin(t*9.3+1)+0.3*Math.sin(t*2.7)+0.25);
+    return clamp(syll*phrase, 0, 1);
+  }
+  tick(dt) {
+    dt = Math.min(dt || 0.016, 0.05); this.dt = dt;
+    const mot = this.reduced ? 0 : 1;
+    this.t += dt*mot; this.clock += dt; this.breathT += dt*(this.reduced ? 0.5 : 0.9); this.wakeT += dt;
+    const raw = this.autoVoice ? this.voice(this.clock) : this.amp;
+    this.ampS = approach(this.ampS, raw, raw > this.ampS ? 28 : 7, dt);
+    const tg = TARGETS[this.concept][this.state];
+    for (const k in tg) { const r = RATES[k] || 3; this.p[k] = this.p[k] === undefined ? tg[k] : approach(this.p[k], tg[k], r, dt); }
+    const c = COLORS[this.state]; for (let i = 0; i < 3; i++) this.col[i] = approach(this.col[i], c[i], 4, dt);
+    this.draw();
+  }
+  sprite(kind) {
+    const col = this.col, key = (col[0]>>3)+','+(col[1]>>3)+','+(col[2]>>3);
+    const s = this.spr[kind]; if (s && s.key === key) return s.c;
+    const c = document.createElement('canvas'), g = c.getContext('2d');
+    c.width = c.height = 64;
+    const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gr.addColorStop(0, rgba(mix(col, WHITE, 0.7), 1)); gr.addColorStop(0.18, rgba(col, 0.75)); gr.addColorStop(0.5, rgba(col, 0.18)); gr.addColorStop(1, rgba(col, 0));
+    g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+    this.spr[kind] = { key: key, c: c }; return c;
+  }
+  draw() {
+    const ctx = this.ctx, S = Math.min(this.w, this.h);
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.globalAlpha = 1; ctx.setLineDash([]); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    if (S < 40 || this.reduced) { ctx.globalCompositeOperation = 'source-over'; ctx.clearRect(0, 0, this.w, this.h); }
+    else { ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = 'rgba(0,0,0,'+clamp(this.p.fade || 0.3, 0.1, 1).toFixed(2)+')'; ctx.fillRect(0, 0, this.w, this.h); }
+    ctx.globalCompositeOperation = 'lighter';
+    if (this.coreOnly) { this.drawCoreOnly(ctx); ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1; return; }
+    this.drawHUD(ctx);
+    const p = this.p; this.coreScale = 0.68; this.drawEclipse(ctx);
+    const ap = this.aperture(); ctx.save(); ctx.beginPath(); ctx.arc(ap.x, ap.y, Math.max(1, ap.r), 0, TAU); ctx.clip();
+    const b = p.bright, sp = this.spin;
+    if (p.wArm > 0.02) { p.bright = b*p.wArm; this.coreScale = 0.52; this.spin = this.aspin || 0; this.drawArmillary(ctx, p.kspinA); this.aspin = this.spin; }
+    if (p.wKnot > 0.02) { p.bright = b*p.wKnot; const S = Math.min(this.w, this.h), ext = this.kn === 'inf' ? 1.45*1.08 : this.kn === 'mob' ? 1.53*1.18 : (1+p.r0)*1.15; this.coreScale = Math.min(0.4, ap.r*0.9/(ext*0.27*S)); this.spin = this.cspin || 0; this.drawKnot(ctx, p.kspinK); this.cspin = this.spin; }
+    p.bright = b; this.spin = sp; this.coreScale = 0.68; ctx.restore();
+    this.drawBlades(ctx);
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  }
+
+  /* ---------- Core only: what lives inside the iris, filling the frame (chips, glyphs) ---------- */
+  drawCoreOnly(ctx) {
+    const p = this.p, b = p.bright, sp = this.spin, S = Math.min(this.w, this.h), cx = this.w/2, cy = this.h/2, col = this.col, wk = this.wakeT;
+    if (p.wArm > 0.02) { p.bright = b*p.wArm; this.coreScale = 1.25; this.spin = this.aspin || 0; this.drawArmillary(ctx, p.kspinA); this.aspin = this.spin; }
+    if (p.wKnot > 0.02) { p.bright = b*p.wKnot; const ext = this.kn === 'inf' ? 1.45*1.08 : this.kn === 'mob' ? 1.53*1.18 : (1+p.r0)*1.15; this.coreScale = Math.min(1.3, 1.7/ext); this.spin = this.cspin || 0; this.drawKnot(ctx, p.kspinK); this.cspin = this.spin; }
+    if (p.wLens > 0.02) { ctx.setLineDash([S*0.06, S*0.1]); ctx.lineWidth = Math.max(1, S*0.03); ctx.strokeStyle = rgba(col, b*p.wLens*(0.7+0.3*Math.sin(this.t*2.2))); ctx.beginPath(); ctx.arc(cx, cy, S*0.36, this.t*0.2, this.t*0.2+TAU); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = rgba(col, b*p.wLens*0.9); ctx.beginPath(); ctx.arc(cx, cy, Math.max(1, S*0.04), 0, TAU); ctx.fill(); }
+    if (wk < 1) { ctx.strokeStyle = rgba(col, sq(1-wk)*0.7); ctx.lineWidth = Math.max(1, S*0.02); ctx.beginPath(); ctx.arc(cx, cy, S*(0.1+wk*0.4), 0, TAU); ctx.stroke(); }
+    p.bright = b; this.spin = sp; this.coreScale = 0.68;
+  }
+
+  /* ---------- Knot: one strand of light, many crossings ---------- */
+  drawKnot(ctx, spinRate) {
+    const p = this.p, t = this.t, dt = this.dt, w = this.w, h = this.h, S = Math.min(w, h), cx = w/2, cy = h/2, small = S < 40, col = this.col, amp = this.ampS, wk = this.wakeT, mot = this.reduced ? 0 : 1;
+    const bright = p.bright + (wk < 1.2 ? 0.35*Math.exp(-wk*4) : 0);
+    const N = small ? 90 : 220, tgW = TARGETS[this.concept][this.state].wKnot, K0 = KNOTS[this.state], K = ((p.wKnot < 0.5 && !tgW) && this.kn) ? this.kn : K0;
+    if (!this.pts || this.pts.length !== N*3) { this.pts = new Float32Array(N*3); this.prev = null; this.kn = K; this.morph = 1; this.proj = new Float32Array(N*4); }
+    if (K !== this.kn) { this.prev = this.pts.slice(); this.kn = K; this.morph = 0; }
+    this.morph = approach(this.morph, 1, 1.6, dt);
+    const m = smooth(clamp(this.morph, 0, 1)), pts = this.pts, prev = this.prev, kn = this.kn;
+    for (let i = 0; i < N; i++) {
+      const u = i/N, a = TAU*u, r0 = p.r0*(1 + p.voiceR*amp*0.6*Math.sin(u*TAU*4+t*14) + p.voiceR*amp*0.25);
+      let x, y, z;
+      if (kn === 'inf') { const s = 1.45*(1+0.15*p.voiceR*amp); x = s*Math.cos(a); y = s*0.62*Math.sin(2*a); z = 0.3*Math.sin(a); }
+      else if (kn === 'mob') { const A = 2*a, hw = 0.5, rr = 1.03 + hw*Math.cos(A/2) + 0.03*Math.sin(3*A+t*3); x = rr*Math.cos(A); y = rr*Math.sin(A); z = hw*Math.sin(A/2); }
+      else { const r = 1 + r0*Math.cos(kn[1]*a); x = r*Math.cos(kn[0]*a); y = r*Math.sin(kn[0]*a); z = r0*Math.sin(kn[1]*a); }
+      if (prev && m < 0.999) { x = lerp(prev[i*3], x, m); y = lerp(prev[i*3+1], y, m); z = lerp(prev[i*3+2], z, m); }
+      pts[i*3] = x; pts[i*3+1] = y; pts[i*3+2] = z;
+    }
+    this.spin += (spinRate != null ? spinRate : p.spin)*dt*mot + 0.02*dt*mot;
+    const tiltE = p.tilt + (kn === 'mob' ? 0.4*Math.sin(t*0.45) : 0);
+    const cs = Math.cos(this.spin), sn = Math.sin(this.spin), ct = Math.cos(tiltE), st = Math.sin(tiltE), R = S*0.27*(this.coreScale || 1)*(1+0.012*Math.sin(this.breathT)), P = this.proj;
+    for (let i = 0; i < N; i++) {
+      const x = pts[i*3], y = pts[i*3+1], z = pts[i*3+2];
+      const x1 = x*cs - z*sn, z1 = x*sn + z*cs, y1 = y*ct - z1*st, z2 = y*st + z1*ct, ps = 1/(1-0.18*z2);
+      P[i*4] = cx + x1*R*ps; P[i*4+1] = cy + y1*R*ps; P[i*4+2] = z2; P[i*4+3] = ps;
+    }
+    const B = 6, segs = this.segs || (this.segs = Array.from({ length: B }, () => []));
+    for (let b = 0; b < B; b++) segs[b].length = 0;
+    for (let i = 0; i < N; i++) { const j = (i+1)%N, zb = (P[i*4+2]+P[j*4+2])*0.5; segs[clamp(Math.floor((zb+1.6)/3.2*B), 0, B-1)].push(i); }
+    for (let pass = 0; pass < (small ? 1 : 2); pass++) for (let b = 0; b < B; b++) {
+      const sg = segs[b]; if (!sg.length) continue;
+      const df = (b+0.5)/B;
+      ctx.beginPath();
+      for (let k = 0; k < sg.length; k++) { const i = sg[k], j = (i+1)%N; ctx.moveTo(P[i*4], P[i*4+1]); ctx.lineTo(P[j*4], P[j*4+1]); }
+      if (pass === 0 && !small) { ctx.lineWidth = 5+5*df; ctx.strokeStyle = rgba(col, bright*(0.04+0.1*df)); }
+      else { const inf = kn === 'inf' ? 1.7 : kn === 'mob' ? 1.3 : 1; ctx.lineWidth = small ? 1 : (0.8+1.1*df)*inf; ctx.strokeStyle = rgba(mix(col, WHITE, (kn === 'inf' ? 0.35 : 0.2)*df), bright*(0.3+0.7*df)*(kn === 'inf' ? 1.3 : 1)); }
+      ctx.stroke();
+    }
+    if (kn === 'mob' && !small) {
+      const NA = 96, M = 4, hw = 0.5, NB = 6, M1 = M+1;
+      const sp = this.msurf || (this.msurf = new Float32Array((NA+1)*M1*3));
+      for (let i = 0; i <= NA; i++) {
+        const A = i/NA*TAU*2, cA = Math.cos(A), sA = Math.sin(A), ch = Math.cos(A/2), sh = Math.sin(A/2), rip = 0.03*Math.sin(3*A+t*3);
+        for (let j = 0; j <= M; j++) {
+          const v = -1+2*j/M, rr = 1.03 + v*hw*ch + rip, x = rr*cA, y = rr*sA, z = v*hw*sh;
+          const x1 = x*cs - z*sn, z1 = x*sn + z*cs, y1 = y*ct - z1*st, z2 = y*st + z1*ct, psq = 1/(1-0.18*z2), k = (i*M1+j)*3;
+          sp[k] = cx + x1*R*psq; sp[k+1] = cy + y1*R*psq; sp[k+2] = z2;
+        }
+      }
+      const bins = this.mbins || (this.mbins = Array.from({ length: NB }, () => []));
+      for (let b = 0; b < NB; b++) bins[b].length = 0;
+      for (let i = 0; i < NA; i++) for (let j = 0; j < M; j++) {
+        const k00 = (i*M1+j)*3, k01 = k00+3, k10 = ((i+1)*M1+j)*3, k11 = k10+3;
+        const ax = sp[k10]-sp[k00], ay = sp[k10+1]-sp[k00+1], bx = sp[k01]-sp[k00], by = sp[k01+1]-sp[k00+1];
+        const area = Math.abs(ax*by - ay*bx), facing = clamp(area/((Math.hypot(ax, ay)*Math.hypot(bx, by))||1), 0, 1);
+        const zav = (sp[k00+2]+sp[k11+2])*0.5, df = clamp((zav+1.5)/3, 0, 1);
+        const al = (0.25+0.75*facing)*(0.35+0.65*df);
+        bins[clamp(Math.floor(al*NB), 0, NB-1)].push(k00, k01, k11, k10);
+      }
+      for (let b = 0; b < NB; b++) {
+        const q = bins[b]; if (!q.length) continue;
+        ctx.beginPath();
+        for (let k = 0; k < q.length; k += 4) { ctx.moveTo(sp[q[k]], sp[q[k]+1]); ctx.lineTo(sp[q[k+1]], sp[q[k+1]+1]); ctx.lineTo(sp[q[k+2]], sp[q[k+2]+1]); ctx.lineTo(sp[q[k+3]], sp[q[k+3]+1]); ctx.closePath(); }
+        ctx.fillStyle = rgba(col, bright*0.16*((b+0.5)/NB)); ctx.fill();
+      }
+      // hologram grid: longitudinal lines and cross rungs
+      ctx.lineWidth = 0.7; ctx.strokeStyle = rgba(mix(col, WHITE, 0.2), bright*0.28); ctx.beginPath();
+      for (let j = 1; j < M; j++) for (let i = 0; i <= NA; i++) { const k = (i*M1+j)*3; i ? ctx.lineTo(sp[k], sp[k+1]) : ctx.moveTo(sp[k], sp[k+1]); }
+      ctx.stroke();
+      ctx.strokeStyle = rgba(col, bright*0.16); ctx.beginPath();
+      for (let i = 0; i < NA; i += 4) { const k0 = (i*M1)*3, k1 = (i*M1+M)*3; ctx.moveTo(sp[k0], sp[k0+1]); ctx.lineTo(sp[k1], sp[k1+1]); }
+      ctx.stroke();
+    }
+    if (!small) {
+      const glow = this.sprite('glow'), core = rgba(mix(col, WHITE, 0.75), Math.min(1, bright));
+      for (let k = 0; k < this.beads.length; k++) {
+        const bd = this.beads[k], dir = p.rev > 0.5 && (k&1) ? -1 : 1;
+        bd.u = frac(bd.u + p.bSpeed*bd.s*dt*mot*dir);
+        const fi = bd.u*N, i = Math.floor(fi), j = (i+1)%N, f = fi-i;
+        const x = lerp(P[i*4], P[j*4], f), y = lerp(P[i*4+1], P[j*4+1], f), ps = lerp(P[i*4+3], P[j*4+3], f), df = clamp((ps-0.79)/0.58, 0, 1);
+        const gs = S*(this.coreScale || 1)*(0.045+0.06*df)*(1+p.voiceR*amp*0.5);
+        ctx.globalAlpha = clamp(p.bAlpha*bright*(0.35+0.65*df), 0, 1); ctx.drawImage(glow, x-gs/2, y-gs/2, gs, gs);
+        ctx.globalAlpha = 1; ctx.fillStyle = core; ctx.beginPath(); ctx.arc(x, y, 0.8+1.2*df, 0, TAU); ctx.fill();
+      }
+      if (wk < 1) { ctx.strokeStyle = rgba(col, sq(1-wk)*0.6); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cx, cy, S*(0.15+wk*0.45), 0, TAU); ctx.stroke(); }
+    }
+  }
+
+  /* ---------- HUD: the instrument rings around the core ---------- */
+  drawHUD(ctx) {
+    const p = this.p, t = this.t, dt = this.dt, w = this.w, h = this.h, S = Math.min(w, h), cx = w/2, cy = h/2, small = S < 40, col = this.col, amp = this.ampS, wk = this.wakeT, mot = this.reduced ? 0 : 1;
+    if (small) return;
+    const flash = wk < 1.2 ? Math.exp(-wk*4) : 0, br = p.hudBright + flash*0.4, Ro = S*0.40;
+    this.hspin = (this.hspin || 0) + p.hudSpin*dt*mot;
+    ctx.lineCap = 'butt';
+    // base rings
+    ctx.lineWidth = 1; ctx.strokeStyle = rgba(col, 0.28*br);
+    ctx.beginPath(); ctx.arc(cx, cy, Ro, 0, TAU); ctx.stroke();
+    ctx.strokeStyle = rgba(col, 0.14*br); ctx.beginPath(); ctx.arc(cx, cy, Ro*(0.72-0.06*p.hudSplit), 0, TAU); ctx.stroke();
+    // tick scale with voice spectrum
+    const NT = 96; ctx.beginPath();
+    for (let i = 0; i < NT; i++) {
+      const a = i/NT*TAU - Math.PI/2, major = i % 8 === 0;
+      let len = S*(major ? 0.04 : 0.016);
+      const sp = p.hudSpec*amp*(0.5+0.5*Math.sin(i*0.7+t*20)*Math.sin(i*0.23-t*7));
+      len *= 1 + sp*2.2;
+      const r0 = Ro*1.02, r1 = r0+len;
+      ctx.moveTo(cx+Math.cos(a)*r0, cy+Math.sin(a)*r0); ctx.lineTo(cx+Math.cos(a)*r1, cy+Math.sin(a)*r1);
+    }
+    ctx.lineWidth = 1; ctx.strokeStyle = rgba(col, 0.55*br); ctx.stroke();
+    if (p.hudSpec*amp > 0.05) { ctx.lineWidth = 3; ctx.strokeStyle = rgba(col, 0.12*br*p.hudSpec*amp); ctx.stroke(); }
+    // rotating segmented arcs
+    const arcs = [[0.93, 1, 0.55, 2.4, 0.9], [0.86, -1.6, 0.32, 1.2, 0.7], [1.11, 0.6, 0.22, 1, 0.5], [0.79, 2.3, 0.14, 1.6, 0.6]];
+    for (let k = 0; k < arcs.length; k++) {
+      const A = arcs[k], rr = Ro*(A[0] + p.hudSplit*0.09*(k-1.5)), base = this.hspin*A[1] + k*1.9, cover = p.hudArcs*A[2]*TAU;
+      const nseg = k === 0 ? 3 : 2;
+      if (p.hudDash > 0.5) ctx.setLineDash([2, 7]);
+      for (let sgi = 0; sgi < nseg; sgi++) {
+        const a0 = base + sgi*TAU/nseg, a1 = a0 + cover/nseg*(0.6+0.4*Math.sin(t*0.7+k+sgi));
+        ctx.beginPath(); ctx.arc(cx, cy, rr, a0, a1); ctx.lineWidth = A[3]; ctx.strokeStyle = rgba(mix(col, WHITE, 0.15), A[4]*br); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      // end caps
+      const ea = base + cover/nseg*0.5;
+      ctx.fillStyle = rgba(mix(col, WHITE, 0.5), br*0.9); ctx.beginPath(); ctx.arc(cx+Math.cos(ea)*rr, cy+Math.sin(ea)*rr, 1.6, 0, TAU); ctx.fill();
+    }
+    // cardinal marks + readouts
+    ctx.font = Math.max(8, Math.round(S*0.024))+'px ui-monospace, Menlo, Consolas, monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = rgba(col, 0.6*br);
+    const lab = ['000', '090', '180', '270'];
+    for (let k = 0; k < 4; k++) { const a = k*Math.PI/2 - Math.PI/2, rr = Ro*1.16; ctx.fillText(lab[k], cx+Math.cos(a)*rr, cy+Math.sin(a)*rr); }
+    ctx.fillStyle = rgba(col, 0.75*br);
+    const lv = ((this.clock*7) % 1000) | 0;
+    ctx.textAlign = 'right'; ctx.fillText(this.state.toUpperCase()+' · '+(amp*100|0).toString().padStart(3, '0'), cx+Ro*0.98, cy-Ro*0.86);
+    ctx.textAlign = 'left'; ctx.fillText('LOCAL · '+String(lv).padStart(3, '0'), cx-Ro*0.98, cy+Ro*0.9);
+    ctx.lineCap = 'round';
+  }
+
+  /* ---------- Armillary: rings on different axes that agree when she attends ---------- */
+  drawArmillary(ctx, spinRate) {
+    const p = this.p, t = this.t, dt = this.dt, w = this.w, h = this.h, S = Math.min(w, h), cx = w/2, cy = h/2, small = S < 40, col = this.col, amp = this.ampS, wk = this.wakeT, mot = this.reduced ? 0 : 1;
+    const bright = p.bright + (wk < 1.2 ? 0.35*Math.exp(-wk*4) : 0);
+    const K = 5, NP = small ? 24 : 64, R = S*0.27*(this.coreScale || 1)*(1+0.012*Math.sin(this.breathT));
+    this.spin += (spinRate != null ? spinRate : p.spin)*dt*mot;
+    if (!this.arm || this.arm.length !== K*NP*4) this.arm = new Float32Array(K*NP*4);
+    const P = this.arm, B = 6, segs = this.segs || (this.segs = Array.from({ length: B }, () => []));
+    for (let b = 0; b < B; b++) segs[b].length = 0;
+    const splitV = p.split*(0.5-0.5*Math.cos(t*0.5));
+    for (let k = 0; k < K; k++) {
+      const own = p.spread*(0.35+0.32*k), az = k*TAU/K + this.spin*((k&1) ? -1 : 1)*(1+0.25*k);
+      const tl = lerp(own, p.face, p.align), ph = lerp(az, this.spin*0.3, p.align);
+      const rad = R*(1-0.11*k)*(1 + p.voiceR*amp*0.25*Math.sin(t*(9+k*2)+k));
+      const dx = ((k&1) ? 1 : -1)*splitV*R*0.55;
+      const ctl = Math.cos(tl), stl = Math.sin(tl), cph = Math.cos(ph), sph = Math.sin(ph);
+      for (let i = 0; i < NP; i++) {
+        const a = i/NP*TAU + t*0.3*(k+1)*mot, x0 = Math.cos(a), y0 = Math.sin(a);
+        // ring in xz plane, tilted about x by tl, rotated about y by ph
+        const y1 = -y0*stl, z1 = y0*ctl;
+        const x2 = x0*cph + z1*sph, z2 = -x0*sph + z1*cph;
+        const ps = 1/(1-0.2*z2), idx = (k*NP+i)*4;
+        P[idx] = cx + dx + x2*rad*ps; P[idx+1] = cy + y1*rad*ps; P[idx+2] = z2; P[idx+3] = ps;
+        const j = (i+1)%NP;
+        segs[clamp(Math.floor((z2+1.2)/2.4*B), 0, B-1)].push(k*NP+i, k*NP+j);
+      }
+    }
+    for (let pass = 0; pass < (small ? 1 : 2); pass++) for (let b = 0; b < B; b++) {
+      const sg = segs[b]; if (!sg.length) continue;
+      const df = (b+0.5)/B; ctx.beginPath();
+      for (let q = 0; q < sg.length; q += 2) { const i = sg[q]*4, j = sg[q+1]*4; ctx.moveTo(P[i], P[i+1]); ctx.lineTo(P[j], P[j+1]); }
+      if (pass === 0 && !small) { ctx.lineWidth = 4+4*df; ctx.strokeStyle = rgba(col, bright*(0.03+0.08*df)); }
+      else { ctx.lineWidth = small ? 1 : 0.7+0.9*df; ctx.strokeStyle = rgba(mix(col, WHITE, 0.2*df), bright*(0.25+0.7*df)); }
+      ctx.stroke();
+    }
+    if (!small) {
+      const glow = this.sprite('glow'), core = rgba(mix(col, WHITE, 0.75), Math.min(1, bright));
+      for (let k = 0; k < K; k++) for (let m = 0; m < 2; m++) {
+        const i = ((Math.floor(frac(t*0.08*(k+1)+m*0.5)*NP)) % NP), idx = (k*NP+i)*4, ps = P[idx+3], df = clamp((ps-0.83)/0.4, 0, 1), gs = S*(this.coreScale || 1)*(0.04+0.05*df);
+        ctx.globalAlpha = clamp(bright*(0.3+0.6*df), 0, 1); ctx.drawImage(glow, P[idx]-gs/2, P[idx+1]-gs/2, gs, gs);
+        ctx.globalAlpha = 1; ctx.fillStyle = core; ctx.beginPath(); ctx.arc(P[idx], P[idx+1], 0.8+1.2*df, 0, TAU); ctx.fill();
+      }
+      // the pivot
+      ctx.fillStyle = core; ctx.beginPath(); ctx.arc(cx, cy, 1.8, 0, TAU); ctx.fill();
+      if (wk < 1) { ctx.strokeStyle = rgba(col, sq(1-wk)*0.6); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cx, cy, S*(0.15+wk*0.4), 0, TAU); ctx.stroke(); }
+    }
+  }
+
+  aperture() {
+    const p = this.p, S = Math.min(this.w, this.h), Rd = S*p.Rd*(this.coreScale || 1), ox = p.off*S*(this.coreScale || 1), span = lerp(2.7, 0.8, clamp(p.open, 0, 1));
+    return { x: this.w/2+ox, y: this.h/2, r: Rd*0.98*Math.abs(Math.cos(span/2)), Rd: Rd, span: span };
+  }
+  /* ---------- Iris blades over the eclipse disc ---------- */
+  drawBlades(ctx) {
+    const p = this.p, t = this.t, w = this.w, h = this.h, S = Math.min(w, h), cx = w/2, cy = h/2, col = this.col;
+    if (S < 40) return;
+    const A = this.aperture(), Rd = A.Rd, ox = A.x-cx, NB = 12, span = A.span, rot = t*0.15 + this.spin;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.lineWidth = 1; ctx.strokeStyle = rgba(col, 0.35*p.bright*(1-0.6*(p.wKnot || 0))); ctx.beginPath();
+    for (let k = 0; k < NB; k++) {
+      const a = k/NB*TAU + rot, x0 = cx+ox+Math.cos(a)*Rd*0.98, y0 = cy+Math.sin(a)*Rd*0.98, x1 = cx+ox+Math.cos(a+span)*Rd*0.98, y1 = cy+Math.sin(a+span)*Rd*0.98;
+      ctx.moveTo(x0, y0); ctx.lineTo(x1, y1);
+    }
+    ctx.stroke();
+    // aperture: the opening the blades leave
+    const ap = A.r;
+    if (p.wLens > 0.02) { ctx.strokeStyle = rgba(col, 0.25*p.bright*p.wLens); ctx.beginPath(); ctx.arc(cx+ox, cy, Math.max(1, ap*0.62), 0, TAU); ctx.stroke(); }
+    ctx.strokeStyle = rgba(mix(col, WHITE, 0.3), 0.6*p.bright); ctx.beginPath(); ctx.arc(cx+ox, cy, Math.max(1, ap), 0, TAU); ctx.stroke();
+    ctx.fillStyle = rgba(col, 0.08*p.bright); ctx.fill();
+    ctx.globalCompositeOperation = 'lighter';
+  }
+
+  /* ---------- Eclipse: a dark body and a living corona ---------- */
+  drawEclipse(ctx) {
+    const p = this.p, t = this.t, dt = this.dt, w = this.w, h = this.h, S = Math.min(w, h), cx = w/2, cy = h/2, small = S < 40, col = this.col, amp = this.ampS, wk = this.wakeT, mot = this.reduced ? 0 : 1;
+    const flash = wk < 1.2 ? Math.exp(-wk*4) : 0, bright = (p.bright + flash*0.5)*(p.ringDash > 0.5 ? 0.8+0.2*Math.sin(t*2.2) : 1);
+    const Rd = S*p.Rd*(this.coreScale || 1)*(1+0.01*Math.sin(this.breathT)), ox = p.off*S*(this.coreScale || 1);
+    this.spin += p.spin*dt*mot;
+    const g = ctx.createRadialGradient(cx, cy, Rd*1.0, cx, cy, Rd*(1.5+p.corona*1.8));
+    const hk = this.coreScale && this.coreScale < 1 ? 0.6 : 1;
+    g.addColorStop(0, rgba(col, 0.5*bright*hk)); g.addColorStop(0.3, rgba(col, 0.1*bright*hk)); g.addColorStop(1, rgba(col, 0));
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+    const N = small ? 24 : 150, bins = this.bins || (this.bins = [[], [], [], []]);
+    for (let b = 0; b < 4; b++) bins[b].length = 0;
+    for (let i = 0; i < N; i++) {
+      const a = i/N*TAU + this.spin + 0.02*Math.sin(i*7.1+t*0.3);
+      const n = 0.5+0.5*Math.sin(i*3.7+t*1.3*p.shim)*Math.sin(i*1.3-t*0.7*p.shim);
+      const L = Rd*p.corona*(p.spike != null ? p.spike : 1)*(0.35+1.1*n)*(1+p.bias*0.9*Math.max(0, Math.sin(a)))*(1+p.voiceL*amp*(0.6+0.5*Math.sin(i*0.9+t*15)))*(1+flash*0.8);
+      bins[Math.min(3, Math.floor(n*4))].push(Math.cos(a), Math.sin(a), L);
+    }
+    for (let pass = 0; pass < (small ? 1 : 2); pass++) for (let b = 0; b < 4; b++) {
+      const bn = bins[b]; if (!bn.length) continue;
+      ctx.beginPath();
+      for (let k = 0; k < bn.length; k += 3) { ctx.moveTo(cx+bn[k]*Rd*1.02, cy+bn[k+1]*Rd*1.02); ctx.lineTo(cx+bn[k]*(Rd+bn[k+2]), cy+bn[k+1]*(Rd+bn[k+2])); }
+      const al = bright*(0.1+0.16*b)*(this.coreScale && this.coreScale < 1 ? 0.6 : 1);
+      if (pass === 0 && !small) { ctx.lineWidth = 4; ctx.strokeStyle = rgba(col, al*0.3); } else { ctx.lineWidth = small ? 1 : 1.1; ctx.strokeStyle = rgba(mix(col, WHITE, 0.1*b), al); }
+      ctx.stroke();
+    }
+    if (p.prom > 0.02 && !small) {
+      for (let k = 0; k < 6; k++) {
+        const a = k*TAU/6 + t*0.4 + this.spin, span = 0.3, ht = Rd*(0.35+0.5*(0.5+0.5*Math.sin(t*2.3+k*1.9)));
+        const x0 = cx+Math.cos(a)*Rd, y0 = cy+Math.sin(a)*Rd, x3 = cx+Math.cos(a+span)*Rd, y3 = cy+Math.sin(a+span)*Rd;
+        const x1 = cx+Math.cos(a+0.04)*(Rd+ht), y1 = cy+Math.sin(a+0.04)*(Rd+ht), x2 = cx+Math.cos(a+span-0.04)*(Rd+ht), y2 = cy+Math.sin(a+span-0.04)*(Rd+ht);
+        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.bezierCurveTo(x1, y1, x2, y2, x3, y3);
+        ctx.lineWidth = 6; ctx.strokeStyle = rgba(col, p.prom*bright*0.18); ctx.stroke();
+        ctx.lineWidth = 1.6; ctx.strokeStyle = rgba(mix(col, WHITE, 0.3), p.prom*bright*0.85); ctx.stroke();
+      }
+    }
+    if (p.ringDash > 0.5) ctx.setLineDash([3, 6]);
+    ctx.beginPath(); ctx.arc(cx, cy, Rd*1.01, 0, TAU);
+    if (!small) { ctx.lineWidth = 8; ctx.strokeStyle = rgba(col, p.ring*bright*0.22); ctx.stroke(); }
+    ctx.lineWidth = small ? 1.5 : 2.2; ctx.strokeStyle = rgba(mix(col, WHITE, 0.35), p.ring*bright); ctx.stroke(); ctx.setLineDash([]);
+    if (p.dbl > 0.02) { ctx.beginPath(); ctx.arc(cx, cy, Rd*(1+0.42*p.dbl), 0, TAU); ctx.lineWidth = 1.3; ctx.strokeStyle = rgba(col, p.dbl*bright*0.7); ctx.stroke(); }
+    if (!small) {
+      const glow = this.sprite('glow');
+      if (p.beads > 0.02) for (let j = 0; j < 14; j++) {
+        const a = j*TAU/14 - t*0.5, rr = Rd*(1+0.42*p.dbl), gs = S*0.06*(0.6+0.4*Math.sin(t*5+j*2.1));
+        ctx.globalAlpha = clamp(p.beads*bright*(0.4+0.6*Math.sin(t*3+j*1.3)), 0, 1); ctx.drawImage(glow, cx+Math.cos(a)*rr-gs/2, cy+Math.sin(a)*rr-gs/2, gs, gs);
+      }
+      if (wk < 1.1) { const a = -0.9, gs = Rd*(0.9+wk*2.4); ctx.globalAlpha = sq(1-wk/1.1); ctx.drawImage(glow, cx+Math.cos(a)*Rd-gs/2, cy+Math.sin(a)*Rd-gs/2, gs, gs); }
+      ctx.globalAlpha = 1;
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    if (p.off > 0.005) { ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(cx, cy, Rd*0.99, 0, TAU); ctx.fill(); ctx.globalCompositeOperation = 'source-over'; }
+    ctx.fillStyle = '#030608'; ctx.beginPath(); ctx.arc(cx+ox, cy, Rd, 0, TAU); ctx.fill();
+    ctx.globalCompositeOperation = 'lighter';
+  }
+}
+CielSymbol2.COLORS = COLORS; CielSymbol2.HEX = HEX; CielSymbol2.ORDER = ORDER; CielSymbol2.ORDER7 = ORDER7;
+root.CielSymbol2 = CielSymbol2;
+})(typeof window !== 'undefined' ? window : this);
+</script>
 
 <script>
 "use strict";
@@ -574,7 +953,7 @@ const ROLES = {
   "user-remote":        { cls: "you", cap: () => "from discord" },
   "you-confirm":        { cls: "you", cap: () => "confirmation" },
   "you-confirm-remote": { cls: "you", cap: () => "confirmation · remote" },
-  "ciel":               { cls: "ciel" },
+  "ciel":               { cls: "ciel", head: (t) => t ? "Ciel \u00b7 " + clock(t) : "Ciel" },
   "ciel-thinking":      { cls: "thinking" },
   "ciel-confirm":       { cls: "confirmrow" },
 };
@@ -675,6 +1054,12 @@ function addRow(role, body, t) {
     wrap.appendChild(q);
     row.appendChild(wrap);
   } else {
+    if (spec.head) {
+      const head = document.createElement("div");
+      head.className = "cap";
+      head.textContent = spec.head(t);
+      row.appendChild(head);
+    }
     const div = document.createElement("div");
     div.className = "body";
     div.textContent = body;
@@ -694,8 +1079,54 @@ function addRow(role, body, t) {
 // "listening · snap" reads differently from "listening · spoken".
 function setState(s, source) {
   statelabel.textContent = source && s === "listening" ? s + " \u00b7 " + source : s;
-  document.body.dataset.state = KNOWN_STATES.has(s) ? s : "idle";
+  const known = KNOWN_STATES.has(s) ? s : "idle";
+  document.body.dataset.state = known;
+  busyLabel.textContent = known;
+  setMarkState(known);
 }
+
+// ── the marks ────────────────────────────────────────────────────────────
+// One renderer at every size: the whole instrument in the room, and only
+// its core — the armillary, the knot, the band — in the header glyph, the
+// asking bar, and beside each agent. One animation frame drives them all;
+// a canvas that is not laid out (a closed roster, a hidden bar) is skipped.
+const busyLabel = document.getElementById("busylabel");
+const marks = []; // {canvas, inst, state, core, speaks}
+function addMark(canvas, core, state, speaks = false) {
+  const m = { canvas, inst: null, state, woken: null, core, speaks };
+  marks.push(m);
+  return m;
+}
+const roomMark = addMark(document.getElementById("mark"), false, "idle", true);
+const glyphMark = addMark(document.getElementById("glyph"), true, "idle");
+addMark(document.getElementById("askmark"), true, "listening");
+function setMarkState(s) { roomMark.state = s; glyphMark.state = s; }
+let markLast = performance.now();
+function markFrame(now) {
+  const dt = Math.min(0.05, (now - markLast) / 1000);
+  markLast = now;
+  for (const m of marks) {
+    if (!m.canvas.isConnected || !m.canvas.offsetWidth) continue;
+    if (!m.inst) { m.inst = new CielSymbol2(m.canvas, { concept: "final" }); m.inst.coreOnly = m.core; }
+    if (m.state !== m.woken) {
+      if (m.state === "listening") m.inst.wake(); else m.inst.setState(m.state);
+      m.woken = m.state;
+    }
+    // No level reaches this page, so the voice in the tick scale is the
+    // engine's own envelope, and only while Ciel is actually speaking.
+    m.inst.autoVoice = m.speaks && m.state === "speaking";
+    m.inst.tick(dt);
+  }
+  requestAnimationFrame(markFrame);
+}
+requestAnimationFrame(markFrame);
+addEventListener("resize", () => { for (const m of marks) if (m.inst) m.inst.resize(); });
+new ResizeObserver(() => { if (roomMark.inst) roomMark.inst.resize(); }).observe(roomMark.canvas);
+
+const nowEl = document.getElementById("now");
+function tickNow() { nowEl.textContent = clock(Date.now() / 1000); }
+tickNow();
+setInterval(tickNow, 10000);
 
 function setSpeakBack(on) {
   speakBack = !!on;
@@ -715,13 +1146,28 @@ function setMuted(m) {
 // Kinds not listed render as plain rows — new agent sources add new
 // kinds, the same rule as unknown transcript labels.
 const AGENT_KINDS = {
-  deep:  { name: "deep thought" },
-  watch: { name: "watch" },
-  timer: { name: "timer" },
-  alarm: { name: "alarm" },
+  deep:  { name: "deep thought", mark: "deep" },
+  watch: { name: "watch", mark: "listening" },
+  timer: { name: "timer", mark: "speaking" },
+  alarm: { name: "alarm", mark: "idle" },
 };
 
+// The roster redraws every second for its countdowns; the glyphs are kept
+// by position across redraws so a mark is not rebuilt mid-turn.
+const agentGlyphs = [];
+function agentGlyph(i, state) {
+  if (!agentGlyphs[i]) {
+    const canvas = document.createElement("canvas");
+    canvas.className = "mark";
+    canvas.setAttribute("aria-hidden", "true");
+    agentGlyphs[i] = addMark(canvas, true, state);
+  }
+  agentGlyphs[i].state = state;
+  return agentGlyphs[i].canvas;
+}
+
 let agents = [];
+let agentsTouched = false;
 
 // The world table (world.py): the hub's readings, whole, whenever they
 // change — and re-drawn every half minute so the ages stay honest.
@@ -789,6 +1235,10 @@ function setWorld(facts, sources) {
 // failed dims its chip and says so, while the reading itself stands.
 const SOURCE_OF = { agenda: "calendar" };
 
+// Readings sit at bearings, as the mark's own cardinal marks do: what comes
+// next is dead ahead, the body's ring to the right, the place to the left.
+const BEARING = { agenda: "000", oura: "090", place: "270" };
+
 function renderWorld() {
   const now = Date.now() / 1000;
   worldEl.textContent = "";
@@ -808,9 +1258,10 @@ function renderWorld() {
     chip.className = "reading" + (spec[2] ? " warn" : "") + (stale ? " stale" : "");
     const k = document.createElement("span");
     k.className = "k";
-    k.textContent = spec[0];
+    k.textContent = (BEARING[name] ? BEARING[name] + " \u00b7 " : "") + spec[0];
     chip.appendChild(k);
     const val = document.createElement("span");
+    val.className = "v";
     val.textContent = spec[1];
     chip.appendChild(val);
     const age = now - at;
@@ -851,34 +1302,37 @@ function setAgents(list) {
 function renderAgents() {
   if (!agents.length) {
     agentsBtn.hidden = true;
-    document.body.classList.remove("agentsopen");
+    document.body.classList.remove("hasagents");
     agentRows.textContent = "";
     return;
   }
   agentsBtn.hidden = false;
-  agentsCount.textContent = agents.length + " WORKING";
-  // The chip runs deep-thought purple while a reasoning pass is in
-  // flight — that is the one agent someone is sitting in silence for.
-  agentsBtn.classList.toggle("deep", agents.some((a) => a.kind === "deep"));
+  document.body.classList.add("hasagents");
+  // Beside the mark there is a column waiting for the roster, so it opens
+  // on its own; stacked under the mark on a phone it would push the
+  // transcript away. Once the chip has been pressed, the choice stands.
+  if (!agentsTouched) document.body.classList.toggle("agentsopen", matchMedia("(min-width: 761px)").matches);
+  agentsCount.textContent = agents.length + (agents.length === 1 ? " AGENT" : " AGENTS");
   agentsArr.textContent =
     document.body.classList.contains("agentsopen") ? "▴" : "▾";
   if (!document.body.classList.contains("agentsopen")) return;
 
   const now = Date.now() / 1000;
   agentRows.textContent = "";
-  for (const a of agents) {
-    const spec = AGENT_KINDS[a.kind] || { name: a.kind || "agent" };
+  for (const [i, a] of agents.entries()) {
+    const spec = AGENT_KINDS[a.kind] || { name: a.kind || "agent", mark: "idle" };
     const row = document.createElement("div");
     row.className = "agent" + (AGENT_KINDS[a.kind] ? " " + a.kind : "");
-    const dot = document.createElement("span");
-    dot.className = "dot";
-    row.appendChild(dot);
+    const glyph = document.createElement("span");
+    glyph.className = "glyph";
+    glyph.appendChild(agentGlyph(i, spec.mark));
+    row.appendChild(glyph);
+    const main = document.createElement("div");
+    main.className = "main";
     const kind = document.createElement("span");
     kind.className = "kind";
     kind.textContent = spec.name;
-    row.appendChild(kind);
-    const main = document.createElement("div");
-    main.className = "main";
+    main.appendChild(kind);
     const label = document.createElement("div");
     label.className = "label";
     label.textContent = a.label || spec.name;
@@ -909,6 +1363,7 @@ function renderAgents() {
 }
 
 agentsBtn.addEventListener("click", () => {
+  agentsTouched = true;
   document.body.classList.toggle("agentsopen");
   renderAgents();
 });

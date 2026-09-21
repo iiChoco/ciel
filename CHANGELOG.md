@@ -2,6 +2,57 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-20 — The mark is the interface
+
+**Why.** The Chart was an instrument panel with nothing at its centre:
+scanlines, corner brackets, cut-corner chips in cyan and gold, and a state
+that lived in one small pill. The state is the most important thing the page
+knows, and it was the smallest thing on it. The design project's take E,
+Iris, puts the living mark in the middle of the room and makes everything
+else a readout on its ring.
+
+**What.**
+
+- *The mark, inlined.* `chart.html` carries the design's symbol engine
+  (`CielSymbol2`, the `final` concept) in its own script block, so the page
+  is still one file with no external asset. The aurora concept the Chart
+  never draws is left out; the rest is as designed. One animation frame
+  drives every mark on the page and skips a canvas that is not laid out.
+- *The page borrows the state's colour.* `--st` is a registered colour
+  property that follows `body[data-state]` and cross-fades in 600 ms; labels,
+  hairlines, the caret, Ciel's rule, and the lit controls take it. The
+  scanlines, the brackets, and the cut corners are gone: square hairline
+  chips, panes that are a 6–8% fill under a top rule, mono for the
+  instrument, a serif for Ciel alone.
+- *Readings at the mark's left hand, the roster at its right.* A reading is
+  a label (with a bearing where the mark has one: next 000, ring 090, place
+  270), a white value, and an age; stale is a red age under a dashed label,
+  and a warning colours the label only. Each agent wears the core glyph of
+  the state its kind works in. The roster opens by itself where there is a
+  column for it and stays folded on a phone; once the chip is pressed, the
+  choice stands. The chip now counts `AGENTS`.
+- *The question is the mark going to listening.* The asking bar is the
+  listening green whatever the room is doing, with a core glyph and the only
+  filled shape on the page, Yes. The design's draining countdown arc is not
+  built: the `confirm` frame carries no deadline, and the page will not
+  invent one.
+- *No wire change.* Every id, frame, and behaviour the page script had is
+  kept: the ledger, resume, the token form, files, tasks, grants, features,
+  the restart arm. The old Instrument tokens stay in `:root` beside the new
+  ones, so `nutrition.html` and the website's vendored copies remain a true
+  subset; they still wear the old look.
+- *Two small fixes on the way.* A clamped task row no longer shows a sliver
+  of its third line under the clamp, and the composer's placeholder stays on
+  one line on a phone.
+
+**Probes.** `probe_web.py` 67 and `probe_task_wire.py` 30, unchanged in
+count — the page is not under a probe, and the wire did not move. Checked by
+eye against the `chart-echo` and `chart-fixture` servers: desktop and
+375-point layouts with no sideways scroll, a turn and its echo, the thinking
+caret, the confirm bar, a stale reading, the roster open and folded, the
+task, grant, and feature panels, the white focus ring by keyboard, and an
+empty error console.
+
 ## 2026-09-10 — The Mac's open runs for real
 
 **Why.** The first live "pull up my analysis homework" came back "the Mac
