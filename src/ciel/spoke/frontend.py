@@ -233,6 +233,9 @@ class Spoke:
         self._next_mute_check = 0.0
         self._player: Player | None = None
         self._mic: MicStream | None = None
+        self._ear_task: asyncio.Task[None] | None = None
+        """The microphone being closed for a mute or opened for an unmute."""
+        self._next_ear_try = 0.0
 
         self._state = State.WAITING
         self._interrupted = False
@@ -278,13 +281,15 @@ class Spoke:
         self._run_task = asyncio.current_task()
         await self._startup()
         try:
-            microphone, player = build_audio(
-                self._config.audio, self._tts.sample_rate, muted=lambda: self._muted
-            )
-            self._player = player
-            async with microphone as mic, player:
+            async with contextlib.AsyncExitStack() as room:
+                opened = await self._open_audio(room)
+                if opened is None:
+                    return  # a reload arrived while the ear was shut; leave for it
+                mic, player = opened
                 self._mic = mic
-                self._notes = NoteWindow(self._config.notes, self._save_note)
+                self._notes = NoteWindow(self._config.notes, self._save_note,
+                                         transcribe=lambda pcm: self._stt.transcribe(pcm),
+                                         can_dictate=lambda: not self._muted and self._state is State.WAITING and self._confirm is None and not self._delivering and not self._ringing)
                 self._shortcuts = GlobalShortcuts(self._config.shortcuts, self._shortcut, self._config.notes)
                 await self._shortcuts.start()
                 greeting = random.choice(self._config.wake.greeting_phrases)
@@ -307,6 +312,8 @@ class Spoke:
                         on_disk = self._mute_sentinel.exists()
                         if on_disk != self._muted:
                             self._set_muted(on_disk)
+                        if mic.paused != self._muted and now_wall >= self._next_ear_try:
+                            self._sync_ear()  # an unmute whose microphone would not open is tried again
                         if self._world is not None:
                             self._world.flush()
                         # The mirror's own ringing: only what the hub can't
@@ -323,6 +330,9 @@ class Spoke:
                             due = self._timers.due(now_wall, hub_connected=self._link.connected)
                             if due:
                                 asyncio.create_task(self._ring_locally(due))
+
+                    if self._notes is not None and self._notes.dictation.feed(frame):
+                        continue
 
                     if self._confirm is not None:
                         # A question is out; the room's answer is what
@@ -343,6 +353,8 @@ class Spoke:
                             break  # a spoken "reload" with the hub away
                         if self._delivering:
                             continue  # the room is Ciel's for a moment
+                        if mic.paused:
+                            continue  # a shut ear hands over silence; it is not the room's floor
                         self._track_noise_floor(frame)
                         if not self._muted and self._wake.push(frame):
                             self._wake_source = getattr(self._wake, "source", None) or "spoken"
@@ -397,12 +409,52 @@ class Spoke:
             # about to be replaced — a clean exit, not a crash.
         finally:
             self._confirm = None
-            for task in (self._prelude, self._playing, self._ack_task):
+            for task in (self._prelude, self._playing, self._ack_task, self._ear_task):
                 if task is not None and not task.done():
                     task.cancel()
             self._player = None
             self._mic = None
             await self._shutdown()
+
+    async def _open_audio(self, room: contextlib.AsyncExitStack) -> tuple[MicStream, Player] | None:
+        """Open the microphone pair, and keep trying when it will not open.
+
+        Each attempt builds the pair afresh — a capture helper that timed
+        out has already reaped itself — and enters it into ``room``, whose
+        unwinding closes it with the run. A failure is logged with its
+        reason and waited out, the wait doubling from a second up to
+        ``audio.open_retry_max_s``; the models, the link, and the HUD stay
+        up meanwhile, so the retry costs nothing of what the night of
+        2026-09-19 paid over and over. None means a reload arrived during a
+        wait and the run should leave for it. A ceiling of 0 is the old
+        door: one attempt, and the failure ends the spoke.
+        """
+        attempt = 0
+        while True:
+            microphone, player = build_audio(
+                self._config.audio, self._tts.sample_rate, muted=lambda: self._muted
+            )
+            if self._muted:
+                microphone.hold()  # muted before it started: the ear is never opened
+            async with contextlib.AsyncExitStack() as opened:
+                try:
+                    mic = await opened.enter_async_context(microphone)
+                    await opened.enter_async_context(player)
+                except Exception as exc:  # noqa: BLE001 - any failure to open is tried again
+                    ceiling = self._config.audio.open_retry_max_s
+                    if ceiling <= 0:
+                        raise
+                    wait = min(2.0 ** attempt, ceiling)
+                    attempt += 1
+                    log.error("the microphone did not open (%s) — trying again in %.0f s", exc, wait)
+                else:
+                    room.push_async_exit(opened.pop_all())
+                    self._player = player
+                    return mic, player
+            await asyncio.sleep(wait)
+            if self.reload_requested or (self._watcher is not None and self._watcher.changed):
+                self.reload_requested = True
+                return None
 
     def _reload_stuck(self) -> None:
         """The watcher's grace ran out with the room still busy: leave
@@ -441,7 +493,7 @@ class Spoke:
 
         engine = getattr(self._stt, "engine", self._stt)
         try:
-            await self._stt.warm_up()
+            await self._bounded_warm_up(self._stt)
             return
         except Exception as exc:  # noqa: BLE001 - any failure means fall back
             if isinstance(engine, WhisperSTT):
@@ -449,7 +501,21 @@ class Spoke:
             log.warning("%s failed to start (%s) — falling back to faster-whisper",
                         type(engine).__name__, exc)
         self._stt = gate_stt(WhisperSTT(self._config.stt), self._config.stt)
-        await self._stt.warm_up()
+        await self._bounded_warm_up(self._stt)
+
+    async def _bounded_warm_up(self, stt: SpeechToText) -> None:
+        """Warm up within ``stt.warm_up_timeout_s``. A load that neither
+        finishes nor fails — on 2026-09-19 a model fetch that sat on an open
+        socket for six hours — otherwise holds startup, and the room, forever.
+        Only the waiting ends; the stuck load is left to its thread."""
+        timeout = self._config.stt.warm_up_timeout_s
+        if timeout <= 0:
+            await stt.warm_up()
+            return
+        try:
+            await asyncio.wait_for(stt.warm_up(), timeout)
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"warm-up did not finish within {timeout:.0f} s") from None
 
     async def _warm_up_tts(self) -> None:
         from ciel.pipeline import _ENGINE_CHAIN, fallback_tts
@@ -500,7 +566,7 @@ class Spoke:
             print(f"\nOr {gestures}.")
         print(f"hub: {self._config.spoke.hub}")
         if self._muted:
-            print("  [muted — Ciel will stay silent and not listen for its name]")
+            print("  [muted — the microphone is closed; Ciel will stay silent]")
 
     # ── the utterance's way up ───────────────────────────────────────────────
 
@@ -1034,9 +1100,39 @@ class Spoke:
             log.debug("could not persist mute state", exc_info=True)
         if muted and self._player is not None:
             self._player.stop()
-        print(f"\n  [{'muted' if muted else 'unmuted'}]", flush=True)
+        self._sync_ear()
+        print(f"\n  [{'muted — microphone closed' if muted else 'unmuted'}]", flush=True)
         if not from_hub:
             self._link.send({"type": "mute", "muted": muted})
+
+    def _sync_ear(self) -> None:
+        """Bring the microphone to where the mute switch is.
+
+        Muted means the device is closed, not captured-and-ignored. The
+        work is a task because closing a helper and opening one both wait,
+        and the switch is thrown from handlers that cannot; one task at a
+        time, and it looks at the switch again when it finishes, so a quick
+        mute-unmute-mute ends shut.
+        """
+        if self._mic is None or (self._ear_task is not None and not self._ear_task.done()):
+            return
+        self._ear_task = asyncio.create_task(self._move_ear(self._mic))
+
+    async def _move_ear(self, mic: MicStream) -> None:
+        while mic.paused != self._muted:
+            if self._muted:
+                await mic.pause()
+                log.info("microphone closed for mute")
+                continue
+            try:
+                await mic.resume()
+            except Exception as exc:  # noqa: BLE001 - any failure to open is tried again
+                # Still shut, and said so: the loop's tick tries again, no
+                # faster than this, until it opens or the room is muted again.
+                self._next_ear_try = time.time() + 5.0
+                log.error("the microphone did not open after the unmute (%s) — trying again in 5 s", exc)
+                return
+            log.info("microphone open again after the unmute")
 
     def _report_voice_state(self) -> None:
         listening = self._state is State.LISTENING

@@ -4,7 +4,9 @@ Pins the signed native helper, paired channel mapping and resampling, atomic
 build reuse and failed-build preservation; actual AEC3 removal of delayed stereo
 echo, retention of independent speech, partial-block framing, and continuous
 adaptation; configuration and split-speaker selection; real subprocess protocol,
-startup denial, malformed frames, stopped reference, helper death, and cleanup;
+startup denial, a stall before or after audio named by what the helper did
+and repeated in its own words, malformed frames, stopped reference, helper
+death, and cleanup;
 paired gap recovery after callback contention, overflow, and timestamp jumps.
 All executable fixtures and state live in a temporary directory. Acoustic room
 quality and playback volume require a separate explicit live experiment.
@@ -113,6 +115,7 @@ if mode == 'denied':
     sys.stderr.write('System Audio Recording permission denied'); sys.exit(1)
 if mode == 'oversize':
     sys.stdout.buffer.write(h.pack(2,999999)); sys.stdout.buffer.flush(); time.sleep(10)
+if mode == 'silent': time.sleep(10)
 hello={'rate':16000,'channels':3,'hardware_rate':48000,'nonmuting': mode != 'ducking'}
 if mode == 'before_ready': send(2, bytes(5760))
 if mode == 'gap_before_ready': send(3, b'discontinuity')
@@ -122,8 +125,10 @@ if mode == 'odd': send(2,b'x')
 if mode == 'nan': send(2,struct.pack('<f',float('nan'))*480)
 if mode == 'unknown': send(9,b'x')
 if mode == 'bad_gap': send(3,b'wrong')
-if mode == 'stall': time.sleep(10)
+if mode == 'stall_loud': sys.stderr.write('tap returned no buffers'); sys.stderr.flush()
+if mode in ('stall', 'stall_loud'): time.sleep(10)
 send(2,struct.pack('<fff',.02,.0,.0)*480)
+if mode == 'freeze': sys.stderr.write('route changed'); sys.stderr.flush(); time.sleep(10)
 if mode == 'die':
     time.sleep(.05); sys.exit(1)
 if mode == 'gap':
@@ -163,9 +168,9 @@ async def protocol(tmp: Path) -> None:
     check("queue drains and Stop retain adaptive state and capture", mic.processor is processor and proc.returncode is None)
     await frames.aclose(); await player.close(); await mic.close(); await mic.close()
     check("closing capture reaps its helper and readers idempotently", proc.returncode is not None and mic.reader is None and mic.stderr is None)
-    for mode in ('denied', 'oversize', 'ducking', 'before_ready', 'duplicate', 'odd', 'nan', 'unknown', 'stall', 'gap_before_ready', 'bad_gap'):
+    for mode in ('denied', 'oversize', 'ducking', 'before_ready', 'duplicate', 'odd', 'nan', 'unknown', 'stall', 'silent', 'stall_loud', 'gap_before_ready', 'bad_gap'):
         mic = WebRTCMic(config)
-        with patch.object(webrtc, 'ensure_built', return_value=helper(tmp, mode)), patch.object(webrtc, '_STARTUP_TIMEOUT', .3 if mode == 'stall' else 30):
+        with patch.object(webrtc, 'ensure_built', return_value=helper(tmp, mode)), patch.object(webrtc, '_STARTUP_TIMEOUT', .5 if mode in ('stall', 'silent', 'stall_loud') else 30):
             try:
                 await mic.__aenter__()
             except (RuntimeError, asyncio.TimeoutError):
@@ -173,6 +178,22 @@ async def protocol(tmp: Path) -> None:
             else:
                 await mic.close()
                 check(f"{mode} startup leaves no unprotected mic or helper", False)
+    for mode, did, hint in (('stall', 'reported its format but delivered no paired audio', True),
+                            ('silent', 'never reported its format', True),
+                            ('stall_loud', 'said: tap returned no buffers', False)):
+        mic = WebRTCMic(config)
+        with patch.object(webrtc, 'ensure_built', return_value=helper(tmp, mode)), patch.object(webrtc, '_STARTUP_TIMEOUT', .5):
+            try: await mic.__aenter__()
+            except RuntimeError as exc: message = str(exc)
+            else: await mic.close(); message = ''
+        check(f"a {mode} startup says what the helper did and repeats what it said", did in message and 'did not start; allow' not in message)
+        check(f"the permission is a possibility offered only when the helper said nothing ({mode})", ('System Audio Recording' in message) == hint)
+    mic = WebRTCMic(config)
+    with patch.object(webrtc, 'ensure_built', return_value=helper(tmp, 'freeze')), patch.object(webrtc, '_CAPTURE_TIMEOUT', .3):
+        await mic.__aenter__()
+        await asyncio.wait_for(mic.reader, 3)
+    check("a stall after audio flowed names the stop and the helper's words, not a permission", mic._closed and 'stopped delivering paired audio' in mic.error and 'route changed' in mic.error and 'System Audio Recording' not in mic.error)
+    await mic.close()
     mic = WebRTCMic(config)
     with patch.object(webrtc, 'ensure_built', return_value=helper(tmp, 'die')):
         await mic.__aenter__()

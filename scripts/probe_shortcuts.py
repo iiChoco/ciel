@@ -214,8 +214,12 @@ async def probe_controls() -> None:
     await p._shortcut('mute')
     await p._shortcut('talk')
     check("local Talk cannot lift mute", p._muted and not p._take_shortcut_talk())
+    await p._ear_task
+    check("local mute closes the microphone", p._mic.paused)
     await p._shortcut('mute')
     check("local unmute persists the same switch", not p._muted and not p._mute_sentinel.exists())
+    await p._ear_task
+    check("...and opens the microphone again", not p._mic.paused)
 
 
 class FakeQuartz:

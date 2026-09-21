@@ -19,6 +19,9 @@ zero-filled PortAudio stream keeps the device tap clock running while idle.
 state between turns, Stop, and queue drains. A paired capture gap resets DSP
 and discards queued microphone audio without restarting the spoke. Bad frames, failed helpers, lost
 routes, and missing reference delivery end capture; none enables raw listening.
+A failure to start names what the helper did before the deadline and repeats
+what it said; a missing permission is suggested, never asserted, and only when
+the helper said nothing.
 The tapped playback stays in memory and never reaches transcription or disk.
 """
 from __future__ import annotations
@@ -181,12 +184,22 @@ class WebRTCMic(MicStream):
         self._loop = asyncio.get_running_loop()
         self._wakeup = asyncio.Event()
         self._closed = False
+        if self._held():
+            return self
+        # An unmute opens the helper a second time in this object's life:
+        # the last run's verdict and words must not be read as this one's,
+        # and an adaptive filter that slept through the gap is worse than new.
+        self.error = None
+        self._diagnostic = ""
+        self.formats = {}
+        self.processor = EchoProcessor(self._config.webrtc_capture_delay_ms)
         self.ready = self._loop.create_future()
         try:
             binary = await asyncio.to_thread(ensure_built)
             # A device tap alone does not advance on an idle output. Keep a
-            # separate zero-filled ordinary stream alive even while muted.
+            # separate zero-filled ordinary stream alive while capturing.
             # This is not Apple's voice-processing output and cannot duck.
+            # A muted ear closes it with the helper: nothing stays open.
             rate = sd.query_devices(kind="output")["default_samplerate"]
             self._clock = sd.OutputStream(samplerate=rate, channels=2, dtype="float32", callback=_silence)
             self._clock.start()
@@ -202,10 +215,32 @@ class WebRTCMic(MicStream):
             return self
         except asyncio.TimeoutError as exc:
             await self.close()
-            raise RuntimeError("WebRTC capture did not start; allow Ciel's Microphone and System Audio Recording access in System Settings") from exc
+            raise RuntimeError(self._nothing_heard(_STARTUP_TIMEOUT, running=False)) from exc
         except BaseException:
             await self.close()
             raise
+
+    def _nothing_heard(self, window: float, *, running: bool) -> str:
+        """Say what the helper did before the deadline, and what it said.
+
+        The 1755 timeouts of 2026-09-19 each asserted a missing permission
+        and discarded the helper's stderr — the one line that could have
+        said otherwise. What is established is which stage went quiet; a
+        permission is offered as a possibility only when the helper left no
+        words of its own.
+        """
+        if running:
+            stage = "stopped delivering paired audio"
+        elif self.formats:
+            stage = "reported its format but delivered no paired audio"
+        else:
+            stage = "never reported its format"
+        message = f"WebRTC capture delivered no audio within {window:g} s; the helper {stage}"
+        said = self._diagnostic.strip()
+        if said:
+            return f"{message} and said: {said}"
+        return (f"{message} and said nothing; a silent tap is also what a missing Microphone "
+                "or System Audio Recording grant looks like in System Settings")
 
     async def _read_stderr(self) -> None:
         assert self.proc is not None and self.proc.stderr is not None
@@ -259,7 +294,7 @@ class WebRTCMic(MicStream):
                         pass
                 message = "Capture helper exited" + (": " + self._diagnostic.strip() if self._diagnostic else "")
             elif isinstance(exc, asyncio.TimeoutError):
-                message = "Capture stalled; check Microphone and System Audio Recording permission in System Settings"
+                message = self._nothing_heard(timeout, running=self.ready is not None and self.ready.done())
             else:
                 message = str(exc)
             self.error = message

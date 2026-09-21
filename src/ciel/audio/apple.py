@@ -172,6 +172,10 @@ class AppleSession:
             self._healthy()
             return
         self.loop = asyncio.get_running_loop()
+        # A session closed by a mute is started again by the unmute; the
+        # last close's flag and reason belong to that close.
+        self.closing = False
+        self.error = None
         binary = await asyncio.to_thread(ensure_built)
         self.ready = self.loop.create_future()
         try:
@@ -359,6 +363,8 @@ class AppleMic(MicStream):
         self._loop = asyncio.get_running_loop()
         self._wakeup = asyncio.Event()
         self._closed = False
+        if self._held():
+            return self
         try:
             await self.session.start()
         except BaseException:

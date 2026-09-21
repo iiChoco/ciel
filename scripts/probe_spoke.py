@@ -15,17 +15,24 @@ its receipts and the follow-up window after; the speaker gate, the
 Cauchy hold, and a dismissal before the merge; barge-in reported as
 an unfinished receipt; a hub that is down (said once, then a chime);
 a confirmation spoken and answered, and one that times out; a
-delivery rung and receipted; mute from the hub and from the sentinel;
-and the state machine's reports.
+delivery rung and receipted; mute from the hub and from the sentinel, and
+the microphone closed by it and opened by the unmute (a quick flip ends
+shut; a microphone that will not reopen is tried again);
+the state machine's reports; the ear that will not open tried again with
+a doubling wait, left for a reload, and the old one-attempt door on a zero
+ceiling; and a model load past its deadline treated as a warm-up failure.
 """
 from __future__ import annotations
 
 
 import asyncio
+import contextlib
 import sys
 import tempfile
+import time
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -112,9 +119,24 @@ class FakePlayer:
 class FakeMic:
     def __init__(self):
         self.drains = 0
+        self.paused = False
+        self.moves: list[str] = []
+        self.refuse = False
 
     def drain(self):
         self.drains += 1
+
+    async def pause(self):
+        await asyncio.sleep(0)  # closing a device waits; the switch can move meanwhile
+        self.paused = True
+        self.moves.append("closed")
+
+    async def resume(self):
+        await asyncio.sleep(0)
+        if self.refuse:
+            raise RuntimeError("no such device")
+        self.paused = False
+        self.moves.append("opened")
 
 
 class FakeGate:
@@ -186,6 +208,8 @@ def make_spoke(*, stt="hello there.", connected=True, complete_after=None,
     s._next_mute_check = 0.0
     s._player = FakePlayer(complete_after)
     s._mic = FakeMic()
+    s._ear_task = None
+    s._next_ear_try = 0.0
     s._state = State.BUSY
     s._interrupted = False
     s._barge_run = 0
@@ -470,6 +494,30 @@ async def probe_mute_and_state() -> None:
     check("the hub's hello carries the switch", s._muted)
 
     s = make_spoke()
+    s._set_muted(True)
+    await s._ear_task
+    check("muting closes the microphone, not just the wake word", s._mic.paused and s._mic.moves == ["closed"])
+    s._set_muted(False)
+    await s._ear_task
+    check("unmuting opens it again", not s._mic.paused and s._mic.moves == ["closed", "opened"])
+    s._set_muted(True)
+    s._set_muted(False)
+    s._set_muted(True)
+    await s._ear_task
+    check("a quick mute-unmute-mute ends shut", s._mic.paused and s._muted)
+    s._mic.refuse = True
+    s._set_muted(False)
+    await s._ear_task
+    check(
+        "an unmute whose microphone will not open leaves the ear shut and books another try",
+        s._mic.paused and not s._muted and s._next_ear_try > time.time(),
+    )
+    s._mic.refuse = False
+    s._sync_ear()  # what the loop's tick does once the wait is over
+    await s._ear_task
+    check("...and the next try opens it", not s._mic.paused)
+
+    s = make_spoke()
     s._state = State.WAITING
     s._report_voice_state()
     s._report_voice_state()
@@ -603,7 +651,7 @@ async def probe_speak_back_turn() -> None:
     check("no follow-up window is earned", s._spoke is False)
     s._on_frame({"type": "turn.end", "turn_id": "w1", "status": "done"})
     check("turn.end releases the turn and its lane", s._hub_turn is None and s._hub_lane is None)
-    s._on_frame({"type": "turn.begin", "turn_id": "x", "lane": "discord"})
+    s._on_frame({"type": "turn.begin", "turn_id": "x", "lane": "typed"})
     check("other lanes are still ignored", s._hub_turn is None)
 
 
@@ -643,6 +691,161 @@ async def probe_forced_reload() -> None:
         pass
 
 
+async def probe_ear_retry() -> None:
+    print("\nthe ear that will not open is tried again")
+
+    class Mic:
+        def __init__(self, fails):
+            self.fails = fails
+            self.closed = False
+
+        async def __aenter__(self):
+            attempts.append(self.fails)
+            if self.fails:
+                raise RuntimeError("no paired audio")
+            return self
+
+        async def __aexit__(self, *exc):
+            self.closed = True
+
+    class Player:
+        def __init__(self):
+            self.entered = False
+            self.closed = False
+
+        async def __aenter__(self):
+            self.entered = True
+            return self
+
+        async def __aexit__(self, *exc):
+            self.closed = True
+
+    attempts: list[bool] = []
+    built: list[tuple] = []
+    waits: list[float] = []
+    real_sleep = asyncio.sleep
+
+    def builder(plan):
+        it = iter(plan)
+
+        def build(config, rate, muted=None):
+            pair = (Mic(next(it)), Player())
+            built.append(pair)
+            return pair
+
+        return build
+
+    async def sleep(delay):
+        waits.append(delay)
+        await real_sleep(0)
+
+    def spoke(ceiling):
+        s = make_spoke()
+        s._config = replace(s._config, audio=replace(s._config.audio, open_retry_max_s=ceiling))
+        s._player = None
+        return s
+
+    s = spoke(3.0)
+    with patch("ciel.spoke.frontend.build_audio", builder([True, True, True, False])), patch("ciel.spoke.frontend.asyncio.sleep", sleep):
+        async with contextlib.AsyncExitStack() as room:
+            opened = await s._open_audio(room)
+            check("a pair that will not open is built afresh and tried again, the wait doubling to its ceiling",
+                  opened is not None and attempts == [True, True, True, False] and waits == [1.0, 2.0, 3.0])
+            mic, player = opened
+            check("the pair that opened is the room's; the ones that did not were never played through",
+                  s._player is player and player.entered and mic is built[-1][0] and not any(p.entered for _, p in built[:-1]))
+    check("the pair closes with the run", mic.closed and player.closed)
+
+    attempts.clear(); built.clear(); waits.clear()
+    s = spoke(3.0)
+
+    async def sleep_then_ask(delay):
+        waits.append(delay)
+        s.reload_requested = True
+        await real_sleep(0)
+
+    with patch("ciel.spoke.frontend.build_audio", builder([True, True])), patch("ciel.spoke.frontend.asyncio.sleep", sleep_then_ask):
+        async with contextlib.AsyncExitStack() as room:
+            opened = await s._open_audio(room)
+    check("a reload asked for during the wait ends the attempts, and the run leaves for it",
+          opened is None and s.reload_requested and attempts == [True] and s._player is None)
+
+    attempts.clear(); waits.clear()
+    s = spoke(3.0)
+
+    class Changed:
+        changed = Path("frontend.py")
+
+    s._watcher = Changed()
+    with patch("ciel.spoke.frontend.build_audio", builder([True, True])), patch("ciel.spoke.frontend.asyncio.sleep", sleep):
+        async with contextlib.AsyncExitStack() as room:
+            opened = await s._open_audio(room)
+    check("a source edit during the wait is a reload request", opened is None and s.reload_requested and attempts == [True])
+
+    attempts.clear(); waits.clear()
+    s = spoke(0.0)
+    with patch("ciel.spoke.frontend.build_audio", builder([True, False])), patch("ciel.spoke.frontend.asyncio.sleep", sleep):
+        try:
+            async with contextlib.AsyncExitStack() as room:
+                await s._open_audio(room)
+        except RuntimeError:
+            check("a ceiling of zero is the old door: one attempt, and the spoke leaves", attempts == [True] and not waits)
+        else:
+            check("a ceiling of zero is the old door: one attempt, and the spoke leaves", False)
+
+
+async def probe_warm_up_deadline() -> None:
+    print("\na model load that never finishes does not hold startup")
+
+    class FakeWhisper:
+        def __init__(self, config=None, hang=False):
+            self.hang = hang
+            self.warmed = 0
+
+        async def warm_up(self):
+            if self.hang:
+                await asyncio.sleep(10)
+            self.warmed += 1
+
+    class Hung:
+        async def warm_up(self):
+            await asyncio.sleep(10)
+
+    def spoke(timeout):
+        s = make_spoke()
+        s._config = replace(s._config, stt=replace(s._config.stt, warm_up_timeout_s=timeout))
+        return s
+
+    s = spoke(0.05)
+    s._stt = Hung()
+    started = asyncio.get_running_loop().time()
+    with patch("ciel.stt.local_whisper.WhisperSTT", FakeWhisper), patch("ciel.stt.gate_stt", lambda engine, config: engine):
+        await s._warm_up_stt()
+    check("past the deadline the engine is a failure like any other: faster-whisper takes over, warmed",
+          isinstance(s._stt, FakeWhisper) and s._stt.warmed == 1 and asyncio.get_running_loop().time() - started < 1)
+
+    s = spoke(0.05)
+    s._stt = FakeWhisper(hang=True)
+    with patch("ciel.stt.local_whisper.WhisperSTT", FakeWhisper):
+        try:
+            await s._warm_up_stt()
+        except RuntimeError as exc:
+            check("a fallback past its deadline ends startup and says how long it waited", "did not finish within" in str(exc))
+        else:
+            check("a fallback past its deadline ends startup and says how long it waited", False)
+
+    s = spoke(0.0)
+    s._stt = Hung()
+    task = asyncio.create_task(s._warm_up_stt())
+    await asyncio.sleep(0.1)
+    check("a deadline of zero waits, as before", not task.done())
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 async def main() -> None:
     await probe_voice_turn()
     await probe_prelude()
@@ -655,6 +858,8 @@ async def main() -> None:
     await probe_ack_filler()
     await probe_speak_back_turn()
     await probe_forced_reload()
+    await probe_ear_retry()
+    await probe_warm_up_deadline()
     print(f"\nall {len(CHECKS)} checks passed")
 
 

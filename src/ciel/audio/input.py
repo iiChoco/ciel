@@ -30,6 +30,9 @@ log = logging.getLogger(__name__)
 # otherwise wait forever, silently freezing the whole pipeline.
 _STALL_TIMEOUT_S = 3.0
 _STALL_LIMIT = 2  # stalls before capture ends; the first gets a warning
+_FRAME_S = FRAME_SAMPLES / SAMPLE_RATE
+_SILENT_FRAME = bytes(FRAME_BYTES)
+"""What a shut ear hands the loop: the frame clock, and nothing of the room."""
 
 # The other way a microphone goes deaf: frames keep arriving and every
 # sample is exactly zero. A real room never does that — even a quiet one
@@ -106,6 +109,8 @@ class MicStream:
         self._wakeup: asyncio.Event | None = None
         self._dropped = 0
         self._closed = False
+        self._paused = False
+        self._resuming = False
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -113,6 +118,8 @@ class MicStream:
         self._loop = asyncio.get_running_loop()
         self._wakeup = asyncio.Event()
         self._closed = False
+        if self._held():
+            return self
 
         device = _resolve_device(self._config.input_device, want_input=True)
 
@@ -145,7 +152,50 @@ class MicStream:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        self._paused = False
         await self.close()
+
+    # ── the ear, shut ────────────────────────────────────────────────────────
+    # Mute used to mean "captured, and ignored": the device stayed open, the
+    # frames kept arriving, and only the wake word was told not to look. The
+    # menu bar's orange dot said what that was. Paused means the device is
+    # closed — nothing is captured, so there is nothing to ignore — while
+    # frames() keeps handing the loop silence at the frame rate, because the
+    # loop's clock (the sentinel poll, the reload watch, the timers) is the
+    # microphone's.
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def hold(self) -> None:
+        """Enter paused: a room muted before the spoke started never opens its ear."""
+        self._paused = True
+
+    def _held(self) -> bool:
+        """True when ``__aenter__`` should leave the device closed."""
+        return self._paused and not self._resuming
+
+    async def pause(self) -> None:
+        """Close the device and keep the frame clock. Safe to call twice."""
+        if self._paused:
+            return
+        self._paused = True
+        await self.close()
+        self.drain()
+
+    async def resume(self) -> None:
+        """Open the device again. On failure the ear stays shut and the
+        reason is raised; the caller decides when to try again."""
+        if not self._paused or self._resuming:
+            return
+        self._resuming = True
+        try:
+            await self.__aenter__()
+            self._paused = False
+        finally:
+            self._resuming = False
+        self.drain()
 
     async def close(self) -> None:
         self._closed = True
@@ -189,7 +239,13 @@ class MicStream:
         assert self._wakeup is not None, "MicStream used outside its context manager"
         stalls = 0
         silence = SilenceWatch() if self._warn_on_digital_silence else None
-        while not self._closed:
+        while True:
+            if self._paused or self._resuming:
+                await asyncio.sleep(_FRAME_S)
+                yield _SILENT_FRAME
+                continue
+            if self._closed:
+                break
             while self._queue:
                 frame = self._queue.popleft()
                 if silence is not None:
@@ -197,6 +253,8 @@ class MicStream:
                     if said:
                         (log.warning if silence.silent else log.info)("%s", said)
                 yield frame
+            if self._paused or self._resuming:
+                continue  # shut while a frame was being handled: no wait on a closed device
             self._wakeup.clear()
             if self._queue:  # raced with the callback between pop and clear
                 continue
@@ -204,6 +262,8 @@ class MicStream:
                 await asyncio.wait_for(self._wakeup.wait(), timeout=_STALL_TIMEOUT_S)
                 stalls = 0
             except asyncio.TimeoutError:
+                if self._paused or self._resuming:
+                    continue
                 if self._closed:
                     break
                 stalls += 1
