@@ -28,7 +28,8 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server
 
 from ciel.brain.permissions import WorkspaceGuard
-from ciel.brain.tools.actions import ACTION_TOOLS, bind_journal
+from ciel.brain.tools.actions import ACTION_TOOLS, bind_journal, bind_nutrition_history
+from ciel.brain.tools.nutrition import NUTRITION_TOOLS, bind_nutrition, history as nutrition_history
 from ciel.brain.tools.files import FILE_SEARCH_TOOLS, bind_files
 from ciel.brain.tools.grants import GRANT_TOOLS
 from ciel.brain.tools.grants import bind_config as bind_grants
@@ -39,6 +40,7 @@ from ciel.brain.tools.memory import MEMORY_TOOLS, bind_store
 from ciel.brain.tools.messages import MESSAGE_TOOLS, SEND_TOOLS
 from ciel.brain.tools.messages import bind_client as bind_messages
 from ciel.brain.tools.oura import OURA_TOOLS, bind_oura
+from ciel.brain.tools.learning import LEARNING_TOOLS, bind_learning
 from ciel.brain.tools.projects import PROJECT_TOOLS, bind_projects, bind_workbench
 from ciel.brain.tools.screen import SCREEN_TOOLS, bind_screen
 from ciel.brain.tools.spotify import SPOTIFY_ACTIONS, SPOTIFY_TOOLS, bind_spotify
@@ -64,7 +66,7 @@ SERVER_NAME = "ciel"
 TOOLS = [
     *MEMORY_TOOLS, *MESSAGE_TOOLS, *ACTION_TOOLS, *PROJECT_TOOLS,
     *SCREEN_TOOLS, *TIMER_TOOLS, *WATCH_TOOLS, *GRANT_TOOLS, *OURA_TOOLS,
-    *LOCATION_TOOLS, *MAIL_TOOLS, *WORLD_TOOLS, *FILE_SEARCH_TOOLS, *SPOTIFY_TOOLS, *TASK_TOOLS,
+    *LOCATION_TOOLS, *MAIL_TOOLS, *WORLD_TOOLS, *FILE_SEARCH_TOOLS, *SPOTIFY_TOOLS, *TASK_TOOLS, *LEARNING_TOOLS, *NUTRITION_TOOLS,
 ]
 
 
@@ -126,6 +128,11 @@ def build_tool_server(
     timers: TimerService | None = None
     tools = list(TOOLS)
     bind_tasks(None, lambda: None)
+    bind_nutrition(None, lambda: None)
+    bind_nutrition_history(nutrition_history if config.nutrition.enabled else None)
+    bind_journal(None)
+    if not config.nutrition.enabled:
+        tools = [t for t in tools if t not in NUTRITION_TOOLS]
     if not config.tasks.enabled:
         tools = [t for t in tools if t not in TASK_TOOLS]
 
@@ -154,21 +161,32 @@ def build_tool_server(
         from ciel.project_work import LocalWorkbench, RemoteWorkbench, WorkLimits
 
         limits = WorkLimits(config.projects.max_document_bytes, config.projects.max_includes, config.projects.include_depth)
-        if remote is not None:
-            bind_workbench(RemoteWorkbench(remote.mac), limits)
-        else:
-            bind_workbench(LocalWorkbench(state_dir=config.state_dir, forbidden=forbidden_names(config), terminal=config.projects.terminal), limits)
+        bench = RemoteWorkbench(remote.mac) if remote is not None else \
+            LocalWorkbench(state_dir=config.state_dir, forbidden=forbidden_names(config), terminal=config.projects.terminal)
+        bind_workbench(bench, limits)
     else:
         # Same reasoning as memory: an always-unavailable tool wastes turns.
         tools = [t for t in tools if t not in PROJECT_TOOLS]
+
+    if config.learning.enabled and projects is not None and config.tasks.enabled:
+        # The study workspace: books bound to projects, records in the task
+        # store. The Mac's books come through the hub's remote or this
+        # machine's PDFKit; the controller's door is bound by the pipeline.
+        from ciel.learning import Limits, library_for
+
+        bind_learning(projects, library_for(config, remote), config.learning, Limits(config.tasks.max_record_chars, config.tasks.max_model_calls), bench)
+    else:
+        # A book needs a project to live on and a store to be remembered in;
+        # without both, or with the module off, the tools would only ever
+        # answer unavailable — same reasoning as memory.
+        bind_learning(None, None, None)
+        tools = [t for t in tools if t not in LEARNING_TOOLS]
 
     if config.journal.enabled:
         journal = ActionJournal(config.journal)
         journal.ensure()
         bind_journal(journal)
-    else:
-        # Same reasoning as memory: a recent_actions that always answers
-        # "unavailable" wastes a turn and teaches the model not to try.
+    elif not config.nutrition.enabled:
         tools = [t for t in tools if t not in ACTION_TOOLS]
 
     if config.screen.enabled:

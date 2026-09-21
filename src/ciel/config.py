@@ -54,6 +54,16 @@ class AudioConfig:
     Adds this much capture latency. The native aggregate keeps clocks aligned;
     the hold covers device buffering, not drift. No speaker gain is changed."""
 
+    open_retry_max_s: float = 30.0
+    """The ceiling of the wait between attempts to open the microphone pair;
+    the wait starts at one second and doubles. A pair that would not open —
+    a capture helper delivering nothing, a device that is gone — used to end
+    the spoke, and launchd's relaunch reloaded every model before trying the
+    same door again, once a minute for a night (2026-09-19). Now the room
+    keeps its models, its link, and its HUD, says why in the log, and tries
+    again; a source edit during the wait still reloads. 0 is the old door:
+    one attempt, and the spoke leaves."""
+
     apple_playback: Literal["portaudio", "engine"] = "portaudio"
     """Where Ciel's own voice plays when the backend is Apple. ``portaudio``
     keeps the old speaker on the default output; the canceller's reference is
@@ -260,9 +270,14 @@ class WakeConfig:
     threshold: float = 0.5
     """0-1. Raise it if the TV sets Ciel off; lower it if it ignores you."""
 
-    vad_threshold: float = 0.3
-    """openWakeWord's built-in speech gate, which suppresses a good deal of
-    non-speech noise before the wake model ever runs."""
+    vad_threshold: float = 0.0
+    """openWakeWord's own Silero gate, 0–1; 0 leaves it off. It runs *after*
+    the wake model on every frame, not before it, and only zeroes a score
+    whose preceding half-second held no speech: a little resistance to
+    non-speech false wakes for a fifth more CPU on the always-on path
+    (measured 2026-09-12: 5 of 38 ms per second). The speech gate in
+    ``stt.speech_threshold`` already keeps a false wake from becoming a
+    turn. ``0.3`` is the setting this ran with before."""
 
     ack: bool = True
     """Speak a brief acknowledgement when the wake fires, so you know Ciel is
@@ -525,6 +540,18 @@ class STTConfig:
     ``whisper-small.en-mlx`` matches the faster-whisper ``small.en`` default.
     ``mlx-community/whisper-large-v3-turbo`` is the accuracy upgrade — try it
     if the GPU keeps decode latency acceptable (~1.6 GB download)."""
+
+    warm_up_timeout_s: float = 300.0
+    """How long the engine may take to load and run its first decode before
+    startup stops waiting for it. A first run downloads the model, and
+    ``whisper-large-v3-turbo`` is about 1.6 GB, so a slow line may need more.
+    Exists because on 2026-09-19 a fetch that neither finished nor failed
+    held the spoke in startup for six hours, deaf, with its link up and
+    nothing in the log to say so. Past the deadline the engine is treated
+    like any other warm-up failure — mlx falls back to faster-whisper, and
+    faster-whisper ends startup — and the stuck load is left to its thread,
+    which can hold the process's exit for up to five minutes. 0 waits
+    forever, as before."""
 
     model: str = "small.en"
     """faster-whisper only. ``base.en`` is faster and noticeably worse;
@@ -1405,100 +1432,6 @@ class LocationConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class DiscordConfig:
-    """The Discord lane — texting Ciel from wherever you are.
-
-    Codename Parallel Transport (see ``remote/discord.py``). A DM from the
-    pinned owner account becomes an ordinary turn — same brain, same
-    session, same transcript — and the reply comes back as a text. A
-    confirm-tier tool call mid-remote-turn texts its question over the
-    same channel and waits for a yes or no, so the Proof Obligation
-    follows the user out the door instead of being voiced into an empty
-    room.
-
-    Setup lives in the README: a bot application, its token, a mutual
-    server (Discord only delivers DMs between accounts that share one),
-    and your user id."""
-
-    enabled: bool = False
-    """Off by default, like every switch that opens a path into the brain
-    from outside the room. Turning it on without ``token`` and
-    ``owner_id`` warns at startup and arms nothing."""
-
-    token: str = ""
-    """The bot token from the Discord developer portal. A credential:
-    prefer ``CIEL_DISCORD_TOKEN`` in the launch environment if you'd
-    rather it not live in the config file. Anyone holding this token can
-    read what Ciel texts you and impersonate the bot — treat it like a
-    password, and regenerate it in the portal if it leaks."""
-
-    owner_id: int = 0
-    """Your Discord user id — the identity gate. Only DMs from this
-    account are read at all; everything else is dropped before it reaches
-    anything that could act on it. Pinned in config for the
-    ``owner_handle`` reason: the model never chooses who may speak here
-    or where replies go. (Discord Settings → Advanced → Developer Mode,
-    then right-click your own name → Copy User ID.)"""
-
-    proactive: bool = True
-    """Whether Vigil's away texts may ride this link when iMessage isn't
-    configured. The link being armed at all is already the deliberate
-    opt-in — this exists to keep the lane strictly two-way-conversational
-    for anyone who wants that. iMessage, when fully configured, keeps
-    priority; this is the fallback outlet, not a second one."""
-
-    confirm_timeout_s: float = 120.0
-    """How long a texted confirmation question waits for a yes or no
-    before counting as no. Far longer than the spoken gate's eight
-    seconds on purpose: a phone in a pocket answers on notification time,
-    not conversation time — but not unbounded, because the turn holds
-    the brain's lock while it waits. Also the deadline for questions
-    asked on the web GUI — every text-lane confirmation shares this
-    clock, Discord enabled or not."""
-
-    max_inbound_chars: int = 4000
-    """Longest inbound message accepted, truncated beyond. Twice
-    Discord's own per-message cap, so nothing a normal client sends ever
-    hits it — this bounds pastes-of-pastes, not conversation."""
-
-    mentions: bool = True
-    """Answer @mentions in server channels the bot has been invited to —
-    still only from ``owner_id``; everyone else's mentions are dropped at
-    the same gate as their DMs. Replies land in the channel, publicly,
-    and the turn is told so. Off restricts the lane to DMs. (No
-    privileged intent needed: Discord exempts messages that mention the
-    bot from the message-content restriction.)"""
-
-    token_file: Path = field(
-        default_factory=lambda: Path.home() / ".ciel" / "discord.token"
-    )
-    """Where the bot token lives when ``token`` above is empty — a file
-    named in ``FORBIDDEN_NAMES``, so the model's file tools and the shell
-    gate both refuse to read it. Prefer this over ``token``: config.toml
-    is model-readable (the workspace covers home), and a credential in a
-    readable file is a credential in every future context window."""
-
-    state_file: Path = field(
-        default_factory=lambda: Path.home() / ".ciel" / "discord.json"
-    )
-    """The lane's tiny persistent state — the last DM actually seen —
-    mirrored on every accepted message for the timers.json reason: the
-    autoreloader re-execs constantly (a remote capability grant does it
-    on purpose), and a text sent during the seconds of restart must be
-    picked up by the catch-up sweep, not silently lost."""
-
-    def resolved_token(self) -> str:
-        """The bot token: the inline value if set, else ``token_file``'s
-        contents. Empty when neither exists — the lane's unarmed state."""
-        if self.token:
-            return self.token
-        try:
-            return self.token_file.read_text().strip()
-        except OSError:
-            return ""
-
-
-@dataclass(frozen=True, slots=True)
 class WebConfig:
     """The local GUI — a chat window onto the running assistant.
 
@@ -1516,9 +1449,9 @@ class WebConfig:
 
     host: str = "127.0.0.1"
     """Loopback only by default, and think hard before widening it: this
-    socket feeds text straight into a brain with tools, and unlike the
-    Discord lane there is no account id here to gate on — being able to
-    reach the port *is* the identity check. Browser pages from other
+    socket feeds text straight into a brain with tools, and there is no
+    account id here to gate on — being able to reach the port *is* the
+    identity check. Browser pages from other
     origins are refused by the Origin check either way."""
 
     port: int = 8765
@@ -1531,9 +1464,16 @@ class WebConfig:
     """Where the GUI lives: http://127.0.0.1:8765 by default."""
 
     max_inbound_chars: int = 4000
-    """Longest inbound message accepted, truncated beyond — the Discord
-    lane's bound, for the Discord lane's reason: this limits pastes, not
-    conversation."""
+    """Longest inbound message accepted, truncated beyond: this limits
+    pastes-of-pastes, not conversation."""
+
+    confirm_timeout_s: float = 120.0
+    """How long a confirmation question shown on the page waits for a yes
+    or no before counting as no. Far longer than the spoken gate's eight
+    seconds on purpose: a question on a screen answers on notification
+    time, not conversation time — but not unbounded, because the turn
+    holds the brain's lock while it waits. Every text-lane confirmation
+    shares this clock, including the Chart's grant approvals."""
 
     max_upload_bytes: int = 8 * 1024 * 1024
     """The largest file the Chart may send with a message. Images are
@@ -1623,7 +1563,7 @@ class HubConfig:
 
     resume_grace_s: float = 600.0
     """How old a live confirm prompt may be and still be replayed to a
-    resuming client — the Discord catch-up rule: a ten-minute-old
+    resuming client — the catch-up rule: a ten-minute-old
     question is still waited on; anything older has already been timed
     out by the broker, and a replayed banner would invite an answer to
     nothing."""
@@ -1644,7 +1584,7 @@ class HubConfig:
     """The hub-side deadline for one spoken answer from the spoke — the
     spoke speaks the question and listens for its own ``[shell]``
     window, then reports; this only catches a spoke that never reports
-    at all. Text lanes keep ``[discord].confirm_timeout_s``."""
+    at all. Text lanes keep ``[web].confirm_timeout_s``."""
 
     def current_token(self) -> str:
         """The token to check against: the field, else the file, else
@@ -1664,8 +1604,8 @@ class SpokeConfig:
     ``ciel spoke`` owns the microphone, the wake word, the endpointer,
     the speaker gate, STT, TTS, the player, the HUD, and the mute
     sentinel; everything it hears goes up the wire as text, everything
-    it says comes down as text. The brain, memory, Vigil, Discord, and
-    the Chart live in ``ciel hub``. Both on this machine for now; the
+    it says comes down as text. The brain, memory, Vigil, and the
+    Chart live in ``ciel hub``. Both on this machine for now; the
     hub moves to a server later and this section is what repoints."""
 
     hub: str = "ws://127.0.0.1:8765/ws"
@@ -1809,11 +1749,11 @@ class GrantsConfig:
     (enable something, or set the morning brief), and
     ``revoke_capability`` (disable something). The asymmetry is the
     design: every grant passes the enforced confirmation gate — spoken at
-    home, texted over the Discord lane — before a byte of config changes,
+    home, shown on the Chart — before a byte of config changes,
     while a revoke runs immediately, because de-escalation should never
     have friction. The catalog of grantable keys is fixed in code
-    (``brain/tools/grants.py``); the security-critical ones — the Discord
-    pinning, the voice gate, the tool tiers — are simply not in it, so no
+    (``brain/tools/grants.py``); the security-critical ones — the voice
+    gate, the tool tiers, the workspace path — are simply not in it, so no
     phrasing reaches them. Changes are edited into config.toml surgically
     (comments preserved, parse-verified, rolled back on failure),
     journaled like every confirmed action, and take effect on the reload
@@ -2317,6 +2257,107 @@ class EmailCalendarConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class LearningConfig:
+    """The learning module — a study workspace on Atlas: a book registered
+    once, a bookmark kept in the owner's words, and, in later milestones,
+    worksheets, reviews, and mock exams. Opt-in; needs ``[projects]`` and
+    ``[tasks]`` enabled, since a book is bound to a project and its records
+    live in the task store's ``learning`` namespace."""
+
+    enabled: bool = False
+
+    study_root: Path = field(default_factory=lambda: Path.home() / "Berkeley" / "Math")
+    """Where every study folder lives: ``<study_root>/<class-or-subject>/
+    Reading/<book-and-edition>/``. Every publication a later milestone
+    makes lands under here and nowhere else."""
+
+    search_roots: tuple[str, ...] = ("~/Berkeley",)
+    """Folders "find the book" may look in, each under the home folder and
+    never the state directory. Filenames and PDF metadata are searched;
+    page text is not."""
+
+    max_search_results: int = 10
+    """Candidates one search offers; the owner chooses, the tool never does."""
+
+    max_search_files: int = 2000
+    """PDFs one search looks at before it stops and says so."""
+
+    max_pdf_bytes: int = 100_000_000
+    """A book past this is refused, not partially read."""
+
+    max_labels: int = 2000
+    """Printed page labels kept with a book's record, for mapping a printed
+    page to a PDF index; a book with more pages keeps none and a printed
+    page is asked for as a PDF index instead."""
+
+    pages_per_call: int = 6
+    """Pages one text window covers, one extraction each; windows overlap
+    by one page so a statement across the boundary is read whole."""
+
+    pages_per_image_call: int = 3
+    """Pages one image re-read carries, when a window's items need one."""
+
+    images: str = "notation"
+    """When a window is re-read from page images: ``notation`` for every
+    item whose statement carries mathematical notation or whose reading was
+    unsure, which is the rule for a mathematics book; ``always`` for a
+    scanned book; ``never`` for a probe or a book of prose."""
+
+    render_dpi: int = 110
+    """How a page is rendered for the model: greyscale PNG at this density,
+    lowered in steps when a page would not fit ``max_image_bytes``."""
+
+    max_image_bytes: int = 400_000
+    """The largest one rendered page may be; past it after every step down,
+    the page is read from text alone and flagged."""
+
+    image_call_budget_usd: float = 0.75
+    """The spend ceiling for one extraction that carries page images; the
+    text call keeps ``[tasks].extraction_max_budget_usd``."""
+
+    max_pages_per_chapter: int = 80
+    """Pages one preparation may cover in all; a longer chapter is split
+    by section into more than one task by the estimator anyway, and past
+    this it is refused and the owner asked for a page range."""
+
+    max_items_per_chapter: int = 200
+    """Statements and terms one chapter may keep; more is flagged, not kept."""
+
+    poll_s: float = 30.0
+    """How long the watch waits between looks at the requests on record."""
+
+    background: bool = True
+    """Run the learning steps on a runner of their own, beside the
+    conversation: their own lease and extraction client, ticked every
+    second whether or not the room is quiet, never interrupted by the
+    owner's voice. Off, they queue behind the ladder like every other task
+    and run only in a quiet room — which a study session never is."""
+
+    mac_retry_s: float = 120.0
+    """How long a step waits before trying again when the Mac could not be
+    reached: a clean checkpoint, spending no attempt, never a parked task."""
+
+    exam_minutes: int = 60
+    """A mock midterm's duration, stated on its sheet; an explicit change is honoured."""
+
+    exam_points: int = 100
+    """A mock midterm's total points, spread over its problems."""
+
+    exam_problems: int = 5
+    """Problems a mock midterm sets by default, mixing definitions, examples or counterexamples, and proofs."""
+
+    max_submission_chars: int = 400_000
+    """A submission larger than this, with its includes, is refused and nothing is recorded; never truncated."""
+
+    publications_per_day: int = 40
+    """Sheets and feedback files the worksheets grant may write in a day;
+    the grant asks for this number at approval and ``[tasks]`` caps it."""
+
+    grant_lifetime_s: float = 30 * 86400.0
+    """How long the worksheets grant runs before it expires; ``[tasks]`` caps it."""
+
+
+@dataclass(frozen=True, slots=True)
 class TasksConfig:
     """Private owner task controls, durable records, and the bounded runner."""
 
@@ -2420,6 +2461,86 @@ class TasksConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class NutritionConfig:
+    """One private diary, explicitly assigned to this brain's host."""
+    enabled: bool = False
+    state_dir: Path | None = None
+    """Dedicated directory; None uses <state_dir>/nutrition-state."""
+    owner_host: str = ""
+    """Required hostname allowed to create and write this diary."""
+    owner_role: Literal["hub", "local"] = "hub"
+    """Changing runtime mode must not silently start another diary."""
+    diary_day_start_hour: int = 4
+    """Local hour that starts a diary day; saved dates retain this cutoff."""
+    portion_allowance_pct: float = 15.0
+    """Extra percent for a guessed portion, applied once to its base calories."""
+    oil_allowance_pct: float = 10.0
+    """Extra percent for oil uncertainty not already included in the base."""
+    estimate_allowance_pct: float = 10.0
+    """Extra percent for estimated rather than sourced nutrition values."""
+    fdc_api_key_file: Path = field(default_factory=lambda: Path.home() / ".ciel" / "nutrition-api-key")
+    """USDA FoodData Central key, never part of a prompt or query log."""
+    lookup_timeout_s: float = 8.0
+    """Deadline for one USDA request; explicit values work without lookup."""
+    lookup_max_bytes: int = 500000
+    """Maximum provider response bytes before parsing."""
+    lookup_cache_entries: int = 500
+    """Cached source records; pruning never changes saved meal snapshots."""
+    max_items: int = 40
+    """Maximum foods in one reviewed meal."""
+    max_meals_per_day: int = 100
+    """Bound a day response without silently omitting meals from its totals."""
+    max_pending_controls: int = 8
+    """Maximum concurrent nutrition socket controls."""
+    max_request_bytes: int = 65536
+    """Reviewed payload bound; the wire also enforces its fixed 64 KiB ceiling."""
+    max_records: int = 100000
+    """Bound original owner operations; each retains space for its one Undo."""
+    max_library_records: int = 1000
+    """Active saved foods, recipes, and batch snapshots in the private library."""
+    max_plans_per_day: int = 100
+    """Unconsumed planned meals per diary day; plans never contribute intake."""
+    bulk_max_meals: int = 50
+    """Meals in one reviewed historical allowance recalculation; at most 100."""
+    bulk_max_previews: int = 8
+    """Live historical review scopes, kept only in this process."""
+    bulk_preview_lifetime_s: float = 300.0
+    """Time to review and approve an exact historical scope; at most 900 seconds."""
+    dashboard_max_days: int = 366
+    """Maximum inclusive dashboard range; at most 366 diary days."""
+    dashboard_max_meals: int = 5000
+    """Meals read for a dashboard and its weekly review; refuse excess, never truncate."""
+    dashboard_review_limit: int = 10
+    """Examples per weekly review group; disclose the total when listing fewer."""
+    weight_trend_days: int = 7
+    """Trailing calendar window for observed weigh-in means; at most 90 days."""
+    photo_analysis: bool = True
+    """Analyze requested photo drafts through the shared background runner."""
+    photo_input_max_bytes: int = 20000000
+    """Browser source-file bound before decoding and cropping."""
+    photo_max_bytes: int = 2000000
+    """Upload and extraction byte ceiling for one PNG or JPEG."""
+    photo_max_edge: int = 1568
+    """Browser output edge; crop labels before shrinking."""
+    photo_max_pixels: int = 16000000
+    """Refuse oversized image dimensions before preview or extraction."""
+    photo_keep_days: int = 30
+    """Image retention for drafts and saved meals; numbers survive expiry."""
+    photo_storage_bytes: int = 250000000
+    """Total retained media capacity, including unfinished imports."""
+    photo_max_drafts: int = 200
+    """Maximum unfinished drafts; saving or discarding releases a slot."""
+    photo_jobs_per_day: int = 20
+    """Analysis requests in a rolling 24 hours, counted before enqueue."""
+    photo_max_model_calls: int = 2
+    """Attempts per photo job; calls are charged durably before extraction."""
+    photo_max_budget_usd: float = 0.25
+    """Total model budget per job, split equally across its allowed calls."""
+    photo_timeout_s: float = 45.0
+    """One photo extraction deadline, further limited by the task runtime."""
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
@@ -2435,11 +2556,12 @@ class Config:
     projects: ProjectsConfig = field(default_factory=ProjectsConfig)
     tasks: TasksConfig = field(default_factory=TasksConfig)
     email_calendar: EmailCalendarConfig = field(default_factory=EmailCalendarConfig)
+    learning: LearningConfig = field(default_factory=LearningConfig)
+    nutrition: NutritionConfig = field(default_factory=NutritionConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
     shell: ShellConfig = field(default_factory=ShellConfig)
     journal: JournalConfig = field(default_factory=JournalConfig)
     messages: MessagesConfig = field(default_factory=MessagesConfig)
-    discord: DiscordConfig = field(default_factory=DiscordConfig)
     web: WebConfig = field(default_factory=WebConfig)
     hub: HubConfig = field(default_factory=HubConfig)
     spoke: SpokeConfig = field(default_factory=SpokeConfig)
@@ -2492,11 +2614,12 @@ _SECTIONS = {
     "projects": ProjectsConfig,
     "tasks": TasksConfig,
     "email_calendar": EmailCalendarConfig,
+    "learning": LearningConfig,
+    "nutrition": NutritionConfig,
     "files": FilesConfig,
     "shell": ShellConfig,
     "journal": JournalConfig,
     "messages": MessagesConfig,
-    "discord": DiscordConfig,
     "web": WebConfig,
     "hub": HubConfig,
     "spoke": SpokeConfig,
@@ -2517,6 +2640,12 @@ _SECTIONS = {
     "dev": DevConfig,
     "ui": UIConfig,
 }
+
+
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
+"""The spellings a boolean accepts from TOML strings and the environment;
+anything else is refused by name rather than read as false."""
 
 
 def _coerce(value: Any, target_type: Any) -> Any:
@@ -2555,7 +2684,15 @@ def _coerce(value: Any, target_type: Any) -> Any:
         return Path(value).expanduser()
     if bool in members:
         if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
+            # A spelling outside both sets is a typo, not a no: "ture" once
+            # turned a safety switch off. Refused, so the file is fixed
+            # rather than read as the opposite of what was meant.
+            word = value.strip().lower()
+            if word in _TRUE_WORDS:
+                return True
+            if word in _FALSE_WORDS:
+                return False
+            raise ValueError(f"{value!r} is not a boolean (true/false, yes/no, on/off, 1/0)")
         return bool(value)
     # `int | str` device specs: a purely numeric string is a device index,
     # anything else is a device-name fragment.
@@ -2593,8 +2730,22 @@ def _apply(section: Any, overrides: dict[str, Any]) -> Any:
                 key, type(section).__name__,
             )
             continue
-        clean[key] = _coerce(value, types.get(key))
+        try:
+            clean[key] = _coerce(value, types.get(key))
+        except ValueError as exc:
+            # Named by section and field: a refusal the user can act on.
+            # Raised, not warned — a value that cannot be read must not
+            # be quietly replaced by the default, or by its opposite.
+            raise ValueError(f"[{_section_name(section)}].{key}: {exc}") from None
     return replace(section, **clean) if clean else section
+
+
+def _section_name(section: Any) -> str:
+    """The TOML table a section dataclass is read from, for messages."""
+    for name, kind in _SECTIONS.items():
+        if isinstance(section, kind):
+            return name
+    return type(section).__name__
 
 
 def load_config(path: Path | None = None) -> Config:

@@ -36,31 +36,20 @@ from pathlib import Path
 from ciel.tasks import Origin
 from typing import Any, Protocol
 
-_REMOTE_NOTE = (
-    "(System note — this message arrived over the Discord link: the user is "
-    "away from this machine, and nothing you write will be spoken aloud. "
-    "Your reply goes back to them as a text, so keep it text-shaped: short "
-    "and plain. Nothing at the machine reaches them where they are — a "
-    "timer or alarm armed now rings here, not on their phone, so arm one "
-    "only for when they'll be back to hear it, and say as much.)\n\n"
+_PUBLIC_NOTE = (
+    "(System note — this message arrived in a public channel: your reply "
+    "posts where OTHERS CAN READ IT. Keep it text-shaped and discreet — "
+    "volunteer no personal details, memories, schedules, or private context "
+    "beyond what the user's own message already put in the open, and offer "
+    "to continue privately when a real answer would need it. Nothing you "
+    "write is spoken aloud.)\n\n"
 )
-"""Prefixed to every remote turn — the model's only way to know the room is
-empty. Prefix, not transcript: the record keeps the user's raw words, the
-same contract as the held-notes note."""
-
-
-_REMOTE_PUBLIC_NOTE = (
-    "(System note — this arrived as an @mention in a Discord server channel: "
-    "the user is away from this machine, and your reply posts to that channel "
-    "where OTHERS CAN READ IT. Keep it text-shaped and discreet — volunteer "
-    "no personal details, memories, schedules, or private context beyond what "
-    "the user's own message already put in the open, and offer to continue "
-    "in DMs when a real answer would need them. Nothing you write is spoken "
-    "aloud, and nothing at the machine reaches the user where they are.)\n\n"
-)
-"""The mention lane's variant of the note above. The audience is the
-difference: a DM is the owner's eyes only, a channel is whoever is in it —
-so this one trades the timer caveat for a discretion rule."""
+"""Prefixed to every public turn, whatever lane carries it. No lane
+produces one today — the Discord lane that did was retired on
+2026-09-11 — but the discretion rule is the project's, not the lane's,
+and the next public lane inherits it by setting ``TurnRequest.public``.
+Prefix, not transcript: the record keeps the user's raw words, the same
+contract as the held-notes note."""
 
 
 _WEB_NOTE = (
@@ -90,19 +79,19 @@ announcement is text on a page the user may have stopped watching."""
 class TurnRequest:
     """One user turn, lane-tagged, as handed to ``Pipeline._run_turn``.
 
-    ``channel`` is the lane's opaque reply route (a Discord channel; None
-    everywhere else, and for a DM). ``public`` is whether the reply lands
-    where others can read it — only a Discord guild channel today, and it
-    is what swaps the system note and withholds the held Vigil notes.
+    ``public`` is whether the reply lands where others can read it. No
+    lane sets it today; it is what swaps in the discretion note, withholds
+    the held Vigil notes, and moves the turn onto the brain's public
+    client, so a future public lane gets every privacy rule by setting
+    one flag.
     ``arrival_wall`` is the wall-clock twin of the queues' monotonic
     stamps: nothing consumes it yet, but the hub's clock discipline
     (hub-side gating only ever compares wall stamps it minted itself)
     starts by carrying it.
     """
 
-    lane: str  # "voice" | "typed" | "web" | "discord"
+    lane: str  # "voice" | "typed" | "web"
     text: str
-    channel: Any = None
     public: bool = False
     arrival_wall: float | None = None
     origin: Origin | None = None
@@ -154,6 +143,9 @@ def attachment_prompt(attachments: tuple[Attachment, ...], *, max_inline_chars: 
     used = 0
     for item in attachments:
         line = f'"{item.name}" ({item.mime}, {item.size} bytes), saved at {item.path}.'
+        attachment_id = Path(item.path).name.split("-", 1)[0]
+        if len(attachment_id) == 32 and all(c in "0123456789abcdef" for c in attachment_id):
+            line += f" Admitted attachment ID: {attachment_id}."
         if item.is_image:
             try:
                 encoded = base64.b64encode(Path(item.path).read_bytes()).decode("ascii")
@@ -263,13 +255,12 @@ class LaneSpec:
 
     ``label`` is the transcript speaker (presence evidence, or its
     deliberate absence). ``origin`` is the parenthesized console tag
-    ("typed", "discord #general"); None for the voice lane, whose rows
-    are bare "you:". ``log_name`` is the lane's name in log lines
-    ("remote", not "discord" — the strings predate the registry and logs
-    grep the same forever); None means the lane writes its own turn line
-    (the voice sink's first-speech split). ``held_notes`` is whether held
-    Vigil notes ride into the prompt — everywhere but a public channel,
-    which must never be where "your 2pm moved" lands. ``reload_ack`` is
+    ("typed", "web"); None for the voice lane, whose rows are bare
+    "you:". ``log_name`` is the lane's name in log lines; None means the
+    lane writes its own turn line (the voice sink's first-speech split).
+    ``held_notes`` is whether held Vigil notes ride into the prompt —
+    everywhere but a public turn, which must never be where "your 2pm
+    moved" lands. ``reload_ack`` is
     what a locally-handled "reload" says back on lanes whose usual
     answer — the spoken "Reloading." — happens in a room the user isn't
     watching. ``confirm_origin`` names the broker's remote-mode origin,
@@ -300,34 +291,22 @@ def lane_spec(req: TurnRequest) -> LaneSpec:
             label="user-web",
             origin="web",
             log_name="web",
-            reload_ack="Reloading.",
-            confirm_origin="web",
-        )
-    if req.lane == "discord":
-        origin = (
-            f"discord #{getattr(req.channel, 'name', '?')}"
-            if req.public
-            else "discord"
-        )
-        return LaneSpec(
-            label="user-remote",
-            origin=origin,
-            log_name="remote",
             held_notes=not req.public,
             reload_ack="Reloading.",
-            confirm_origin="discord",
+            confirm_origin="web",
         )
     raise ValueError(f"unknown lane {req.lane!r}")
 
 
 def prompt_note(req: TurnRequest, *, muted: bool) -> str:
     """The system note glued onto the prompt — the model's only way to
-    know where the user is and where the reply lands. Empty for the lanes
-    whose replies are spoken into the room the user is in."""
+    know where the user is and where the reply lands. A public turn gets
+    the discretion note whatever its lane; empty for the lanes whose
+    replies are spoken into the room the user is in."""
+    if req.public:
+        return _PUBLIC_NOTE
     if req.lane == "web":
         return _WEB_MUTED_NOTE if muted else _WEB_NOTE
-    if req.lane == "discord":
-        return _REMOTE_PUBLIC_NOTE if req.public else _REMOTE_NOTE
     return ""
 
 

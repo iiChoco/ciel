@@ -1,15 +1,19 @@
-"""Probe the unified turn skeleton — all four lanes through _run_turn.
+"""Probe the unified turn skeleton — all three lanes through _run_turn.
 
     uv run scripts/probe_turns.py
 
 The lane registry's labels, notes, and delivery rules are load-bearing:
 ``user``/``you-confirm``/``user-web`` rows are Vigil's presence evidence,
-``user-remote`` is deliberately evidence of the opposite, the Chart
-renders rows by these exact strings, and the system notes are the
+the Chart renders rows by these exact strings, and the system notes are
+the
 model's only way to know where the user is. This probe drives every lane
 through the one shared skeleton with fakes and pins that contract —
 golden row sequences, public client/history isolation, admitted task context, prompt composition, reply routing, confirm-context
-origins, the conversation flags, and the failure shapes. A regression
+origins, the conversation flags, and the failure shapes; and the learning
+tools withheld while the module is off and, on, every one on the private
+registry with close_book behind the gate. Nutrition receipts invoke visible
+and spoken delivery from committed values, stay out of shared transcript rows,
+and lose their output sink when the turn ends. A regression
 here is a lane quietly changing meaning, which is exactly what the
 hub split must never do.
 """
@@ -29,13 +33,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from ciel.config import BrainConfig, Config
 from ciel.brain.agent import user_message
-from ciel.pipeline import Pipeline, _DiscordSink, _TextSink, _VoiceSink
-from ciel.remote.discord import RemoteUnavailable
+from ciel.pipeline import Pipeline, _TextSink, _VoiceSink
 from ciel.schedule import State
 from ciel.turn import (
     Attachment, attachment_prompt,
-    _REMOTE_NOTE,
-    _REMOTE_PUBLIC_NOTE,
+    _PUBLIC_NOTE,
     _WEB_MUTED_NOTE,
     _WEB_NOTE,
     TurnRequest,
@@ -155,22 +157,6 @@ class FakePlayer:
         return True
 
 
-class FakeRemoteLink:
-    def __init__(self, fail_send=False):
-        self.sent: list[tuple[str, object]] = []
-        self.fail_send = fail_send
-
-    async def send(self, text, channel=None):
-        if self.fail_send:
-            raise RemoteUnavailable("gateway down")
-        self.sent.append((text, channel))
-
-    def typing(self, channel=None):
-        import contextlib
-
-        return contextlib.nullcontext()
-
-
 class FakeEvents:
     """Held notes: one note, consumed on take."""
 
@@ -201,16 +187,8 @@ class FakeTimers:
         self.armed.append(seconds)
 
 
-class FakeChannel:
-    """A Discord guild channel — makes a turn public."""
-
-    def __init__(self, name="general"):
-        self.name = name
-        self.guild = object()
-
-
 def make_pipeline(script, *, error=None, events=None, muted=False,
-                  remote=None, ack=False):
+                  ack=False):
     cfg = replace(
         Config(),
         brain=replace(
@@ -222,6 +200,8 @@ def make_pipeline(script, *, error=None, events=None, muted=False,
         ),
     )
     p = Pipeline.__new__(Pipeline)
+    p._ear_task = None
+    p._next_ear_try = 0.0
     p._config = cfg
     p._role = "local"
     p._brain = FakeBrain(script, error)
@@ -233,7 +213,6 @@ def make_pipeline(script, *, error=None, events=None, muted=False,
     p._events = events
     p._timers = FakeTimers()
     p._tts = FakeTTS()
-    p._remote_link = remote
     p._muted = muted
     p._spoke = False
     p._conversed = False
@@ -279,21 +258,6 @@ async def probe_labels_and_rows() -> None:
     check("web: label user-web", rows(p)[0] == ("user-web", "hi"))
     check("web: same golden tail", rows(p)[1:] == golden[1:])
 
-    link = FakeRemoteLink()
-    p = make_pipeline(STREAM, remote=link)
-
-    async def send_here(t):
-        await link.send(t, None)
-
-    await p._run_turn(
-        TurnRequest(lane="discord", text="hi"), _DiscordSink(p, send_here)
-    )
-    check("discord: label user-remote", rows(p)[0] == ("user-remote", "hi"))
-    check(
-        "discord: reply buffered into one text",
-        link.sent == [("First. Second.", None)],
-    )
-
     p = make_pipeline(STREAM)
     player = FakePlayer()
     await p._run_turn(TurnRequest(lane="voice", text="hi"), _VoiceSink(p, player))
@@ -330,6 +294,17 @@ async def probe_public_sessions() -> None:
             async for _ in stream: pass
     with tempfile.TemporaryDirectory() as tmp, patch.object(Path, 'home', return_value=Path(tmp)):
         cfg = Config()
+        from ciel.brain.tools import build_tool_server
+        from ciel.brain.tools.learning import LEARNING_TOOLS
+        from ciel.config import LearningConfig, ProjectsConfig, TasksConfig
+        _, allowed, *_ = build_tool_server(replace(cfg, projects=ProjectsConfig(dir=Path(tmp) / 'projects')))
+        check('the learning tools are withheld while the module is off', not any(f'mcp__ciel__{t.name}' in allowed for t in LEARNING_TOOLS))
+        study = replace(cfg, learning=LearningConfig(enabled=True), tasks=TasksConfig(enabled=True, directory=Path(tmp) / 'tasks'),
+                        projects=ProjectsConfig(dir=Path(tmp) / 'projects'))
+        _, allowed, *_ = build_tool_server(study)
+        check('with the module on, every learning tool is on the private registry and close_book is behind the gate',
+              all(f'mcp__ciel__{t.name}' in allowed for t in LEARNING_TOOLS) and 'mcp__ciel__close_book' in Brain(study)._gated_tools
+              and 'mcp__ciel__close_book' not in Brain(cfg)._gated_tools)
         brain = Brain(cfg, memory_index_provider=lambda: 'private memory')
         private = Client()
         brain._client = private
@@ -349,6 +324,29 @@ async def probe_public_sessions() -> None:
             await brain.close()
             check('shutdown closes both public and private clients', last_public.closed and private.closed)
     p = make_pipeline(STREAM)
+    from types import SimpleNamespace
+    from ciel.tasks import Scope, Specification, Step
+    reading = SimpleNamespace(id='abcdef0123456789', specification=Specification('Chapter 3 of Axler, pages 15–35, is read', Scope(('learning.window',), ('book:x',)), ()),
+                              next_step=Step('read', 'learning.window', 'book:x', (('project', 'p'), ('slug', 's'), ('chapter', '3'), ('window', '2'))))
+    p._background_runner = SimpleNamespace(current=(reading, 5.0), background=True)
+    p._task_runner = SimpleNamespace(current=None, background=False)
+    p._brain.deep_thought_since = None
+    p._work_watcher = None
+    saved_timers, p._timers = p._timers, None
+    rows = p._active_agents()
+    p._timers = saved_timers
+    check('a learning step in flight is on the Chart\'s roster of work in progress, as study work, with its chapter and window; nothing between steps',
+          any(r['kind'] == 'study' and r['id'] == 'study-abcdef01' and r['label'].startswith('Chapter 3 of Axler') and 'learning.window' in r['detail']
+              and 'chapter 3, window 2' in r['detail'] and r['since'] == 5.0 for r in rows)
+          and not any(r['kind'] == 'task' for r in rows))
+    photo=SimpleNamespace(id='fedcba9876543210',specification=Specification('A photo draft is ready for review',Scope(('nutrition.photo',),('nutrition:fixture',)),()),next_step=Step('read','nutrition.photo','nutrition:fixture'))
+    p._background_runner=SimpleNamespace(current=(photo,6.0),background=True)
+    p._timers=None
+    rows=p._active_agents()
+    p._timers=saved_timers
+    check("the shared runner labels photo work without a study label or dietary values",any(r["id"]=="photo-fedcba98" and r["kind"]=="task" and r["label"]=="A photo draft is ready for review" for r in rows))
+    p._background_runner = None
+    p._task_runner = None
     origin = owner_origin(p._config.tasks.owner, 'web', 'fixture-message', namespace='chart')
     await p._run_turn(TurnRequest(lane='web', text='hi', origin=origin), _TextSink(p))
     check('the turn skeleton forwards immutable admitted identity to the Brain', p._brain.context['origin'] == origin)
@@ -369,36 +367,14 @@ async def probe_prompts() -> None:
     await p._run_turn(TurnRequest(lane="web", text="hi"), _TextSink(p))
     check("web muted: the muted variant", p._brain.prompts[0] == _WEB_MUTED_NOTE + "hi")
 
-    link = FakeRemoteLink()
-    p = make_pipeline(STREAM, remote=link)
-    await p._run_turn(
-        TurnRequest(lane="discord", text="hi"), _DiscordSink(p, link.send)
-    )
-    check("discord DM: the remote note", p._brain.prompts[0] == _REMOTE_NOTE + "hi")
-
     events = FakeEvents([FakeNote("Your 2pm moved.")])
-    p = make_pipeline(STREAM, events=events, remote=link)
+    p = make_pipeline(STREAM, events=events)
     await p._run_turn(
-        TurnRequest(lane="discord", text="hi"), _DiscordSink(p, link.send)
+        TurnRequest(lane="web", text="hi", public=True), _TextSink(p)
     )
     check(
-        "discord DM: held notes ride inside the note prefix",
-        p._brain.prompts[0].startswith(_REMOTE_NOTE)
-        and "Your 2pm moved." in p._brain.prompts[0]
-        and p._brain.prompts[0].endswith("hi"),
-    )
-
-    events = FakeEvents([FakeNote("Your 2pm moved.")])
-    link = FakeRemoteLink()
-    p = make_pipeline(STREAM, events=events, remote=link)
-    chan = FakeChannel()
-    await p._run_turn(
-        TurnRequest(lane="discord", text="hi", channel=chan, public=True),
-        _DiscordSink(p, link.send),
-    )
-    check(
-        "discord public: discretion note, held notes withheld",
-        p._brain.prompts[0] == _REMOTE_PUBLIC_NOTE + "hi" and events.takes == 0,
+        "a public turn on any lane: discretion note, held notes withheld",
+        p._brain.prompts[0] == _PUBLIC_NOTE + "hi" and events.takes == 0,
     )
 
     events = FakeEvents([FakeNote("Your 2pm moved.")])
@@ -428,14 +404,6 @@ async def probe_confirm_contexts() -> None:
     await p._run_turn(TurnRequest(lane="web", text="hi"), _TextSink(p))
     check("web: broker enters remote mode as web", p._confirm.remotes == ["web"])
 
-    link = FakeRemoteLink()
-    p = make_pipeline(STREAM, remote=link)
-    await p._run_turn(
-        TurnRequest(lane="discord", text="hi"), _DiscordSink(p, link.send)
-    )
-    check("discord: broker enters remote mode as discord",
-          p._confirm.remotes == ["discord"])
-
     p = make_pipeline(STREAM)
     await p._run_turn(
         TurnRequest(lane="voice", text="hi"), _VoiceSink(p, FakePlayer())
@@ -455,17 +423,6 @@ async def probe_escalation() -> None:
     check(
         "typed: escalation leaves an event row",
         ("event", "deep thought engaged") in rows(p),
-    )
-
-    link = FakeRemoteLink()
-    p = make_pipeline(script, remote=link)
-    await p._run_turn(
-        TurnRequest(lane="discord", text="hi"), _DiscordSink(p, link.send)
-    )
-    check(
-        "discord: interim text covers the silence",
-        link.sent[0][0].startswith("Give me a moment")
-        and link.sent[1] == ("Answer.", None),
     )
 
     p = make_pipeline(script)
@@ -534,14 +491,6 @@ async def probe_local_commands() -> None:
     check("typed reload: pending, silent", p._reload_pending
           and rows(p) == [("user", "reload")])
 
-    link = FakeRemoteLink()
-    p = make_pipeline([], remote=link)
-    await p._run_turn(
-        TurnRequest(lane="discord", text="reload"), _DiscordSink(p, link.send)
-    )
-    check("discord reload: acknowledged over the lane",
-          link.sent == [("Reloading.", None)])
-
     p = make_pipeline([])
     await p._run_turn(TurnRequest(lane="web", text="reload"), _TextSink(p))
     check("web reload: acknowledged as a row",
@@ -583,22 +532,6 @@ async def probe_failures() -> None:
     await p._run_turn(TurnRequest(lane="web", text="hi"), _TextSink(p))
     check("web failure: the page shows what happened",
           ("event", "web turn failed — see the log") in rows(p))
-
-    link = FakeRemoteLink()
-    p = make_pipeline(STREAM, error=RuntimeError("boom"), remote=link)
-    await p._run_turn(
-        TurnRequest(lane="discord", text="hi"), _DiscordSink(p, link.send)
-    )
-    check("discord failure: apology texted",
-          link.sent[-1][0].startswith("Sorry"))
-
-    link = FakeRemoteLink(fail_send=True)
-    p = make_pipeline(STREAM, remote=link)
-    await p._run_turn(
-        TurnRequest(lane="discord", text="hi"), _DiscordSink(p, link.send)
-    )
-    check("discord undeliverable: logged as an event, not a crash",
-          ("event", "remote reply undeliverable") in rows(p))
 
     p = make_pipeline(STREAM, error=RuntimeError("boom"))
     raised = False
@@ -695,14 +628,10 @@ def probe_registry() -> None:
     check("voice", lane_spec(TurnRequest(lane="voice", text="")).label == "user")
     check("typed", lane_spec(TurnRequest(lane="typed", text="")).label == "user")
     check("web", lane_spec(TurnRequest(lane="web", text="")).label == "user-web")
-    spec = lane_spec(TurnRequest(lane="discord", text=""))
-    check("discord", spec.label == "user-remote" and spec.origin == "discord")
-    spec = lane_spec(
-        TurnRequest(lane="discord", text="", channel=FakeChannel("dev"), public=True)
-    )
+    spec = lane_spec(TurnRequest(lane="web", text="", public=True))
     check(
-        "discord public: channel-named origin, notes withheld",
-        spec.origin == "discord #dev" and not spec.held_notes,
+        "a public turn keeps its lane's label and withholds the notes",
+        spec.label == "user-web" and not spec.held_notes,
     )
     check(
         "console tags",
@@ -727,6 +656,9 @@ async def probe_attachments() -> None:
         long = Attachment("long.txt", "text/plain", str(root / "long.txt"), 100)
         blob = Attachment("blob.bin", "application/octet-stream", str(root / "blob.bin"), 3)
         bad = Attachment("bad.txt", "text/plain", str(root / "bad.txt"), 12)
+        identified=root/("c"*32+"-photo.png");identified.write_bytes(png)
+        identified_note,_=attachment_prompt((Attachment("photo.png","image/png",str(identified),len(png)),),max_inline_chars=60,image_budget_chars=10000)
+        check("the attachment prompt exposes the admitted ID for a bounded private copy","Admitted attachment ID: "+"c"*32 in identified_note)
         note, images = attachment_prompt((shot, notes, long, blob, bad), max_inline_chars=60, image_budget_chars=10000)
         check("the note names every file by type, size, and path and marks their contents as data",
               all(f'"{a.name}" ({a.mime}, {a.size} bytes), saved at {a.path}.' in note for a in (shot, notes, long, blob, bad))
@@ -965,6 +897,28 @@ async def probe_resource_events() -> None:
         check("other events still reach the queue", p._on_published_event(news) and p._events.pending)
 
 
+async def probe_nutrition_receipts() -> None:
+    from ciel.nutrition import OwnerContext
+    from ciel.task_context import TaskBinding
+    from ciel.turn import owner_origin
+    p = make_pipeline([])
+    visible = []
+    p._web_link.nutrition_receipt = visible.append
+    origin = owner_origin(p._config.tasks.owner, "voice")
+    receipt = {"operation_id":"repeat-fixture","text":"Logged Breakfast on 2026-09-13: 200 calories. Undo is available."}
+    class ReceiptBrain(FakeBrain):
+        async def ask(self, text, **context):
+            await p._nutrition_receipt(OwnerContext(TaskBinding(origin,0,0),"session"),receipt)
+            if False:
+                yield ("reply", "")
+    p._brain = ReceiptBrain([])
+    player = FakePlayer()
+    await p._run_turn(TurnRequest(lane="voice",text="Log the same breakfast",origin=origin),_VoiceSink(p,player))
+    check("a nutrition repeat has visible and spoken delivery without model prose",visible == [receipt] and player.played == [receipt["text"]])
+    check("the nutrition receipt does not enter shared transcript rows",not any(text == receipt["text"] for role,text in rows(p)))
+    check("the receipt sink is cleared when the owner turn finishes",p._nutrition_delivery is None)
+
+
 async def main() -> int:
     probe_registry()
     await probe_labels_and_rows()
@@ -982,6 +936,7 @@ async def main() -> int:
     await probe_ask_first()
     await probe_forced_reload()
     await probe_resource_events()
+    await probe_nutrition_receipts()
     print(f"\nall {len(CHECKS)} checks passed")
     return 0
 

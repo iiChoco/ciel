@@ -55,9 +55,9 @@ Say **"hey jarvis"**, then talk.
   and scores, and a rough morning or a still day can be raised before you ask.
 - **Knows where you are** — the Mac's Wi-Fi, or the phone via Find My where
   macOS allows it, turned into a place name; moves between places are noted.
-- **Answers texts from anywhere** — DM it on Discord when you're out: same
-  brain, same conversation, same memory, and anything needing a yes is asked
-  over the same channel.
+- **Answers from anywhere** — the Chart is a page onto the same
+  conversation, at the machine or from a phone: same brain, same memory,
+  and anything needing a yes is asked on the page.
 - **Judges its sources** — web answers distinguish primary sources from
   aggregators, flag conflicts of interest, and state confidence rather than
   delivering everything in the same certain tone.
@@ -84,7 +84,7 @@ the docs — and you — get to use.
 | **Compact Support** | The workspace guard — file access vanishes outside a bounded region |
 | **Singularities** | `FORBIDDEN_NAMES` — the points inside the region where access is still undefined: credentials, shell startup files, agent state |
 | **Tower Clearance** | The confirmation answer window — a yes to a live question inherits the turn's trust instead of re-fighting the speaker gate |
-| **Inverse** | The action journal and snapshots (`journal.py`, `recorder.py`) — kept so operations can be run backwards |
+| **Inverse** | The action journal and snapshots (`journal.py`, `recorder.py`), plus nutrition's transactional history merged when read — kept so operations can be run backwards |
 | **Trace** | Conversation transcripts — the record of the path actually taken |
 | **Barn Door** | Speaker verification — turns away the TV and the guests, and everyone knows a barn door only half-latches |
 | **Characteristic** | The wake word — membership test for "being addressed" |
@@ -93,7 +93,6 @@ the docs — and you — get to use.
 | **Analytic Continuation** | Autoreload — the process is replaced, the conversation extends through it |
 | **Neighborhood** | The follow-up window — an open ball around the last turn, no wake word inside |
 | **Isomorphism** | The typed lane — a line on stdin maps structure-preservingly onto a spoken turn: same brain, same session, same transcript, no audio either way |
-| **Parallel Transport** | The Discord lane (`remote/discord.py`) — the same map carried along the path away from home: a DM from the pinned owner account is a turn, the reply rides back as a text, and confirmations travel the same road |
 | **Chart** | The web GUI (`remote/web.py`) — a local coordinate window onto the same manifold: the conversation drawn live, typed turns in, the mute switch |
 | **Vigil** | The proactive layer (`proactive/`) — watchers, one event queue, and the earned right to interrupt |
 | **Witness** | The unattended-turn rule (`brain/witness.py`) — reflection and Vigil turns may observe and write Ciel's own notebook, never act outward |
@@ -143,7 +142,15 @@ environment variables for one-off runs. (Two carve-outs: `[mcp.<name>]`
 connector tables are TOML-only, and `state_dir`/`log_level` sit at the top
 level, outside any section.) The [Spotify connector](#spotify-from-whichever-device-is-playing)
 uses its own `[spotify]` section, documented with the account setup below.
-The `[tasks]` storage fields are documented under [Durable tasks](#durable-tasks-and-owner-controls).
+The `[tasks]` storage fields are documented under [Durable tasks](#durable-tasks-and-owner-controls),
+`[learning]` under [Reading a book](#reading-a-book-the-learning-module),
+and `[nutrition]` under [Keeping a food log](#keeping-a-food-log).
+A boolean accepts `true`/`false`, `yes`/`no`, `on`/`off`, and `1`/`0` from
+either source; any other spelling is refused at startup with the section
+and field named (`[confirm].ask_first: 'ture' is not a boolean`), never
+read as false — since 2026-09-12, when a typo was found to have turned the
+confirmation gate off. `scripts/probe_config.py` drives the loader with
+temporary paths and nothing from `~/.ciel`.
 
 ```toml
 [brain]
@@ -156,6 +163,7 @@ resume_window_minutes = 10.0  # silence beyond this rotates to a fresh session
 [stt]
 engine = "mlx-whisper"       # Metal GPU; "faster-whisper" is the CPU fallback
 mlx_model = "mlx-community/whisper-small.en-mlx"
+warm_up_timeout_s = 300.0    # load + first decode deadline; a first 1.6 GB download may need more; 0 waits forever
 # model/compute_type/device apply to faster-whisper only
 initial_prompt = "A spoken conversation with an assistant named Ciel."
 speech_threshold = 0.5       # Silero must hear speech in one frame before Whisper is asked; 0 off
@@ -170,6 +178,7 @@ effect = "none"              # "jarvis" adds the installed-speaker treatment
 [wake]
 mode = "wakeword"
 threshold = 0.5              # raise if the TV sets it off, lower if it ignores you
+vad_threshold = 0.0          # openWakeWord's own Silero gate, off: it runs after the wake model; 0.3 buys some non-speech false-wake resistance for a fifth more CPU
 snap = true                  # a finger snap addresses Ciel too
 double_clap = "play"         # two claps within 0.8 s: "wake" like the snap, or "play" music; the [gestures] table tunes the ear
 double_clap_plays = "spotify:artist:0du5cEVh5yTK9QJze8zA0C"   # Spotify's "Copy Spotify URI"
@@ -196,6 +205,7 @@ dictation_max_s = 60.0      # manual microphone capture, bounded to 1–300 seco
 [audio]
 backend = "portaudio"       # "webrtc": AEC3 without ducking (macOS 14.2+); "apple": native voice processing
 webrtc_capture_delay_ms = 40 # WebRTC only: 0–200, multiples of 10; reference timing allowance
+open_retry_max_s = 30.0      # ceiling of the doubling wait between attempts to open the pair; 0 leaves instead
 apple_playback = "portaudio" # where Ciel's voice plays under "apple"; "engine" lisps, kept for comparison
 apple_ducking = "min"       # "min", "mid", "max": other audio attenuation during voice activity
 apple_agc = false           # Apple automatic microphone gain; echo cancellation stays on
@@ -533,7 +543,7 @@ question and the answer it gave itself (`you (confirm, off): yes`), so a
 scrollback still reads as what happened. The journal records each one as
 it would have. What does not change: the deny tier is not a question and
 still refuses, an unattended turn (reflection, Vigil) still cannot act
-because nobody is there to answer, and the Discord lane's own gate still
+because nobody is there to answer, and the Chart's own sign-in still
 decides who may speak. What you have given up is the one moment where a
 misheard sentence, or a line planted in a web page or an email, meets
 your own word before it runs; the journal is what is left of that.
@@ -541,7 +551,7 @@ your own word before it runs; the journal is what is left of that.
 It is meant to be flipped, not set: with granting on, *"act without
 asking"* is a capability in the catalog below — granted through the
 spoken gate once, revoked at once with *"ask before acting again"*, from
-voice, Discord, or Chart. The words are a local command, not a request
+voice or Chart. The words are a local command, not a request
 the model interprets: *"act without asking"*, *"stop asking me"*, *"no
 more confirmations"* on their own put the one question — *"Act without
 asking from now on — okay?"* — over the lane they came in on, and *"ask
@@ -561,84 +571,6 @@ Files and Folders.
 This also makes verification confusing: a shell without Desktop permission
 reports "Operation not permitted" for a file Ciel wrote perfectly well. Check
 with `stat` rather than `ls`, or just ask Ciel to read it back.
-
-## Texting Ciel from anywhere (Parallel Transport)
-
-Off by default. Turn it on and you can DM Ciel on Discord from wherever you
-are — the message becomes an ordinary turn in the same conversation, and the
-reply comes back as a text instead of through the speakers.
-
-```bash
-uv sync --extra discord
-```
-
-```toml
-[discord]
-enabled = true
-owner_id = 123456789012345678
-# token: put it in ~/.ciel/discord.token (preferred — that filename is on
-# the FORBIDDEN_NAMES blocklist, so the model can never read it), or as
-# `token = "..."` here, or CIEL_DISCORD_TOKEN in the environment.
-```
-
-**One-time setup, about five minutes:**
-
-1. [discord.com/developers/applications](https://discord.com/developers/applications)
-   → *New Application* → **Bot** tab → *Reset Token*, save it to
-   `~/.ciel/discord.token`. Untick *Public Bot* while you're there. No
-   privileged intents needed — DMs carry their content without any, and
-   guild messages that @mention the bot are exempt from the content
-   restriction.
-2. Discord only delivers DMs between accounts that share a server, so make a
-   private one (just you) and invite the bot into it: **OAuth2 → URL
-   Generator**, scope `bot`, zero permissions, open the generated URL.
-3. Your own user id: Settings → Advanced → *Developer Mode* on, then
-   right-click your name → *Copy User ID*. That's `owner_id`.
-
-Then DM the bot. `uv run scripts/probe_discord.py --live` echoes your DMs
-back without running the assistant, which is the fastest way to check the
-plumbing.
-
-**Identity is pinned, not inferred.** Only DMs from `owner_id` are read at
-all — strangers, other bots, and anything said in a server channel are
-dropped before the words reach anything that could act on them. The model
-never chooses who may speak here or where replies go; both are config. The
-flip side is honest too: this gate is exactly as strong as your Discord
-account. Anyone holding your Discord session, or the bot token, is you as
-far as this lane is concerned — treat the token like a password.
-
-**Confirmations follow you out the door.** A confirm-tier action mid-text
-— a shell command, a connector send — texts you its question over the same
-DM and waits about two minutes for a yes or no, instead of voicing it into
-an empty room. Silence, a "no", or two unclear answers refuse the action,
-exactly as they do out loud.
-
-**@ciel works in servers too.** In any channel of a server the bot has
-been invited to, `@ciel <question>` is a turn — same conversation, reply
-posted to that channel. Still only your pinned account: anyone else's
-mentions are dropped at the same gate as their DMs, and nobody else's
-channel chatter is read at all. The turn knows it's in public — it's told
-to keep private context out of channel replies and to offer DMs when a
-real answer would need it, and held Vigil notes are only ever delivered
-into your DMs. `mentions = false` restricts the lane to DMs. One honest
-limit: mentions missed while Ciel is down are not backfilled — missed DMs
-are (within ten minutes), because the DM history has one place to look.
-
-**When Vigil is on**, urgent watched things may reach you over this link
-too: iMessage keeps priority when fully configured, and the Discord DM is
-the fallback outlet (`discord.proactive = false` keeps the lane strictly
-two-way). Held notes ride into your first text from away the same way they
-ride into a spoken conversation.
-
-**The honest limits.** Ciel lives on this machine: a closed lid means no
-answers until it wakes. Short network naps are survived (the gateway
-replays what was missed), and DMs sent while Ciel was disconnected or
-restarting are picked up on reconnect — the last message seen is persisted,
-so the sweep spans restarts — but only up to ten minutes back: a question
-from ten minutes ago is still being waited on; an instruction from six
-hours ago should be asked again, not executed stale. Replies compose under
-the speech rules, so they read like Ciel talking — short, plain, no
-markdown — which happens to be exactly how texts should read.
 
 ## The GUI (Chart)
 
@@ -697,9 +629,16 @@ enabled = true
 ```
 
 **Mute** is the reason this exists. While muted, Ciel holds its tongue
-*and* its name: nothing leaves the speakers (greeting, timer rings, and
-replies included) and the wake word is not watched for — a false wake in
-a lecture hall costs exactly the attention mute was bought to avoid. The
+*and* shuts its ear: nothing leaves the speakers (greeting, timer rings, and
+replies included) and the microphone is closed — not captured and ignored,
+closed. The capture helper exits, the input stream is released, and the
+menu bar's orange dot goes out, so "muted" is something the Mac can vouch
+for rather than something Ciel promises. A spoke that starts muted never
+opens the microphone at all. The unmute opens it again, with fresh echo
+cancellation; if it will not open, the reason is logged, the ear stays
+shut, and it is tried again every five seconds. Reopening costs about as
+long as the capture helper takes to start, so the first second after an
+unmute is not heard. The
 typed and web lanes keep working, and Vigil nudges that would have been
 spoken become held notes that ride into your next turn. Timers that come
 due while muted appear as text on the page instead of ringing. The state
@@ -710,7 +649,7 @@ announced on the page, in the terminal, and in the transcript either way.
 
 **Trust model.** The server binds `127.0.0.1` only: reaching the port
 means being at the machine, the same trust the keyboard gets — so web
-turns count as presence, unlike Discord ones. The one browser-shaped hole
+turns count as presence. The one browser-shaped hole
 (any web page may try `ws://127.0.0.1`) is closed by an Origin check:
 pages from other origins are refused before a frame is read. Think hard
 before widening `host`; there is no account id here to gate on.
@@ -730,13 +669,21 @@ path with a note that their contents are data, never instructions; a text
 file under `max_inline_chars` is quoted there, an image within
 `image_prompt_chars` of base64 is shown to it, and anything past either
 bound is named for it to read. The transcript row names what was attached
-and never its contents, and a public Discord turn never carries a file.
+and never its contents, and a public turn never carries a file.
 The folder does not grow forever: at startup and after each new file, the
 Chart's own files older than `upload_keep_days` are removed — only files
 in its `<id>-<name>` shape, so anything the owner put in the workspace by
 hand is never touched; 0 keeps everything.
 The hello says whether the server takes files and how large; an older
-server hides the button.
+server hides the button. A file survives the process that took it: since
+2026-09-12 a server binding the folder indexes every file already there
+in the Chart's shape — the id and name from the filename, the size from
+the file, the type from its first bytes or, for a text-shaped file, from
+its suffix — so a message naming a file uploaded before a hub restart
+still finds it, and a resend of that upload answers with the record
+instead of failing on the exclusive create. Before that the record lived
+only in memory: a restart between the upload's receipt and the message
+that named it left the file on disk, unresolvable and unretryable.
 
 **A native app later** is already provided for: the page speaks a small
 JSON protocol over one WebSocket, documented at the top of
@@ -773,7 +720,7 @@ codec, the ring, the door, and a real socket on loopback.
 Optional. Everything above runs as one process (`ciel`, or `ciel local`),
 and that stays the way to run Ciel on one Mac. The split exists for the
 day the brain moves to a machine that never sleeps: `ciel hub` is the
-brain, memory, Vigil, the Discord lane, the Chart, and timers'
+brain, memory, Vigil, the Chart, and timers'
 bookkeeping — everything that is judgment or a text lane — served over
 the same socket the Chart uses; `ciel spoke` is the microphone and the
 speakers — the wake word, the endpointer, the speaker gate, STT, TTS,
@@ -805,6 +752,23 @@ spoke, on purpose: the command grammar's fast path and local timer
 ringing — both come back in the resilience phase, for a hub that might
 be unreachable.
 
+**An answer names its question, and a result names its hub.** Since
+2026-09-12 the broker accepts a spoke's yes or no only under the id of
+the question it put — the question and its re-prompt each get one, and
+the id is cleared with the verdict and on cancellation — so a "yes"
+transcribed late, to a question already denied, is refused rather than
+approving whatever was asked next; an answer with no id (a typed line,
+a Chart row) is judged by the predating rule alone, as before. Each hub
+process mints its tool-call ids under an epoch of its own: a request
+still running on the Mac when the hub restarts answers under the old
+epoch, the new hub's first request under its own runs for real, and the
+orphan's result matches nothing and is dropped — without the epoch the
+executor called the new request a duplicate and handed the old result
+to it. And a spoke replaced by a newer one is settled before the
+newcomer sits: every wait the old seat held fails at once, the pipeline
+hears it leave and then the new one arrive, and nothing is left to its
+deadline or cancelled at a spoke that never saw the request.
+
 `scripts/probe_hub_arbiter.py`, `scripts/probe_spoke.py`, and
 `scripts/probe_confirm_wire.py` drive each half with fakes and a fake
 other half.
@@ -825,6 +789,25 @@ and the re-exec happens. The log says `reload forced from state BUSY`.
 autoreload = true           # watch src/ciel and ~/.ciel/reload; re-exec on a change
 reload_grace_s = 120.0      # how long the room may stay busy before the reload is forced; 0 never
 ```
+
+**The ear is tried again, and the load has a deadline.** On 2026-09-19 the
+spoke spent a night leaving and coming back: WebRTC capture timed out at
+startup, the process left, launchd relaunched it, every model loaded again,
+and the same door was tried — 1755 times — until a whisper fetch that
+neither finished nor failed held the last relaunch in startup for six
+hours, deaf, with its link up and the log silent. Two things changed. A
+microphone pair that will not open no longer ends the spoke: the failure is
+logged with its reason, the wait before the next attempt doubles from one
+second up to `open_retry_max_s`, and the models, the link, and the HUD stay
+up meanwhile; a source edit during the wait still reloads, and a ceiling of
+0 restores one attempt and an exit. And the engine's warm-up — the load and
+the first decode — has `warm_up_timeout_s` to finish in; past it the engine
+is treated like any other warm-up failure, mlx falling back to
+faster-whisper and faster-whisper ending startup, so a stuck fetch becomes a
+logged line and a relaunch rather than a silent night. A pair that fails
+*after* opening — a lost route, a stalled tap — still ends the run for
+launchd to restart, as the audio section describes; the single process
+`ciel` keeps its one attempt. `scripts/probe_spoke.py` drives both.
 
 **The hub needs no Mac in it.** Everything Mac-bound reaches the machine
 over the same socket. The brain's tools for the screen, Messages, the
@@ -871,8 +854,9 @@ command grammar runs on the spoke: "ten minute timer" arms a local
 timer, "cancel the timer" and "what timers are running" answer from the
 mirror, "reload" restarts the room. Every spoken turn carries an id, so
 a resend after a reconnect is never queued twice. On the hub, an away
-text goes through the Mac's iMessage while the spoke is seated and
-falls to Discord when it isn't. `ciel hub --check` is the doctor: the
+text goes through the Mac's iMessage while the spoke is seated, and is
+held for the next conversation when it isn't. `ciel hub --check` is the
+doctor: the
 token, the bind address, the brain's login, the connectors' runtime,
 the state directory — one line each. `scripts/probe_backfill.py` drives
 all of it.
@@ -989,8 +973,8 @@ event drops; a read-back verification becomes a silent note; quiet hours
 hold everything (a 2am buzz violates them exactly as speech does); then
 the importance floor, presence, and two daily budgets — spoken nudges
 (`max_spoken_per_day`, 6) and texts (`max_messaged_per_day`, 3). When
-you're away, an important event may be texted — iMessage when configured,
-the Discord DM as fallback. Everything that clears no bar is *held* and
+you're away, an important event may be texted over iMessage when
+configured. Everything that clears no bar is *held* and
 rides into the start of your next conversation, aging out after 18 hours.
 
 **The brake.** `touch ~/.ciel/hold` silences the whole layer — nudges
@@ -1048,7 +1032,7 @@ chip and says why.
 
 **Who sees what.** The user's own readings — presence, place, calendar,
 the ring — never open a turn whose reply lands where others can read
-it: a public Discord channel gets the shared projection (the time, the
+it: a public turn gets the shared projection (the time, the
 seat, the switches, what is armed), and `world_now` is scoped the same
 way for that turn. Strings written by other people (a meeting's title,
 a section id) are rendered in “quotes”, and the block says the quotes
@@ -1151,6 +1135,287 @@ not read other people's playlist items or use the removed recommendations
 and audio-feature endpoints. The connector streams no audio itself; Spotify
 Connect controls the Spotify application. The [Spotify probe](scripts/probe_spotify.py)
 checks the client, browser callback and Ciel gates using only fixture state.
+
+## Keeping a food log
+
+The private `/nutrition` page and Ciel's voice/text tools now share one
+SQLite diary. All four milestones are implemented and remain opt-in by default.
+Nutrition was enabled on the designated hub on 2026-09-15 at
+`ciel.yunhan.me/nutrition`, behind the existing owner Access gate and hub token.
+The Chart's **FOOD** link opens the page. It uses the same Instrument palette, works without
+external assets, and fits a phone.
+
+On the page, review the foods, source values, portions, eating time, and
+allowance, then Save. Edit, Delete, Repeat, and Undo each return a receipt.
+A dropped connection keeps the pending request in that tab; **Retry the
+saved request** reuses its identity instead of adding another meal. The
+Changes and Undo section retains older operations beyond the recent list.
+
+By voice or text, ask Ciel to log an eaten meal or repeat a specific saved
+meal. Proposed values, edits, deletes, and older Undo go through the
+confirmation broker. An exact repeat copies the saved portions, values,
+allowance, and policy without another question. Every save emits a visible
+receipt; the voice path also speaks it from committed values. An immediate
+unambiguous “no, undo that” reverses the latest ordinary nutrition operation
+in the same live session without an extra yes. Older or cross-session Undo
+needs the broker, and stale revisions refuse. Hypothetical mentions such as
+“maybe the same breakfast” never authorize logging.
+
+**Read the diary over time.** The dashboard offers 7-day, 30-day, and custom
+inclusive ranges, with calories against the owner's target, daily and cumulative
+estimated deficit, and protein/carbohydrate/fat graphs. Partial intake remains
+"logged so far"; missing dates are gaps. Hollow dots identify unfinished intake
+or incomplete nutrient coverage. Selecting a point with a click or Enter opens
+its diary day. The scrollable daily table provides the same values, coverage,
+allowances, and evidence through ordinary keyboard controls.
+
+A target never supplies expenditure. Each diary date uses the owner's settings
+that were effective then. Only completed days with usable calories and an
+expenditure estimate enter deficit totals and averages; future dates are
+excluded. Positive is deficit, negative is surplus. A completed empty day is
+usable only with explicit zero intake, including after the last meal is deleted.
+Cumulative lines stop at gaps and resume the subtotal on the next eligible day,
+with included-day and gap counts. The visible allowance is already in logged
+calories, so it reduces the calculated deficit once. This is estimated energy,
+not measured fat loss. Plans and drafts contribute nothing to these graphs.
+
+Calorie and nutrient averages report their own eligible completed-day counts.
+A partly known macro stays a disclosed subtotal in the graph and is excluded
+from its full-day average. Unknown values are never filled with zero. The
+**Weekly review** covers the seven days ending on the selected range's last
+date, even for a shorter custom graph. It shows averages, completion coverage,
+recurring meal names, largest calorie allowances, and missing nutrient values.
+Bounded lists disclose their total counts and link to source meals. Ciel uses
+the same reader through `nutrition_dashboard` for range and weekly questions;
+no weekly message or target change is scheduled.
+
+**Weight is optional and observed.** The manual log keeps one owner-entered
+reading per calendar date, in kg or lb; editing that date replaces its reading.
+Graphs use kg, while the table and editor retain the entered units. A trailing
+seven-calendar-day mean uses observed readings only, needs at least two, and
+is shown only on measurement dates. Missing weigh-ins stay gaps; readings just
+before the graph range can contribute to its mean. The window is configurable.
+Page Save/Remove names the reviewed revision; voice changes ask the controller's
+broker. Every change retains a receipt and ordinary nutrition Undo. **Reload
+reading** refreshes a form after an Undo or another page's edit. Weight never
+changes intake, expenditure, or targets and is never inferred from a deficit.
+
+**Keep familiar food once.** Saved foods have names and aliases; "log my usual
+oats" resolves the saved ID and version and logs its fixed portion with a
+receipt, without another question. Ambiguous names return candidates. Changed
+portions and voice edits still go through the controller's broker. A one-off
+meal correction leaves the default alone; **Update saved food** opens a
+separate reviewed Save. **Save as usual** can copy a consumed meal's retained
+values and policy. Deleting a saved entry does not change old meals.
+
+Recipes describe all ingredients in a whole yield: four servings, for example,
+or a measured mass/volume. **Prepare a batch** keeps that recipe version and
+yield. One of four portions divides by four; half a serving divides by eight.
+A fraction is explicitly of the whole yield. Compatible mass/volume units
+convert without guessing density or raw/cooked weights. Editing a recipe
+changes future use; prepared batches, plans, and consumed meals retain their
+source and allowance snapshots. Saved library versions have ordinary history
+and Undo.
+
+**Try a meal without logging it.** **Preview totals** shows actual intake plus
+one hypothetical meal and writes nothing. The page clears that preview when the
+diary refreshes, including a late reply to an earlier preview. **Keep as a plan** stores a separate
+planned meal for the selected diary day; its projected totals show nutrient
+coverage, including unknown values. **I ate this** reviews the retained portion
+and actual eating time, then consumes the plan and writes the meal in one
+transaction. Undo restores both. Planned meals and photo drafts never enter
+actual intake, even while a plan is being consumed concurrently.
+
+**Review historical allowances explicitly.** Choose a bounded diary-date range
+to see every affected meal's old and proposed calories under the current
+allowance policy. Source values, portions, dates, and completion remain as saved.
+Applying the review and undoing it each require a new broker question on that
+same private page. The answer names its operation, reviewed digest, question,
+and server-bound page session. Another tab, generic voice/keyboard/chat Yes,
+ID-less replies, expired questions, and reconnects cannot approve it. With
+`[confirm].ask_first = false`, bulk recalculation is unavailable; ordinary
+controls retain their existing semantics. Voice/text requests direct historical
+approval to the page. The legacy grant-approval answer gap remains separate.
+
+A review covers at most 50 meals by default and lives for five minutes, with
+eight pending review slots. The broker can shorten its answer window using
+`[web].confirm_timeout_s`. Changing any reviewed meal or the policy requires a
+fresh review; a conflict rolls the whole operation back. Approved history and
+receipts commit with all meal changes and use the existing Inverse read-time
+merge. Uncommitted reviews and approvals disappear on disconnect/restart.
+Schema version 3 marks grouped history so older code refuses it instead of
+misreading an Undo.
+
+**A photo is a draft first.** Take a photo or choose a PNG/JPEG, crop the
+label or meal from the original, and inspect the preview before keeping it.
+The page shrinks the crop and checks its encoded size before upload. A
+received draft persists across reconnects and restarts but adds no intake.
+Camera captures suggest their browser timestamp and timezone; library
+photos and labels require an eating-time choice. The suggestion is never
+proof that anything was eaten.
+
+Analyze queues a bounded background job. Review the food, portion, source
+basis, explanation, and unresolved questions when it finishes. Unreadable
+label digits and unknown nutrients stay blank. Notes and incomplete values
+can be saved for later; only **Save meal** logs reviewed values. **Fraction
+eaten** scales the listed portions once (0.5 means half), before the normal
+calorie allowance. A saved photo meal has the same receipts and Undo as a
+manually entered meal. Cancel analysis or edit the draft to reject a stale
+result; Discard removes it from the unfinished inbox without logging food.
+
+Learning and photo analysis share one background runner and one private
+model lease. Speech can continue while a photo is analyzed. Analysis needs
+`[tasks].enabled = true`, `[tasks].runner = true`, and
+`[nutrition].photo_analysis = true`. With the runner paused, drafts remain
+editable and a saved request can be resumed. A conversational photo tool
+queues work; it never opens another model call inside the speaking turn.
+A Chart photo can be imported only by its admitted attachment ID. That makes
+a private copy; the already-shared Chart original keeps its existing
+permissions and 14-day retention.
+
+Photos travel and are read through addressed authenticated socket frames,
+with no media GET route or shared replay. The private media store writes
+owner-only files, retains images for 30 days by default, and shows them as
+unavailable after expiry while keeping saved numbers and history. Defaults
+allow 200 unfinished drafts, 250 MB of retained media, and 20 analysis
+requests per rolling 24 hours. Each job permits two model calls sharing a
+$0.25 budget, further limited by task configuration; each call has a
+45-second deadline. These are initial limits, not a measured accuracy or
+cost claim. Synthetic probes exercise the flow; real camera and model
+quality still need the private trial.
+
+Calories lean high through a separate, visible allowance. The initial
+configurable mapping is +15% for a guessed portion, +10% for unknown oil,
+and +10% for estimated nutrition. Each distinct reason applies once to its
+food's base calories; the meal sums those additions and rounds up once.
+Known label values with measured portions start without an allowance.
+Protein, carbohydrate, and fat keep their source values; missing nutrients
+remain unknown, with coverage shown beside the totals. Exact repeats retain
+the saved policy even if the configuration later changes.
+
+A meal keeps its eating timestamp, timezone, UTC offset, day cutoff, and
+diary date. The initial cutoff is 04:00. Travel and later settings changes
+do not move saved history. A day shows “Logged so far” until the owner
+marks it complete; corrections retain that assertion. Completing an empty
+day requires an explicit “I ate nothing” assertion. Optional calorie and
+protein targets and estimated total daily expenditure apply from a chosen
+diary day onward. A target is separate from expenditure.
+
+**Setup.** Configure only the designated brain host. Its actual hostname
+and runtime role must match the diary's recorded owner; a second process
+cannot take the writer lock. For the hub deployment:
+
+```toml
+[hub]
+require_token = true
+
+[nutrition]
+enabled = true
+owner_host = "YOUR-BRAIN-HOSTNAME"   # replace with that host's hostname
+owner_role = "hub"                 # "local" only for a local-mode diary
+diary_day_start_hour = 4
+portion_allowance_pct = 15.0
+oil_allowance_pct = 10.0
+estimate_allowance_pct = 10.0
+```
+
+Keep the existing hub token setup and configure that same token in every
+Chart, nutrition page, and spoke client, including loopback. The page keeps
+its token in browser session storage. `ciel hub --check` reports nutrition's
+host/token readiness and refuses an enabled diary without the required
+policy or token. The runtime uses the same rule. Before deployment, validate
+the live Access policy for `/nutrition` and `/ws`. The 2026-09-15 rollout
+verified both paths against the existing owner-only application, a healthy
+tunnel, matching spoke/hub tokens, and a successful spoke reconnect. Tokenless
+and unrelated-Origin connections were rejected; private dashboard and photo
+reads succeeded. Existing browser profiles may need the same hub token in the
+page's token form. Credentials were compared without printing or changing them.
+
+All `[nutrition]` fields are configurable through TOML or the usual
+`CIEL_NUTRITION_<FIELD>` environment variables:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Expose private tools and start the diary |
+| `state_dir` | `<state_dir>/nutrition-state` | Dedicated owner-only directory |
+| `owner_host` | unset | Required hostname allowed to own this diary |
+| `owner_role` | `"hub"` | `"hub"` or `"local"`; switching does not create a second diary |
+| `diary_day_start_hour` | `4` | Local hour starting a diary day, 0–23 |
+| `portion_allowance_pct` | `15.0` | Addition for a guessed portion |
+| `oil_allowance_pct` | `10.0` | Addition for oil uncertainty not included in the base |
+| `estimate_allowance_pct` | `10.0` | Addition for estimated nutrition values |
+| `fdc_api_key_file` | `~/.ciel/nutrition-api-key` | Optional USDA FoodData Central key file |
+| `lookup_timeout_s` | `8.0` | Provider deadline, at most 30 seconds |
+| `lookup_max_bytes` | `500000` | Provider response bound before parsing |
+| `lookup_cache_entries` | `500` | Retained search records; saved meals keep their snapshots |
+| `max_items` | `40` | Foods per meal |
+| `max_meals_per_day` | `100` | Bounds a complete day response without truncating totals |
+| `max_pending_controls` | `8` | Concurrent socket controls |
+| `max_request_bytes` | `65536` | Reviewed payload limit; the wire also has a 64 KiB ceiling |
+| `max_records` | `100000` | Original operations; each retains room for its one Undo |
+| `max_library_records` | `1000` | Active saved foods, recipes, and prepared batches |
+| `max_plans_per_day` | `100` | Unconsumed plans per diary day |
+| `bulk_max_meals` | `50` | Meals per historical allowance review; at most 100 |
+| `bulk_max_previews` | `8` | Pending historical reviews in this process |
+| `bulk_preview_lifetime_s` | `300.0` | Review lifetime before approval/commit; at most 900 seconds |
+| `dashboard_max_days` | `366` | Inclusive graph range, 1–366 diary days; presets above this bound are disabled |
+| `dashboard_max_meals` | `5000` | Meals across graph/review reads, at most 10000; excess refuses rather than truncates totals |
+| `dashboard_review_limit` | `10` | Examples per weekly review list/group, at most 25; totals disclose omissions |
+| `weight_trend_days` | `7` | Observed weigh-in mean window, 1–90 calendar days; at least two readings needed |
+| `photo_analysis` | `true` | Offer analysis when nutrition and its task runner are enabled |
+| `photo_input_max_bytes` | `20000000` | Browser source-file limit before decoding/cropping |
+| `photo_max_bytes` | `2000000` | Encoded upload and extraction limit; at most 2 MB |
+| `photo_max_edge` | `1568` | Browser crop output's longest edge; at most 4096 pixels |
+| `photo_max_pixels` | `16000000` | Image dimension bound for preview and server admission |
+| `photo_keep_days` | `30` | Draft/saved image retention; numeric records survive |
+| `photo_storage_bytes` | `250000000` | Retained media capacity, including unfinished imports |
+| `photo_max_drafts` | `200` | Unfinished inbox capacity; Save/Discard release a slot |
+| `photo_jobs_per_day` | `20` | Analysis requests per rolling 24 hours |
+| `photo_max_model_calls` | `2` | Durably charged calls per job; at most 10 |
+| `photo_max_budget_usd` | `0.25` | Job budget divided across its allowed calls; at most $10 |
+| `photo_timeout_s` | `45.0` | Extraction deadline, also bounded by task limits; at most 120 seconds |
+
+USDA search is optional. Put a FoodData Central API key in the configured
+owner-only file to enable uncached searches; see the
+[USDA API guide](https://fdc.nal.usda.gov/api-guide/). Search returns at most
+eight Foundation/SR Legacy foods with their stated 100 g basis. The USDA key
+is separate from the hub token; enabling the diary does not configure it.
+Missing, empty, or unreadable key files report a setup problem before any
+network request. Provider failures are reported separately without printing
+the key. Cached foods, saved meals, and explicit label values remain usable.
+Without those values, Ciel can propose an estimate from the food, preparation,
+and portion for the controller's review; label numbers are optional. The
+question identifies estimated nutrition and the computed calorie allowance.
+Calories-only logging still needs numeric calories, supplied or explicitly
+estimated; unknown macros stay unknown. Declining saves nothing. Editing a
+saved food uses its retained source values even after cache eviction.
+
+**History is part of Save.** The record, before/after history, operation
+identity, and receipt commit together. The owner's 2026-09-13 approval makes
+nutrition history an Inverse source: `recent_actions` merges it with the
+JSONL journal when read, with no duplicate JSONL copy. Reading and nutrition
+Undo remain available with `[journal].enabled = false`. Nutrition tools stay
+outside the generic gate, recorder, and Vigil verification; the controller
+owns their conditional questions. Undo checks current revisions and never
+restores database files. A full history refuses new changes while keeping
+Undo available.
+
+The dedicated directory, database sidecars, and configured API-key basename
+are forbidden to model file/search tools and the spoke shell classifier.
+The initial HTTP page is an empty shell; diary values travel over private
+authenticated socket frames and stay out of the shared replay ring.
+Public tools and the interview room do not receive nutrition tools.
+
+The [milestone contract](design/2026-09-13-nutrition-plan.md) and
+[design record](design/2026-09-13-nutrition-design.md) record all four implemented
+milestones: the core diary, photos, familiar meals/plans, and the dashboard.
+The hub rollout completed on 2026-09-15 with token checks required on every
+connection, the 04:00 diary cutoff, and initial portion/oil/estimate allowances
+of 15/10/10 percent. Photo analysis uses the existing enabled task runner.
+Targets and expenditure remain optional owner entries. End-to-end meal/photo
+quality and voice friction still need the owner's private trial. Scale
+integration is excluded. Choose the allowance mapping and cutoff for the
+private trial before enabling it.
 
 ## The ring (Oura)
 
@@ -1324,6 +1589,21 @@ never skips one. Then the queue is extracted and the watch goes round again
 after `poll_s`. When Gmail has forgotten back to the cursor, the watch lists
 the window since its anchor once, bounded by `max_messages_per_poll`, takes
 what it did not have, and anchors again, counting the resync on its record.
+**The service is never called on the loop.** Every call to Gmail or the
+calendar is a synchronous HTTP round trip; since 2026-09-12 each runs in a
+worker thread and the step awaits it. Made on the event loop, a slow
+answer stalled the voice arbiter, the sockets, the timers, and the
+runner's own step deadline, which could not fire while the loop was held;
+now a listing that outlives `step_timeout_s` is abandoned at the deadline
+and a timer due during it rings on time. A call the step no longer waits
+for finishes on its own, bounded by the client's HTTP timeout, and its
+result is dropped; a send in that state is the "outcome nobody saw" the
+runner already reconciles by the id and never resends. And a step sees
+every record of its namespace, not a page: the runner walks the store's
+pages (`all_records()`) before handing them over, so a preview with more
+records than one page no longer completes with a queued message unread
+behind page one.
+
 **The candidates are in Chart.** Under **Tasks**, below the standing
 grants, *Events from email* lists every dated candidate as a row of durable
 record: its state in a word — *found*, *needs clarification*, *ready*,
@@ -1588,20 +1868,20 @@ capability switches — but only when you ask, and never quietly:
 
 - *"Enable your shell access"* (spoken or texted) → Ciel asks **"Enable
   shell access — okay?"** through the enforced gate — voiced at home,
-  texted over the Discord lane — and only a yes edits the config. The
+  shown on the Chart — and only a yes edits the config. The
   change lands surgically in `config.toml` (your comments survive, the
   result is parse-verified, a bad write rolls back), gets journaled like
   every confirmed action, and takes effect after the reload it triggers.
 - *"Kill your shell"* → immediate, no question. De-escalation never has
   friction; it's the one-way valve's philosophy applied to permissions.
 - The catalog in `brain/tools/grants.py` is the boundary: files, shell,
-  screen, iMessage read/send, Vigil, barge-in, the morning brief, Discord
-  away texts, and acting without asking (`act_without_asking`, the one
+  screen, iMessage read/send, Vigil, barge-in, the morning brief, and
+  acting without asking (`act_without_asking`, the one
   switch whose grant turns a value *off*; the model is told that *"act
   without asking"* on its own is this grant, not a manner for a task it
-  has not been given). What's *not* in it is the point — the pinned Discord
-  account and token, the voice gate, connector tool tiers, and the
-  workspace path cannot be reached by any phrasing, from anywhere.
+  has not been given). What's *not* in it is the point — the voice gate,
+  connector tool tiers, and the workspace path cannot be reached by any
+  phrasing, from anywhere.
 - Unattended turns (reflection, Vigil) are denied both tools outright by
   the Witness rule, and the model is instructed to grant only on your
   explicit request — never because something it read suggested it. The
@@ -1630,6 +1910,24 @@ Three mechanisms, deliberately separate:
 
 Only the one-line summaries go into the prompt each turn. Full contents load on
 demand, which is what keeps memory affordable as it grows.
+
+**Yours alone to read.** Since 2026-09-12 every file the memory store
+writes — a memory, `MEMORY.md`, the directory itself — is created
+owner-only whatever the process umask says, as the action journal, its
+snapshots, a conversation transcript, and a project file now are too; a
+private store that left the mode to the umask was world-readable on any
+machine with the usual `022`. Files written before that date keep the
+mode they have; `chmod -R go-rwx ~/.ciel/memory ~/.ciel/journal
+~/.ciel/transcripts ~/.ciel/projects` tightens them, and Ciel does not
+rewrite modes across your directory on its own. One file that is not
+UTF-8 costs one file: it is skipped with a warning that names it and
+nothing of what is in it, and the prompt index, recall, and the saving
+of later notes carry on — one stray byte in one hand-written note used
+to take all three down. A quick note is looked up by the exact path its
+id names, never by a scan of the whole store for a name that could only
+be there, so saving one reads the store once, for the index; and if that
+index rewrite fails the receipt is still positive, because the note was
+written. `scripts/probe_notes.py` pins all of it.
 
 **A project is bound to the work it is about.** Since 2026-09-09 a project
 also carries, as lines in its own frontmatter, the owner's statements about
@@ -1814,6 +2112,305 @@ also prevents saving. `max_chars` bounds the note in the editor and writer,
 and `save_timeout_s` bounds the wait for a hub receipt. The spoke keeps its
 local draft until that receipt or explicit dismissal, so a reload or failed save cannot silently
 throw an idea away.
+
+## Reading a book (the learning module)
+
+"Let's read Axler" should land on the book you mean, at the place you
+last said you were, weeks and many conversations later. The learning
+module is the study workspace the [learning plan](design/2026-09-10-learning-plan.md)
+describes; its first milestone, landed 2026-09-10, is a book registered
+once and a bookmark kept in your words. Worksheets, reviews, and mock
+exams are the later milestones and build on these records.
+
+**A course is a project; the book and its study folder are its
+resources.** `register_book` binds a PDF to a course's Atlas project as a
+resource of role `book` (key `book-<slug>`) and a study folder under
+`[learning].study_root` as a resource of role `folder` (key
+`study-<slug>`), so a worksheet read later is readable under the same
+rule as any bound document. It is called only on your words: the PDF
+you named or chose from `find_book`'s candidates, and the edition you
+confirmed from the title page — without the edition it refuses and binds
+nothing. The book's facts — title, edition, aliases, path and content
+hash, page count, whether it carries printed page numbers, the study
+folder — are records in the task store's `learning` namespace, with the
+printed page labels and the outline as records of their own. The study
+folder is built under the study root the Mac answers with, so a tilde in
+the hub's config never names a folder under the hub's home. The first
+book registered on a project is its current one; `open_study` makes the
+book it opens current. `open_project` shows a project's books with their
+bookmarks; the notebook gets one dated log line when a book is
+registered or closed.
+
+**Resume explicitly.** `open_study` resolves the book — by the project's
+name or alias, or by the book's own alias alone ("Axler", "LADR") across
+every project — and answers with its bookmark. Several possible books
+are a question, never a guess; with several registered and none named,
+the current one answers. `set_bookmark` keeps where you are in your own
+words, only when you say so: a section (`3B`, `section 3.2`), a printed
+page (`page 84`), a PDF page (`pdf page 90`), a chapter, or an item
+(`theorem 3.21`, `cor. 3.22`), each stored with its kind. A printed page
+is placed through the PDF's own page labels, which PDFKit reads; a PDF
+without them refuses a printed page and asks for a PDF page or a section
+instead, and a bare number is asked about rather than read as either. A
+section or chapter is placed through the outline when the outline names
+it. Elapsed time, reopening, and anything generated later never move the
+bookmark. `study_status` reads it without changing anything.
+
+**The Mac owns the PDF.** `find_book` searches the folders in
+`[learning].search_roots` by filename and PDF metadata, never page text,
+stops at `max_search_files` and says so, and offers at most
+`max_search_results` candidates; a root outside your home folder or under
+`~/.ciel` is refused and named. Reading a book's page count, labels,
+outline, and hash is the spoke's `learning.pdf_info`, which, like
+`project.read`, re-checks the path on the Mac — under home, not the
+state directory, not a credential's name, a `.pdf` — whatever the hub
+said, and refuses a PDF past `max_pdf_bytes` rather than reading part of
+it. On the hub both are one call to the spoke; a hub without its spoke
+says the Mac could not be reached and never reads the server's disk. In
+the single process the same PDFKit functions run here. `[learning]` must
+be on on the Mac as well as the hub, or the spoke refuses both.
+
+**Closing a book is destructive and asked about.** `close_book` is behind
+the same spoken-yes gate as a send and journaled like one. It cancels the
+book's active tasks through the store so a late attempt writes nothing,
+deletes the book's `request` records first at the revisions it read them
+so a watch that derived from one fails its fence rather than reviving it,
+then deletes the rest of its records page by page, and unbinds the book
+and its study folder from the project. Every file stays: the PDF and the
+study folder are untouched. Closing an Atlas project reclaims none of a
+book's records; closing the book does.
+
+**Records are read by page, never as a namespace.** The store's
+`records()` takes a `prefix` and an `after` cursor and answers one page
+in key order; a page shorter than the limit is the end. Every scan the
+module makes pages to the end, so a namespace larger than one page is
+never silently cut at the limit. Since 2026-09-12 the store walks its own
+pages too — `all_records()` — and that is what the runner hands a step,
+what the Chart's rosters and summaries read, and what the readings and the
+watched paths are gathered from; a caller that took one page for the whole
+set was wrong the day the set outgrew it.
+
+**Prepare a chapter, under a grant.** Since 2026-09-10 (milestone 2),
+"prepare chapter 3" queues the chapter's worksheets and nothing else
+happens in the turn. `prepare_chapter` takes the chapter's PDF pages
+from the book's outline, or from your words when the outline does not
+place it (`pages 120-171` as printed, `pdf pages 130-181`), refuses more
+than `max_pages_per_chapter`, and cuts the range into tasks with the
+estimator: a window of `pages_per_call` pages costs one text call and,
+for items with notation, `ceil(pages_per_call / pages_per_image_call)`
+image calls, a quarter is held in reserve, and no task exceeds
+`[tasks].max_model_calls` — whole sections while they fit, a long
+section by page range. One `request` record per task and a `chapter`
+record are written, and the tool says queued. Nothing runs without the
+standing grant **Worksheets and feedback under the study folder**,
+offered under Tasks → Standing grants with one target per registered
+book; without it the tool says so and queues nothing. Its yes starts a
+watch task that, every `poll_s`, derives one reading task per request
+under the mandate.
+
+**The learning steps run beside the conversation.** Since 2026-09-10,
+with `[learning].background = true` (the default), every learning task —
+preparation, review, hint, question, grading — is taken by a runner of
+its own: the same store, the same fencing, checkpoints, grant, journal,
+and notices, but its own lease and its own extraction client, ticked
+every second from the loop whether or not the room is quiet. The
+ladder's runner leaves those operations alone, your voice never
+interrupts a learning step and never waits behind one, and at most one
+learning call runs beside your conversation, so spend can double while
+both are busy and a window's page images are rendered on the Mac during
+your session. While a step runs it is on the Chart's roster of work in
+progress, as study work, with the task's outcome and the chapter, window,
+or sheet it is on; between steps there is nothing to show, and the tasks
+themselves are in the Chart's Tasks section. Off, the learning steps
+queue behind the ladder like every other task and run only in a quiet
+room, which was how the first live chapter sat unread through a whole
+session.
+
+A reading task takes its pages in windows that overlap by one page. Each
+step is one model call, checkpointed: the window's text extraction, then
+one step per chunk of page images, so a timeout costs one
+call and the runner's step bound covers it. The text call returns the theorems, lemmas,
+propositions, corollaries, and explicitly defined terms on those pages
+with their numbering, hypotheses, and page, and, on the first window,
+the chapter's stated conventions. Then every item whose statement
+carries notation, or whose reading was unsure, is re-read from greyscale
+page images rendered on the Mac at `render_dpi` (stepped down to fit
+`max_image_bytes`), `pages_per_image_call` pages a call with its own
+`image_call_budget_usd`, and the image reading is kept; `images =
+"always"` reads every window that way for a scanned book, and the image
+reading then discovers the items itself, as it does for any window whose
+text layer is empty; `"never"` reads none.
+A statement that continues past a window is provisional until the next
+window reads it whole; two whole readings keep the more confident. A
+page the model could not read is flagged, never invented. A step that
+finds the Mac away — a page to read, an image to render, a sheet to
+check — checkpoints with `mac_retry_s` and spends no attempt; a task is
+never parked on the Mac's absence, and the watch resumes one that was. Items are
+`item` records with ids in the reader's grammar (`thm-3.21`,
+`def-3-null-space`); a definition's own text is private reference for
+the reviews of the next milestone and is never written to a sheet. When
+every window of a chapter is read, the watch derives one publishing task:
+two mutations under the grant, `Definitions/chapter-03.tex` and
+`Theorems/chapter-03.tex` under the study folder, each planned as a new
+file, written by the spoke's `learning.publish` (an owner-only temporary
+file linked into place, so an existing name is refused and nothing is
+ever replaced), and verified by reading it back through the workbench.
+The completion's notice says the chapter is prepared; `inspect_task` and
+the Chart's Tasks section show the chapter's windows, items, flagged
+pages, and sheets. A prepared chapter is reopened, never regenerated;
+`replace = "true"` at your word writes new sheets under the next version
+number (`chapter-03.v2.tex`), rendered from the items on record without
+reading a page again, and a name that turns out to be taken when the
+write is planned takes the number after it. Every statement, title,
+convention, and question passes through a typesetting pass on the way to
+the sheet: Unicode math becomes LaTeX commands, stray math is set in
+math, and the specials are escaped, so a sheet compiles under pdflatex
+whatever the model wrote.
+
+A sheet is written in the environments the readers already read: each
+item a `namedquestion` whose argument is its id, the statement or the
+term with its PDF page, and an empty `framed` box to write in; the
+theorems sheet opens with the conventions the chapter states. So
+`project_progress` reads a sheet back with stable ids, and the readers
+now return each answer isolated exactly, with its file, character
+offsets, and text, so an edit to a statement leaves an answer's hash
+unchanged. The generated sheets compile with `latexmk -pdf
+-no-shell-escape`; Ciel never runs LaTeX on your files.
+
+**Check my definitions.** Since 2026-09-10 (milestone 3), `check_sheet`
+queues a review of a prepared chapter's sheet, all the written boxes or
+the ids you name. The sheet is read in the turn only to see there is
+something written: every box empty is said and nothing is queued, an id
+not on the sheet is said with the ones that are, and a review past its
+allowance names the items left for another request. The review runs
+under the same grant, beside the conversation. Its first step reads the
+sheet as saved then, follows includes within the study folder, and takes
+a *snapshot*: each written answer isolated by the reader, with its hash,
+kept in records; empty boxes are named, not reviewed, and every item's
+current hash lands on its `progress` record. Its assessment steps take
+`ITEMS_PER_ASSESS` answers a call, each held to the book: the theorem's
+statement or, for a definition, the book's own definition as private
+reference, the chapter's conventions, and the answer, all as quoted
+data. A verdict is *assessed correct*, *needs revision*, or *uncertain*;
+findings name a missing hypothesis, an invalid step, or a gap in one
+sentence each and never how to fix it, a definition equivalent in other
+words and a proof by another route are accepted, and a finding that
+repeats the book's words is withheld. A review interrupted by your voice
+is requeued and assesses the same snapshot. The feedback is a new
+numbered Markdown file beside the sheet, `chapter-03.feedback-001.md`,
+that says it is a model's assessment and not a verification and gives
+each answer's hash; it is written under the grant like a sheet, read
+back, and the completion's notice says so. Then each item's `progress`
+record takes the verdict with the hash it assessed and keeps what stood
+before in a bounded history, and the snapshot is deleted. The sheet
+itself is never edited.
+
+**Where a sheet stands, by hash.** `study_status` and `read_feedback`
+read a prepared sheet afresh and compare each answer's hash with the one
+its verdict assessed: an answer edited since reads as *stale* with its
+verdict kept, one never reviewed as *written but not reviewed*, an empty
+box as *empty*. `read_feedback` returns the latest feedback file with
+that standing, for Ciel to speak the verdicts and the named gaps when
+you ask; it never argues the mathematics or supplies a step.
+
+**Hints and reveals, only on your word.** `study_hint` queues one hint
+on one item: its own isolated call that sees the statement or the
+private definition, the conventions, and your attempt so far, and
+returns one nudge of at most two sentences naming no step, no object,
+and none of the book's words; a hint that would repeat the book's words
+is replaced by a plainer one. It lands as `chapter-03.hint-001.md` beside
+the sheet and is recorded as assistance on the item. `reveal_answer`
+answers at once and calls no model: a definition is the book's own words
+from the record, a theorem is where the book proves it; the item is
+recorded as revealed and no longer counts as your own work. Neither is
+ever called on Ciel's own judgement.
+
+**Practice and mock midterms.** Since 2026-09-10 (milestone 4),
+`practice` queues one question by default on a topic at a difficulty,
+drawn from the prepared chapters up to your bookmark unless you name a
+range, and `mock_exam` queues a midterm: five problems mixing
+definitions, examples or counterexamples, and proofs, sixty minutes, one
+hundred points, changed at your word. A bound syllabus, assignment set,
+or sample exam calibrates a midterm and its sheet says so; without one
+the sheet says *book-based practice* and never claims to match an
+instructor. Each question is its own task under the grant, three calls:
+one writes the question, a private solution, and a rubric from the
+book's material; one solves the question alone, listing any assumption
+it needed; one referees both and releases only a question whose
+assumptions are consistent, whose solutions agree, and whose rubric
+credits the independent route. A rejected draft is written once more;
+one rejected twice is withdrawn and the sheet says so. When every
+question is settled the watch derives the publishing task, and the sheet
+lands under `Problems` (`practice-001.tex`, `midterm-001.tex`) with the
+header and each problem in a `namedquestion` with an empty box.
+Solutions and rubrics live only on the `question` records: never on a
+sheet, in the notebook, in task evidence, or in a notice. A hint during
+an exam is written beside the sheet and recorded on the set; a reveal
+is refused while the set is open and, after the grade, gives the
+solution from the record and marks the problem.
+
+**Submission is a snapshot in records.** `submit_exam` reads the sheet
+and every include it names within the study folder, keeps them whole as
+`submission` records with the hash before it acknowledges anything, and
+refuses a submission past `max_submission_chars` rather than truncating
+it. An include it cannot read, one outside the study folder, or one too
+deep refuses the submission by name, so a final submission is never
+missing an answer's file; a commented-out include is no dependency. A submission is final. Grading runs in the background and reads
+the records, never the sheet again, so a later edit to the sheet, an
+include, or the courtesy copy changes nothing; a restart between
+submission and grading grades the same snapshot, and a submission made
+without the grant is kept while grading waits for it. The grading task
+first publishes the courtesy copy `midterm-001.submitted.tex`, then
+grades up to `PROBLEMS_PER_GRADE` whole problems a call within the
+extraction bound, with partial credit per rubric criterion and an
+explanation that says what earned credit and what was missing (one that
+repeats the solution is withheld); a problem too long for one call is
+said to be ungraded and kept out of the total, never graded from a
+prefix. It then publishes `midterm-001.grade-001.md` with each problem's score, the
+total, and the assistance recorded. `read_feedback` with a set returns
+the grade file for speaking; `study_status` lists the sets.
+
+`scripts/eval_learning.py` runs the review, hint, and referee prompts
+against the real model on a small set of cases with the verdict expected
+and the spoiler that must not appear; it costs money, is run by hand
+before milestones 3 and 4 are called done, and is never in the probe
+list. Its cases await an independent check.
+
+`scripts/probe_learning.py` drives all of it with hand-built PDFs, a fake
+extractor, and temporary stores, including a full chapter run through
+the real runner, its review, hints, and reveals, and a practice set and
+a midterm written, refereed, submitted, and graded; the wire rides in
+`probe_tool_rpc.py`, the paging in `probe_tasks.py`, the images in
+`probe_extraction.py`, the ids and spans in `probe_readers.py`, the
+roles in `probe_atlas.py`, and the registry and the gate in
+`probe_turns.py`.
+
+```toml
+[learning]
+enabled = false
+study_root = "~/Berkeley/Math"   # <study_root>/<class-or-subject>/Reading/<book-and-edition>/
+search_roots = ["~/Berkeley"]     # where find_book may look: under home, never ~/.ciel
+max_search_results = 10           # candidates offered; the owner chooses
+max_search_files = 2000           # PDFs one search looks at before it stops and says so
+max_pdf_bytes = 100_000_000       # a book past this is refused, not partially read
+max_labels = 2000                 # printed page labels kept with a book; past this, printed pages are asked for as PDF pages
+pages_per_call = 6                # pages one text window covers; windows overlap by one page
+pages_per_image_call = 3          # pages one image re-read carries
+images = "notation"               # "notation" | "always" (a scanned book) | "never"
+render_dpi = 110                  # greyscale page images for the model, stepped down to fit max_image_bytes
+max_image_bytes = 400_000
+image_call_budget_usd = 0.75      # the spend ceiling for a call that carries images
+max_pages_per_chapter = 80        # past this, say a narrower page range
+max_items_per_chapter = 200       # statements and terms one chapter keeps; more is flagged
+poll_s = 30.0                     # between the watch's looks at the requests
+mac_retry_s = 120.0               # a step that found the Mac away tries again after this; nothing parks
+exam_minutes = 60                 # a mock midterm's defaults; an explicit change is honoured
+exam_points = 100
+exam_problems = 5
+max_submission_chars = 400_000    # a submission past this is refused, never truncated
+publications_per_day = 40         # the grant's window; [tasks].max_grant_per_window caps it
+grant_lifetime_s = 2592000        # thirty days; [tasks].max_grant_lifetime_s caps it
+```
 
 ## Independent action (planned)
 
@@ -2033,11 +2630,11 @@ is an abandoned attempt, never a prompt to the conversational client.
 
 The implementation follows the [stage-two plan](design/2026-09-07-task-controls-plan.md)
 and its [review](reports/2026-09-07-task-controls-plan-review.md). Task attendance
-means a live private owner turn on any lane, not physical room presence. An
-owner Discord DM qualifies; public channels, reflection, and Vigil do not.
+means a live private owner turn on any lane, not physical room presence.
+Public turns, reflection, and Vigil do not qualify.
 Diagnostic speaker bypass and an enabled voice gate with no profile confer no
-task authority. Admitted local input, the spoke, Chart, and the configured
-Discord owner map to one stable `[tasks].owner`; do not change that principal to
+task authority. Admitted local input, the spoke, and the Chart map to one
+stable `[tasks].owner`; do not change that principal to
 switch identities in an existing store.
 
 The SDK gives in-process tools arguments alone. The Brain installs immutable
@@ -2045,9 +2642,11 @@ owner context only after draining all owed results, and revokes it at turn end
 or interruption. A turn starting with drain debt has no task authority and
 reports controls unavailable. A worker checks the captured authority through
 commit; cancellation cannot turn a queued stale callback into a new owner's
-operation. Private sessions stay warm. Public Discord audiences use a separate
-client with public web tools, no private MCP tools or prompt context, and no
-persisted resume; changing public channels starts a fresh public history.
+operation. Private sessions stay warm. A public audience — no lane produces
+one since the Discord lane was retired on 2026-09-11, but the rule is kept
+for the next one — uses a separate client with public web tools, no private
+MCP tools or prompt context, and no persisted resume; changing public
+audiences starts a fresh public history.
 
 Chart's **Tasks** section uses private, addressed requests and the same controller
 as the tools. It shows waits, questions, history, and evidence, including the
@@ -2067,8 +2666,8 @@ requires its token even for loopback peers. Spoke-seat task frames are refused;
 the interview room has no task route.
 
 Chart mints each message's ID and keeps it in the resend ledger; ack `seq` is
-not identity across tabs. The spoke keeps `say_id`, Discord keeps its message
-IDs, and local input gets a fresh ID. Ordered ingress IDs survive batching and
+not identity across tabs. The spoke keeps `say_id`, and local input gets a
+fresh ID. Ordered ingress IDs survive batching and
 reopen. A retry resolves its saved task or a conflict, never a second mandate.
 A mixed batch containing consumed and new IDs conflicts as a whole; repeat the
 new part alone. The model cannot split one batch into several tasks.
@@ -2236,7 +2835,7 @@ receives the same 30 ms mono microphone frames. `webrtc_capture_delay_ms` holds
 capture by 40 ms by default so device buffering does not put the echo ahead of
 its reference. It accepts multiples of 10 from 0 to 200 and adds that amount
 to input latency. Neither queue drains nor Stop resets the adaptive filter.
-Mute retains protected capture, but that capture no longer ducks playback.
+Mute closes capture altogether — the helper, the tap, and the idle clock stream — and the unmute starts them again.
 Automatic gain control and separate noise suppression remain off in this route;
 AEC3 includes a microphone high-pass filter and residual echo suppression.
 
@@ -2245,6 +2844,12 @@ Only system-default devices are supported: remove explicit `input_device` and
 the paired capture rate must be between 16 and 96 kHz. A route change, stopped
 reference, or malformed stream ends protected capture visibly; it never falls
 back to raw automatic listening. Launchd restarts the spoke for those failures.
+A pair that does not open at all is instead tried again inside the running
+spoke (`open_retry_max_s`, in the spoke section), and the failure names what
+the helper did before the deadline — never reported its format, or reported
+it and delivered no paired audio — and repeats whatever the helper wrote to
+stderr; a missing permission is offered as a possibility only when it wrote
+nothing, never asserted.
 A timing gap, full capture ring, or busy callback lock instead drops the affected
 mic and reference together. At the next gap boundary, the resampler and echo
 processor reset and queued mic audio is cleared inside the same spoke process.
@@ -2418,6 +3023,43 @@ Train **"hey ciel"**, not bare "Ciel". One-syllable wake words have much higher
 false-trigger rates; the two-syllable prefix gives the detector enough to work
 with. You'd still address it as Ciel.
 
+## What always-on listening costs
+
+The wake word is the one model that runs whether or not anyone is speaking,
+so it is the frame loop's idle cost: openWakeWord's melspectrogram and
+embedding networks every 80 ms and the `hey_jarvis` head on top of them.
+Measured 2026-09-12 on the spoke's Mac with synthetic room noise, that came
+to 38 ms of CPU per second, and a third of it was not inference. The library
+keeps ten seconds of audio in a deque of Python ints and, every 80 ms, turned
+the whole deque into a list to take its last 1,760 samples: a millisecond a
+call. Ciel's detector now replaces that one method on its own preprocessor
+with a walk from the deque's tail, 28 µs for the same samples in the same
+order (`audio/wake.py`). Another fifth was openWakeWord's own Silero gate,
+which the library runs *after* the wake model, so it saved no inference and
+only zeroed scores; it is off by default now (`wake.vad_threshold = 0`, with
+`0.3` giving it back), since the speech gate above already keeps a false
+wake from becoming a turn. Through the detector itself the two changes take
+the idle cost from 33 to 17 ms per second, and a synthesized wake fires on
+the same frame before and after. What remains is the embedding network,
+which is the design. Feeding the model 80 ms chunks instead of 30 ms frames was
+measured too and changed nothing: the library already accumulates frames
+before its expensive path.
+
+Gesture detection has a separate idle cost when snaps or claps are enabled.
+Measured 2026-09-13 with synthetic quiet-room noise, its frame loop went from
+11.3 to 2.7 ms of CPU per second of audio by doing envelope roots and peak
+eligibility a frame at a time and using ordinary floats inside the high-pass
+recurrence. The same 90 seconds of varied PCM produced bit-for-bit identical
+filter samples, envelopes, and observations. That is about one percentage point
+of one core saved, not a measurement of the whole spoke or macOS audio.
+The measurements and reproduction are in `reports/2026-09-13-audio-cpu.md`.
+
+With WebRTC capture, some always-on cost also belongs to macOS's shared audio
+service: Ciel keeps both its protected microphone and the silent output clock
+open. Other apps use that service too; its CPU percentage cannot be assigned
+to Ciel from a process list. The gesture optimization leaves echo protection,
+audio timing, and recognition thresholds in place.
+
 ## When the room seems deaf
 
 The spoke's log names the microphone it opened (`microphone open: MacBook
@@ -2574,7 +3216,7 @@ Each isolates one layer, so when something misbehaves you can tell which half to
 blame:
 
 ```bash
-uv run scripts/probe_input.py         # the microphone's silence watch, no mic
+uv run scripts/probe_input.py         # the microphone's silence watch and the ear shut by mute, no mic
 uv run --no-sync python scripts/probe_webrtc_audio.py # nonducking AEC3: pairing, speech retention, gap recovery, failures; no mic
 uv run --no-sync python scripts/probe_apple_audio.py # Apple audio: native build, framing, audible receipts, failures; no mic
 uv run --no-sync python scripts/probe_apple_audio.py --live # processed mic + short quiet tone; no recording
@@ -2592,6 +3234,12 @@ uv run --no-sync python scripts/probe_task_dispatch.py  # a mutation sent once: 
 uv run --no-sync python scripts/probe_task_notices.py # what is owed, the notifier and Vigil, receipts, the notice switch, the v6→v7 lift
 uv run --no-sync python scripts/probe_email_calendar.py # the inbox as data: normalization, the model held to the message, a preview through the runner, the owner's door
 uv run --no-sync python scripts/probe_email_calendar.py --live  # the real accounts on this host: read-only mail, one synthetic calendar event it removes
+uv run --no-sync python scripts/probe_nutrition.py   # atomic diary/history/receipts, source snapshots, arithmetic, dates, Undo, USDA setup/failure bounds; temporary state
+uv run --no-sync python scripts/probe_nutrition_wire.py # real SDK dispatcher, reviewed estimate fallback, Inverse source matrix, private sockets/media, reconnect, owner authority
+uv run --no-sync python scripts/probe_nutrition_photos.py # synthetic PNG/JPEG, private drafts, restart/quotas, queued extraction, cancellation, reviewed Save, image expiry
+uv run --no-sync python scripts/probe_nutrition_dashboard.py # complete-day trends, effective settings, gaps/coverage, weekly evidence, manual weight review/Undo
+uv run --no-sync python scripts/probe_nutrition_library.py # versioned defaults/recipes/batches, portions, separate projections, grouped Undo, historical scopes/quotas
+uv run --no-sync python scripts/probe_nutrition_planning_wire.py # real two-tab planning and scoped approvals, cancellation, reconnect, replay exclusion
 uv run --no-sync python scripts/probe_task_tools.py  # real SDK dispatcher, turn authority, cancellation, drain debt
 uv run --no-sync python scripts/probe_task_wire.py   # two private Chart sockets, controls, conflicts, reconnect, a draft and its private approval
 uv run --no-sync python scripts/probe_task_wire.py --live  # synthetic task states in Chart; temporary storage
@@ -2599,6 +3247,7 @@ uv run --no-sync python scripts/probe_turns.py       # lane contract, trusted in
 uv run --no-sync python scripts/probe_hub_imports.py # Linux imports and temporary task-store lifecycle
 uv run --no-sync python scripts/probe_shellguard.py  # confirmation and mutating command options
 uv run --no-sync python scripts/probe_reload.py      # the source watcher and its deadline
+uv run --no-sync python scripts/probe_config.py      # the loader: defaults, file, environment, refused spellings; temporary paths only
 uv run --no-sync python scripts/probe_shortcuts.py   # global Mac controls, note chord and backslash pair, lifecycle, interruption, mute
 uv run --no-sync python scripts/probe_notes.py       # private drafts, receipts, recent history, context, bounded dictation; temporary state only
 uv run --no-sync python scripts/probe_note_window.py # native bar: save, discard, Undo, Recent, Context, Dictate, focus and narrow layouts
@@ -2609,10 +3258,8 @@ uv run scripts/probe_closure.py       # Closure + Atlas: rotation, turn lock, at
 uv run scripts/probe_atlas.py         # Atlas bindings: ids, aliases, rename, resources, resolution, documents
 uv run scripts/probe_readers.py       # the readers: LaTeX by the template's environments, Markdown by headings
 uv run scripts/probe_project_watch.py # readings kept under a grant: the Mac's resource watcher and the project adapter
+uv run --no-sync python scripts/probe_learning.py # the learning module: places, hand-built PDFs, registering, bookmarks, closing; a fake Mac
 uv run scripts/probe_vigil.py         # Vigil: queue, policy, presence, the Witness guard
-uv run scripts/probe_discord.py       # the Discord lane's scripted checks
-uv run scripts/probe_discord.py --live  # connect for real and echo your DMs
-uv run scripts/probe_discord.py --send hi  # send one DM and exit
 uv run scripts/probe_web.py           # the GUI lane: queue, origin gate, mute relay, roster, files with a message
 uv run scripts/probe_web.py --live    # serve the real page and echo, no mic or model
 uv run scripts/probe_grants.py        # capability granting: catalog + surgery
@@ -2625,7 +3272,7 @@ uv run scripts/probe_location.py      # places, both sources, move notes
 uv run scripts/probe_location.py --live  # read where this Mac is right now
 uv run scripts/probe_world.py         # the world table: facts, freshness, the block, the relay
 uv run scripts/probe_wake_model.py ~/.ciel/models/hey_ciel.onnx  # qualify a custom wake model
-uv run scripts/probe_gestures.py      # the gesture ear: snaps, pairs, and its seat beside the wake word
+uv run --no-sync python scripts/probe_gestures.py # the gesture ear: filter continuity, snaps, pairs, and its seat beside the wake word
 uv run scripts/listen_gestures.py     # hear snaps and claps for real, with the numbers behind each verdict
 ```
 
@@ -2677,21 +3324,26 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `brain/` | Claude client, system prompt, sessions, guards, tools |
 | `memory/` | The durable file-backed store (Invariant) |
 | `proactive/` | Vigil — watchers, the event queue, the interruption policy |
-| `remote/` | The lanes away from the mic — Discord DMs (`discord.py`) and the loopback GUI (`web.py`) |
+| `remote/` | The lane away from the mic — Chart and the private nutrition page (`web.py`, `nutrition.html`), and the lane contract (`lane.py`) |
 | `messages/` | iMessage — reading the database, sending through Messages |
-| `journal.py` | Inverse — the action journal and snapshots, so actions can be undone |
+| `journal.py` | Inverse — the file/action journal and snapshots, joined with nutrition history by the action reader |
+| `nutrition.py` | One private SQLite food diary: source snapshots, allowance arithmetic, dates, receipts, conditional confirmation, and revision-checked Undo |
+| `nutrition_photos.py` | Private media and persistent photo drafts, finite queued extraction through the shared background runner, revision-fenced import, and image retention |
+| `nutrition_dashboard.py` | Bounded diary series and weekly evidence, completion/coverage-aware estimates, effective targets/expenditure, and observed weight means |
+| `nutrition_library.py` | Versioned saved foods, recipes and batches, separate plans/projections, atomic plan consumption, and scoped historical allowance recalculation |
 | `timers.py` | Timers and alarms, ringing or held while muted |
 | `music.py` | Spotify on the Mac, through one narrow AppleScript door |
 | `spotify.py` | Spotify Web API — browser login, search and Connect playback from the brain's host |
 | `projects.py` | Atlas — durable working state per project, bound to where the work lives |
 | `readers.py` | What a document says about where the work stands, read as data: LaTeX, Markdown |
 | `project_work.py` | The workbench: a bound document read within the project's folders and opened where the owner is; the project adapter keeping readings under a grant |
+| `learning.py` | The learning module: a book registered on a project, its bookmark in the owner's words, the Mac's search, PDF facts, page windows, and publication, the worksheets grant and its adapter reading a chapter in windows and writing its sheets, and closing a book |
 | `proactive/resources.py` | The resource watcher: a bound document changed on the Mac, reported by path and hash |
 | `email_calendar.py` | Events from email: the inbox as a source, a message as bounded data, candidates held to the message, and the preview adapter |
 | `tasks.py` | Private task records, atomic owner controls, questions, evidence, recovery, eligibility, abandonment, namespaced feature records, grant drafts, standing grants, mandates, derived work, dispatch intents, and approvals; the store dispatches nothing |
 | `task_context.py` | Turn authority captured by in-process tools and fenced through commit |
 | `task_controls.py` | Shared private owner controller, offline PR-watch validation, namespace registration, the grant form's drafts and approval, mandate and grant controls, the runtime-only derive path, and control journaling |
-| `task_runner.py` | The bounded runner: one step for the oldest eligible task, the adapter contracts for reads and for mutations, guarded dispatch, reconciliation, abandonment, and the human-input interrupt, and the notifier that hands owed notices to Vigil and records what came back |
+| `task_runner.py` | The bounded runner: one step for the oldest eligible task, the adapter contracts for reads and for mutations, guarded dispatch, reconciliation, abandonment, and the human-input interrupt; one shared background runner for learning/photos; and the notifier that hands owed notices to Vigil and records what came back |
 | `brain/extract.py` | One isolated model call per extraction: a client with nothing attached, the turn lease, and the schema checked twice |
 | `transcript.py` | Trace — the record of the path actually taken |
 | `reload.py` | Analytic Continuation — watch the source, re-exec, resume |

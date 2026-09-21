@@ -119,6 +119,7 @@ class Brain:
         self._public_audience: str | None = None
         self._public_active = False
         self._config = config
+        self._journal_available = journal is not None
         self._mac_tools = mac_tools
         """The hub's tools onto the user's Mac are registered: their shell
         gets the shell gate under its own name, their writes the journal."""
@@ -215,6 +216,10 @@ class Brain:
         # Mail from Ciel's own address: outward, irreversible, same gate.
         if config.mail.armed:
             gated.add("mcp__ciel__send_as_ciel")
+        # Closing a book deletes its records and cancels its tasks; the
+        # files stay, but the bookmark and the work's history do not.
+        if config.learning.enabled:
+            gated.add("mcp__ciel__close_book")
         # The capability grant is the escalation channel itself, so it gets
         # the gate before anything else does: no config changes on a bare
         # tool call, only on the user's spoken or texted yes. The revoke
@@ -276,17 +281,6 @@ class Brain:
             self._config.proactive.owner_handle
             and self._config.messages.enabled
             and self._config.messages.allow_send
-        ) or bool(self._remote_armed and self._config.discord.proactive)
-
-    @property
-    def _remote_armed(self) -> bool:
-        """Whether the Discord lane is configured to exist — the config
-        claim, not the connection state: the system prompt is built at
-        connect time, before (and regardless of) the gateway coming up."""
-        return bool(
-            self._config.discord.enabled
-            and self._config.discord.resolved_token()
-            and self._config.discord.owner_id
         )
 
     @property
@@ -382,7 +376,8 @@ class Brain:
                 read_only_outside=self._config.files.read_only_outside,
                 shell=self._shell_guard is not None,
                 confirmed_actions=self._tool_guard is not None,
-                undo=self._recorder is not None,
+                undo=self._journal_available,
+                nutrition=self._config.nutrition.enabled,
                 projects_index=self._projects_index_provider()
                 if self._projects_index_provider
                 else None,
@@ -405,18 +400,7 @@ class Brain:
                     self._away_outlet,
                     self._config.sections.email_on_opening,
                 ),
-                vigil_away=bool(
-                    self._config.proactive.owner_handle
-                    and self._config.messages.enabled
-                    and self._config.messages.allow_send
-                )
-                or bool(
-                    self._remote_armed and self._config.discord.proactive
-                ),
-                # Self-knowledge of the Discord lane, so "how do I reach
-                # you while I'm out?" gets an honest answer instead of a
-                # denial of the lane's existence.
-                remote=self._remote_armed,
+                vigil_away=self._away_outlet,
                 grants=self._config.grants.enabled,
                 # Armed, not merely enabled: the registry withholds the
                 # tool without a token, and the prompt must not promise it.

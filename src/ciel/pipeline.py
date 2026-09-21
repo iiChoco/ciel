@@ -16,10 +16,7 @@ settled yet, so don't declare the sequence converged), **Discontinuity**
 follow-up window — an open ball around the last turn, inside which no wake
 word is required), **Isomorphism** (the typed lane — a line on stdin is
 a structure-preserving image of a spoken turn: same brain, same session,
-same transcript, no audio on either side), **Parallel Transport** (the
-Discord lane — the same map carried along the path away from home: a DM
-from the pinned owner account is a turn, the reply rides back as a text,
-and confirmations travel the same road), and **Chart** (the web GUI — a
+same transcript, no audio on either side), and **Chart** (the web GUI — a
 local coordinate window onto the whole conversation: a loopback page that
 shows every lane live, takes typed turns of its own, and holds the mute
 switch for rooms that must stay quiet).
@@ -62,7 +59,6 @@ from ciel.notes import NoteWindow, save_note
 from ciel.config import SAMPLE_RATE, AudioConfig, Config
 from ciel.confirm import VoiceConfirmBroker
 from ciel.messages import MessagesClient, MessagesUnavailable
-from ciel.remote.discord import DiscordLink, RemoteUnavailable
 from ciel.remote.web import WebIndicator, WebLink
 from ciel.hub.rpc import RemoteBindings
 from ciel.hub.server import HubServer
@@ -92,6 +88,8 @@ from ciel.transcript import Transcript
 from ciel.turn import Attachment, TurnRequest, TurnSink, attachment_prompt, lane_spec, prompt_note, owner_origin
 from ciel.tasks import Origin
 from ciel.task_controls import TaskController
+from ciel.nutrition import NutritionController, OwnerContext
+from ciel.brain.tools.nutrition import bind_nutrition
 from ciel.task_runner import TaskNotifier, TaskRunner
 from ciel.brain.extract import AgentSdkExtractor
 from ciel.brain.tools.tasks import bind_tasks
@@ -113,7 +111,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _HUMAN_SOURCES = frozenset((
-    Source.CONFIRM, Source.TIMERS, Source.VOICE, Source.TYPED, Source.WEB, Source.REMOTE,
+    Source.CONFIRM, Source.TIMERS, Source.VOICE, Source.TYPED, Source.WEB,
 ))
 """The picks that interrupt a task step holding the model turn: every
 human lane, the confirmation gate, and the clocks. Vigil is not among them."""
@@ -333,38 +331,6 @@ class _SpokenTextSink(_TextSink):
             return
         self._ended = True
         self._server.send_spoke({"type": "turn.end", "turn_id": self.turn_id, "status": "done"})
-
-
-class _DiscordSink(_TextSink):
-    """Delivery for the Discord lane: the reply is *buffered* and sent as
-    one text rather than streamed — nobody is in the room to hear
-    sentences land, and ten notifications for one answer is nagging. A
-    deep-thought escalation sends an interim line, because a typing
-    indicator alone reads as a hang after the first thirty seconds."""
-
-    def __init__(self, pipeline: "Pipeline", send_here) -> None:
-        super().__init__(pipeline, confirm_send=send_here)
-        self._send = send_here
-        self._sentences: list[str] = []
-
-    async def escalation(self) -> bool:
-        try:
-            await self._send(
-                "Give me a moment — I want to think this through properly."
-            )
-        except RemoteUnavailable:
-            log.debug("could not text the escalation notice")
-        return True
-
-    async def reply(self, sentence: str) -> bool:
-        self._sentences.append(sentence)
-        self._flags()
-        return True
-
-    async def finish(self, started: float) -> None:
-        reply = " ".join(self._sentences).strip()
-        if reply:
-            await self._send(reply)
 
 
 class _VoiceSink:
@@ -657,9 +623,15 @@ class _WireSink:
 
     async def _confirm_send(self, text: str, *, listen: bool = False) -> None:
         self._confirms += 1
+        confirm_id = f"{self.turn_id}:{self._confirms}"
+        if listen:
+            # The broker accepts a spoke answer only under this id: the
+            # spoke's yes to a question already decided — transcribed
+            # late, delivered late — must not land on the next one.
+            self._p._confirm.expect(confirm_id)
         sent = self._server.send_spoke({
             "type": "confirm.request",
-            "confirm_id": f"{self.turn_id}:{self._confirms}",
+            "confirm_id": confirm_id,
             "text": text,
             "deadline_wall": time.time() + self._p._config.hub.confirm_timeout_s,
             "listen": listen,
@@ -845,8 +817,8 @@ class Pipeline:
             )
             self._speaker = build_speaker_gate(config.voice)
 
-        # The web GUI (Chart): a user lane like the typed deque and the
-        # Discord link, plus a *view* — every transcript row and state
+        # The web GUI (Chart): a user lane like the typed deque, plus a
+        # *view* — every transcript row and state
         # change is teed into it. Created before the tools on the hub,
         # whose Mac-bound tools bind the wire, and before the indicator so
         # the tee below can include it.
@@ -948,6 +920,9 @@ class Pipeline:
         """The run() player, held for exactly one cross-cutting need: the
         mute switch stopping a sentence already in the air."""
         self._mic: MicStream | None = None
+        self._ear_task: asyncio.Task[None] | None = None
+        """The microphone being closed for a mute or opened for an unmute."""
+        self._next_ear_try = 0.0
         """The run() microphone, for the drains the enactments do."""
         self._turn: asyncio.Task[None] | None = None
         """The turn in flight — audio-owning, re-raised via result()."""
@@ -1005,6 +980,13 @@ class Pipeline:
             and (config.shell.enabled or config.files.enabled),
             mac_snapshot=self._remote.mac.snapshot_file if self._remote is not None else None,
         )
+        self._nutrition_epoch = secrets.token_urlsafe(24)
+        self._nutrition_delivery: tuple[TurnRequest, TurnSink] | None = None
+        self._nutrition_sink_lock = asyncio.Lock()
+        self._nutrition = NutritionController(config, role=self._role, ask=self._confirm.ask, emit=self._nutrition_receipt)
+        bind_nutrition(self._nutrition, self._nutrition_context)
+        if self._web_link is not None:
+            self._web_link.bind_nutrition(self._nutrition, self._confirm)
         # The runner exists only where execution belongs — the hub in split
         # mode, the one process otherwise; the spoke is a different program
         # and never builds a Pipeline. Its adapters' namespaces are registered
@@ -1040,6 +1022,32 @@ class Pipeline:
             self._project_adapter = ProjectAdapter(self._projects, bench, work_limits, host=self._role, watch=watch)
             self._project_adapter.bind_store(lambda: self._task_controller.store, config.tasks.owner)
             feature_adapters.append(self._project_adapter)
+        self._learning_adapter: "LearningAdapter | None" = None
+        learning_on = config.learning.enabled and config.tasks.enabled and config.projects.enabled and self._projects is not None
+        if learning_on and config.tasks.runner:
+            # Chapters prepared under the worksheets grant: the Mac's books
+            # through the hub's remote or this machine, the sheets read back
+            # through the same workbench the readings use.
+            from ciel.brain.permissions import forbidden_names
+            from ciel.learning import LearningAdapter, Limits, library_for
+            from ciel.project_work import LocalWorkbench, RemoteWorkbench
+
+            assert self._projects is not None
+            sheet_bench: Any = RemoteWorkbench(self._remote.mac) if self._remote is not None else \
+                LocalWorkbench(state_dir=config.state_dir, forbidden=forbidden_names(config), terminal=config.projects.terminal)
+            self._learning_adapter = LearningAdapter(self._projects, library_for(config, self._remote), sheet_bench, config.learning,
+                                                     Limits(config.tasks.max_record_chars, config.tasks.max_model_calls, config.tasks.max_grant_children, config.tasks.max_grant_per_window, config.tasks.max_grant_lifetime_s), host=self._role)
+            self._learning_adapter.bind_store(lambda: self._task_controller.store, config.tasks.owner)
+            if not config.learning.background:
+                feature_adapters.append(self._learning_adapter)
+        background_adapters: list[Any] = []
+        if self._learning_adapter is not None and config.learning.background:
+            background_adapters.append(self._learning_adapter)
+        from ciel.nutrition_photos import PhotoAdapter, NAMESPACE as NUTRITION_NAMESPACE
+        self._photo_adapter = PhotoAdapter(self._nutrition.photos) if config.nutrition.enabled and config.nutrition.photo_analysis else None
+        if self._photo_adapter is not None:
+            background_adapters.append(self._photo_adapter)
+        self._background_runner: "TaskRunner | None" = None
         if config.tasks.enabled and config.tasks.runner:
             self._task_runner = TaskRunner(
                 config.tasks,
@@ -1049,12 +1057,60 @@ class Pipeline:
                 backend=AgentSdkExtractor(config.tasks.extraction_model or config.brain.model),
                 journal=self._journal,
             )
+            if background_adapters:
+                # One private lease serializes learning and photo analysis
+                # beside speech; neither feature starts a second model lane.
+                from ciel.task_runner import private_lease
+
+                self._background_runner = TaskRunner(
+                    config.tasks,
+                    lambda: self._task_controller.store,
+                    background_adapters,
+                    lease=private_lease(),
+                    backend=AgentSdkExtractor(config.tasks.extraction_model or config.brain.model),
+                    journal=self._journal,
+                    background=True,
+                )
+                self._task_runner.exclude(self._background_runner.served)
+        # The learning module's records need their namespace registered
+        # before the store opens, runner or not: without a runner there is
+        # no adapter to carry it, and books and bookmarks still need a store.
+        runners = [r for r in (self._task_runner, self._background_runner) if r is not None]
+        namespaces = tuple(n for r in runners for n in r.namespaces)
+        from ciel.learning import NAMESPACE as LEARNING_NAMESPACE
+        if learning_on and LEARNING_NAMESPACE not in namespaces:
+            namespaces = (*namespaces, LEARNING_NAMESPACE)
+        if config.nutrition.enabled and config.tasks.enabled and NUTRITION_NAMESPACE not in namespaces:
+            namespaces = (*namespaces, NUTRITION_NAMESPACE)
         self._task_controller = TaskController(
             config.tasks, self._journal,
-            namespaces=self._task_runner.namespaces if self._task_runner is not None else (),
-            setups=self._task_runner.setups if self._task_runner is not None else (),
+            namespaces=namespaces,
+            # Asked each time: a book registered after startup is a target the
+            # worksheets grant can name without a restart.
+            setups=(lambda: tuple(s for r in runners for s in r.setups)) if runners else (),
         )
         self._task_controller.bind_approval(self._approve_grant)
+        self._nutrition.photos.bind_tasks(self._task_controller)
+        if self._background_runner is not None:
+            self._nutrition.photos.cancel_running = self._background_runner.cancel_task
+        if config.nutrition.enabled and config.tasks.enabled:
+            self._task_controller.bind_feature(NUTRITION_NAMESPACE, PhotoAdapter.operations, summary=PhotoAdapter.summarize)
+        if learning_on:
+            from ciel.brain.tools.learning import bind_learning_tasks
+            from ciel.brain.tools.projects import bind_study
+            from ciel.learning import Limits, controls as learning_controls, library_for
+
+            assert self._projects is not None
+            adapter = self._learning_adapter
+            self._task_controller.bind_feature(
+                LEARNING_NAMESPACE, adapter.operations if adapter is not None else frozenset(),
+                controls=learning_controls(self._projects, library_for(config, self._remote), config.learning,
+                                           Limits(config.tasks.max_record_chars, config.tasks.max_model_calls, config.tasks.max_grant_children, config.tasks.max_grant_per_window, config.tasks.max_grant_lifetime_s), adapter,
+                                           adapter.bench if adapter is not None else None),
+                summary=adapter.summarize if adapter is not None else None, listing=adapter.listing if adapter is not None else None,
+                activated=adapter.activated if adapter is not None else None, mandate_changed=adapter.mandate_changed if adapter is not None else None)
+            bind_learning_tasks(self._task_controller, self._brain._task_authority.capture)
+            bind_study(self._study_lines)
         from ciel.project_work import ProjectAdapter
         for adapter in feature_adapters:
             from ciel.email_calendar import EmailCalendarAdapter, add_request, preview_request, roster
@@ -1067,7 +1123,7 @@ class Pipeline:
                     store = self._task_controller.store
                     if store is None:
                         raise ValueError('Tasks are unavailable.')
-                    records = await store.records(config.tasks.owner, adapter.namespace.name)
+                    records = await store.all_records(config.tasks.owner, adapter.namespace.name)
                     return add_request(config.email_calendar, str(args.get('candidate') or ''), records,
                                        end=str(args.get('end') or ''), timezone=str(args.get('timezone') or ''))
                 async def dismiss_candidate(store: Any, owner: str, args: dict[str, Any]) -> Any:
@@ -1078,7 +1134,7 @@ class Pipeline:
                     store = self._task_controller.store
                     if store is None:
                         raise ValueError('Tasks are unavailable.')
-                    records = await store.records(config.tasks.owner, adapter.namespace.name)
+                    records = await store.all_records(config.tasks.owner, adapter.namespace.name)
                     return approve_proposal_request(config.email_calendar, str(args.get('proposal') or ''), records)
                 self._task_controller.bind_feature(adapter.namespace, adapter.operations,
                                                    requests={'inbox_preview': ask_preview, 'inbox_add': ask_add, 'inbox_approve': ask_approve},
@@ -1094,7 +1150,7 @@ class Pipeline:
         # exists even where the runner does not, since a hub with no runner
         # still owes the notices it holds.
         self._task_notifier = TaskNotifier(config.tasks, lambda: self._task_controller.store, lambda: self._events)
-        self._task_controller.execution = self._task_runner is not None
+        self._task_controller.execution = self._task_runner is not None or self._background_runner is not None
         bind_tasks(self._task_controller, self._brain._task_authority.capture)
         if self._web_link is not None:
             self._web_link.bind_tasks(self._task_controller)
@@ -1188,14 +1244,6 @@ class Pipeline:
             self._world.observe(W.HOLD, self._hold_sentinel.exists(), source=self._who)
         self._calendar: CalendarWatcher | GoogleCalendarWatcher | None = None
         self._owner_messages: MessagesClient | None = None
-        # The Discord lane (Parallel Transport): a user lane like the typed
-        # deque, not a Vigil outlet — it exists whether or not the proactive
-        # layer does, because texting Ciel a question needs no watching.
-        self._remote_link: DiscordLink | None = (
-            DiscordLink(config.discord) if config.discord.enabled else None
-        )
-        if self._remote_link is not None:
-            self._remote_link.task_owner = config.tasks.owner
         # Where the user is: the tool works with or without Vigil (it reads
         # on demand); the watcher below only exists with it.
         self._locator: Locator | None = (
@@ -1296,17 +1344,13 @@ class Pipeline:
                 and config.messages.allow_send
             ):
                 # On the hub the text goes through the spoke's Messages.app;
-                # when the spoke is away, _run_proactive_message falls to
-                # Discord (the away ladder inverts with the Mac asleep).
+                # with the spoke away the send fails and the event is held
+                # for the next conversation (see _run_proactive_message).
                 self._owner_messages = (
                     self._remote.messages if self._remote is not None
                     else MessagesClient(config.messages)
                 )
-            away_armed = self._owner_messages is not None or (
-                self._remote_link is not None
-                and self._remote_link.armed
-                and config.discord.proactive
-            )
+            away_armed = self._owner_messages is not None
             log.info(
                 "vigil enabled (%d watcher%s%s)",
                 len(self._vigil_watchers),
@@ -1362,8 +1406,6 @@ class Pipeline:
             voice_pending=voice_pending,
             typed_pending=bool(self._typed),
             web_pending=self._web_link is not None and self._web_link.pending,
-            remote_pending=self._remote_link is not None
-            and self._remote_link.pending,
             vigil_ready=self._events is not None
             and self._events.pending
             and time.monotonic() >= self._next_policy_check,
@@ -1404,6 +1446,8 @@ class Pipeline:
                 self._config.audio, self._tts.sample_rate, muted=lambda: self._muted
             )
             self._player = player
+            if self._muted:
+                microphone.hold()  # muted before it started: the ear is never opened
             async with microphone as mic, player:
                 self._mic = mic
                 self._notes = NoteWindow(self._config.notes, self._save_note,
@@ -1468,6 +1512,8 @@ class Pipeline:
                         on_disk = self._mute_sentinel.exists()
                         if on_disk != self._muted:
                             self._set_muted(on_disk)
+                        if mic.paused != self._muted and now_wall >= self._next_ear_try:
+                            self._sync_ear()  # an unmute whose microphone would not open is tried again
 
                     if (
                         self._web_link is not None
@@ -1484,6 +1530,7 @@ class Pipeline:
                         self._world_tick()
                     if self._task_runner is not None:
                         self._task_runner.refresh(now_wall)
+                    self._tick_background(now_wall)
                     if self._task_notifier is not None:
                         self._task_notifier.poll(now_wall)
 
@@ -1506,13 +1553,17 @@ class Pipeline:
 
                         # Only sampled here: while idle and silent, what the
                         # microphone hears is the room itself.
+                        if mic.paused:
+                            continue  # a shut ear hands over silence; it is not the room's floor
                         self._track_noise_floor(frame)
                         # Muted, Ciel holds its name as well as its tongue:
                         # a false wake in a lecture hall costs exactly the
                         # attention mute was bought to avoid, and a true one
                         # could only start a conversation the speakers are
-                        # barred from finishing. The floor above still
-                        # tracks, so hearing is sharp the moment mute lifts.
+                        # barred from finishing. Since 2026-09-20 the ear is
+                        # shut as well (the microphone is closed, not merely
+                        # ignored), so this gate only covers the moments the
+                        # device takes to close.
                         if not self._muted and self._wake.push(frame):
                             if self._maintenance is not None and not self._maintenance.done():
                                 # Hasten whatever holds the maintenance slot
@@ -1588,6 +1639,8 @@ class Pipeline:
                 self._maintenance.cancel()
             if self._turn is not None and not self._turn.done():
                 self._turn.cancel()
+            if self._ear_task is not None and not self._ear_task.done():
+                self._ear_task.cancel()
             self._player = None
             self._mic = None
             await self._shutdown()
@@ -1627,11 +1680,11 @@ class Pipeline:
                 if ts >= asked and self._confirm.answer(line):
                     self._typed.popleft()
             if self._web_link is not None and asked is not None:
-                # A GUI message answers like a typed line, not
-                # like a Discord text: the chart binds loopback,
-                # so its user is at the machine and heard — or
-                # saw, as a ciel-confirm row — the question.
-                # Same predating rule as the keyboard.
+                # A GUI message answers like a typed line: the
+                # chart binds loopback, so its user is at the
+                # machine and heard — or saw, as a ciel-confirm
+                # row — the question. Same predating rule as the
+                # keyboard.
                 item = self._web_link.peek()
                 if (
                     item is not None
@@ -1639,26 +1692,6 @@ class Pipeline:
                     and self._confirm.answer(item[1])
                 ):
                     self._web_link.pop()
-            if (
-                self._remote_link is not None
-                and self._confirm.remote_active
-                and self._confirm.remote_origin == "discord"
-                and asked is not None
-            ):
-                # An owner text answers a *Discord-origin*
-                # question, under the keyboard's predating rule.
-                # Spoken-origin questions never accept remote
-                # answers (see remote_active), and web-origin
-                # ones don't either (see remote_origin): a yes
-                # to a question the answerer never saw is not
-                # an answer.
-                item = self._remote_link.peek()
-                if (
-                    item is not None
-                    and item[0] >= asked
-                    and self._confirm.answer(item[1])
-                ):
-                    self._remote_link.pop()
             if frame is not None:
                 self._confirm.feed(frame)
             return True
@@ -1733,31 +1766,6 @@ class Pipeline:
             line, _channel = batch
             self._turn = asyncio.create_task(self._handle_web_turn(line, origin=getattr(batch, "origin", None),
                                                                    attachments=getattr(batch, "attachments", ())))
-            return True
-
-        if source is Source.REMOTE:
-            # The Discord lane claims the turn slot — a user
-            # lane, so it outranks Vigil, but only from WAITING
-            # (the arbiter's rule: the room outranks the phone).
-            # Everything queued right now coalesces into one
-            # turn (people text in bursts; three turns for one
-            # thought answers the greeting with a paragraph).
-            if self._maintenance is not None and not self._maintenance.done():
-                # Same hastening as the typed lane: the remote
-                # turn serializes on the brain's lock.
-                self._unattended_hastened = True
-                await self._brain.interrupt()
-            self._state = State.BUSY
-            self._barge_run = 0
-            # Coalesces the head run of same-channel messages;
-            # a DM and a server mention never fuse into one
-            # turn — different audiences, different replies.
-            batch = self._remote_link.pop_batch()
-            assert batch is not None  # pending was just checked
-            line, channel = batch
-            self._turn = asyncio.create_task(
-                self._handle_remote_turn(line, channel, origin=getattr(batch, "origin", None))
-            )
             return True
 
         if source is Source.VIGIL:
@@ -1899,10 +1907,6 @@ class Pipeline:
                     self._web_link is not None
                     and self._web_link.pending
                 )
-                or (
-                    self._remote_link is not None
-                    and self._remote_link.pending
-                )
             ):
                 return False
             return True
@@ -1987,6 +1991,7 @@ class Pipeline:
                     self._world_tick()
                 if self._task_runner is not None:
                     self._task_runner.refresh(now_wall)
+                self._tick_background(now_wall)
                 if self._task_notifier is not None:
                     self._task_notifier.poll(now_wall)
 
@@ -2075,6 +2080,29 @@ class Pipeline:
         if self._resource_watcher is not None:
             self._resource_watcher.set_paths(paths)
 
+    def _tick_background(self, now_wall: float) -> None:
+        """The background runner's turn, every loop tick: ask the store, and
+        take a step when one is due, whatever the ladder is doing. It holds
+        no lease the conversation shares and no human lane waits on it."""
+        self._nutrition.photos.refresh(now_wall)
+        runner = self._background_runner
+        if runner is None:
+            return
+        runner.refresh(now_wall)
+        if runner.ready:
+            runner.start_step(now_wall)
+
+    async def _study_lines(self, project_id: str) -> list[str]:
+        """The books registered on one project with their bookmarks, for open_project."""
+        from ciel.learning import notebook_lines
+        store = self._task_controller.store
+        if store is None:
+            return []
+        try:
+            return await notebook_lines(store, self._config.tasks.owner, project_id)
+        except Exception:  # noqa: BLE001 - no books is an answer
+            return []
+
     async def _kept_readings(self, project_id: str) -> list[dict[str, Any]]:
         """The readings the store keeps for one project, newest first."""
         from ciel.project_work import NAMESPACE_NAME
@@ -2082,7 +2110,7 @@ class Pipeline:
         if store is None or self._project_adapter is None:
             return []
         try:
-            records = await store.records(self._config.tasks.owner, NAMESPACE_NAME)
+            records = await store.all_records(self._config.tasks.owner, NAMESPACE_NAME)
         except Exception:  # noqa: BLE001 - no readings is an answer
             return []
         found = [r.payload for r in records if r.payload.get("kind") == "reading" and r.payload.get("project") == project_id]
@@ -2311,45 +2339,6 @@ class Pipeline:
             _TextSink(self),
         )
 
-    async def _handle_remote_turn(self, text: str, channel=None, *, origin: Origin | None = None) -> None:
-        """One turn that arrived over the Discord link (Parallel Transport).
-
-        The typed lane's remote image: same brain, same session, same
-        transcript. The differences are where the user is. The reply is
-        *buffered* and sent as one text rather than streamed — nobody is
-        in the room to hear sentences land, and ten notifications for one
-        answer is nagging. Confirmations go over the link too
-        (``confirm.remote``): the person who must say yes is wherever
-        their phone is. And the transcript rows carry a remote speaker
-        label, because ``user`` rows are presence evidence and a remote
-        turn is evidence of exactly the opposite — Vigil must keep
-        treating the room as empty, or it starts speaking nudges to
-        nobody instead of texting them.
-
-        ``channel`` is where the reply belongs — the owner's DM (None
-        falls back to it), or the server channel an @mention came from.
-        A guild channel makes the turn *public*: the system note switches
-        to the discretion variant, and the held Vigil notes stay held —
-        they are the owner's private catch-up, not channel content.
-        """
-        assert self._remote_link is not None
-
-        async def send_here(reply_text: str) -> None:
-            assert self._remote_link is not None
-            await self._remote_link.send(reply_text, channel)
-
-        await self._run_turn(
-            TurnRequest(
-                lane="discord",
-                text=text,
-                origin=origin,
-                channel=channel,
-                public=getattr(channel, "guild", None) is not None,
-                arrival_wall=time.time(),
-            ),
-            _DiscordSink(self, send_here),
-        )
-
     async def _handle_web_turn(self, text: str, *, origin: Origin | None = None,
                                attachments: tuple[Attachment, ...] = ()) -> None:
         """One turn that arrived through the GUI (Chart).
@@ -2372,6 +2361,43 @@ class Pipeline:
             TurnRequest(lane="web", text=text, arrival_wall=time.time(), origin=origin, attachments=attachments),
             self._web_sink(),
         )
+
+    def _nutrition_context(self) -> OwnerContext | None:
+        binding = self._brain._task_authority.capture()
+        delivery = self._nutrition_delivery
+        if binding is None or delivery is None:
+            return None
+        request, _ = delivery
+        if request.public or request.origin is None or request.origin.request_id != binding.origin.request_id:
+            return None
+        if request.lane == "web":
+            session = self._web_link.nutrition_session(binding.origin) if self._web_link is not None else ""
+        elif request.lane == "voice" and isinstance(self._web_link, HubServer):
+            session = self._web_link._nutrition_sessions.get(self._web_link._spoke, "")
+        else:
+            session = self._nutrition_epoch + ":" + request.lane
+        if session:
+            session += ":" + str(binding.client_generation)
+        return OwnerContext(binding, session, attachments=request.attachments)
+
+    async def _nutrition_receipt(self, context: OwnerContext, receipt: dict[str, Any]) -> None:
+        # Private addressed frames never enter Chart's shared replay ring.
+        if self._web_link is not None:
+            self._web_link.nutrition_receipt(receipt)
+        if context.page:
+            return
+        print(f"  nutrition: {receipt['text']}", flush=True)
+        delivery = self._nutrition_delivery
+        if delivery is None or delivery[0].origin is None or delivery[0].origin.request_id != context.binding.origin.request_id:
+            return
+        _, sink = delivery
+        async with self._nutrition_sink_lock:
+            if sink.gate():
+                await sink.reply(receipt["text"])
+
+    async def _turn_output(self, sink: TurnSink, kind: str, sentence: str) -> bool:
+        async with self._nutrition_sink_lock:
+            return await (sink.thinking(sentence) if kind == "thinking" else sink.reply(sentence))
 
     async def _approve_grant(self, question: str, send: Any) -> bool:
         """The Chart's grant approval: the broker's question, shown on the one
@@ -2412,6 +2438,9 @@ class Pipeline:
         lanes handle their own here, shaped per lane.
         """
         spec = lane_spec(req)
+        if not hasattr(self, "_nutrition_sink_lock"):
+            self._nutrition_sink_lock = asyncio.Lock()
+        self._nutrition_delivery = (req, sink) if not req.public else None
         self._indicator.set_state("thinking")
         # A turn that never actually speaks must not open a follow-up
         # window; the voice sink sets it back the moment audio plays.
@@ -2469,11 +2498,6 @@ class Pipeline:
                             sink.confirm_send, origin=confirm_origin
                         )
                     )
-                if req.lane == "discord":
-                    assert self._remote_link is not None
-                    await stack.enter_async_context(
-                        self._remote_link.typing(req.channel)
-                    )
                 # aclosing is load-bearing, not tidiness: ask() holds the
                 # brain's turn lock, and a break below abandons the
                 # generator — without an explicit close, the lock stays
@@ -2481,7 +2505,7 @@ class Pipeline:
                 # reflection) deadlocks behind it.
                 turn_args = {}
                 if req.public:
-                    turn_args['public_audience'] = f'discord:{getattr(req.channel, "id", id(req.channel))}'
+                    turn_args['public_audience'] = f'{req.lane}:public'
                 elif req.origin is not None:
                     turn_args['origin'] = req.origin
                 if images and not req.public:
@@ -2501,12 +2525,12 @@ class Pipeline:
                     if kind == "thinking":
                         print(f"  ciel (thinking): {sentence}")
                         self._record("ciel-thinking", sentence)
-                        if not await sink.thinking(sentence):
+                        if not await self._turn_output(sink, "thinking", sentence):
                             break
                     else:
                         print(f"  ciel: {sentence}")
                         self._record("ciel", sentence)
-                        if not await sink.reply(sentence):
+                        if not await self._turn_output(sink, "reply", sentence):
                             break
             await sink.finish(started)
             if spec.log_name == "remote":
@@ -2523,15 +2547,6 @@ class Pipeline:
                     time.monotonic() - started,
                     self._brain.last_turn_cost_usd,
                 )
-        except RemoteUnavailable as exc:
-            if req.lane != "discord":
-                raise
-            # The turn ran; only delivery failed. Logged, not retried — the
-            # link reconnects on its own, and the user will ask again the
-            # moment they notice silence. The transcript already holds the
-            # undelivered reply.
-            log.warning("remote reply undeliverable (%s)", exc)
-            self._record("event", "remote reply undeliverable")
         except Exception:
             if req.lane == "voice":
                 raise
@@ -2558,6 +2573,7 @@ class Pipeline:
             # as the turn's delivery ends, so the "starting now" the user
             # just heard is when the count actually starts. Guarded — a
             # failed persist must not crash the loop.
+            self._nutrition_delivery = None
             await sink.cleanup()
             if self._timers is not None:
                 try:
@@ -2595,8 +2611,6 @@ class Pipeline:
             self._indicator.set_state("speaking")
             assert isinstance(sink, (_VoiceSink, _WireSink))
             await sink.play_reply(reply)
-        elif req.lane == "discord":
-            await sink.confirm_send(reply)
 
     def _active_agents(self) -> list[dict]:
         """The roster of everything working on the user's behalf right now,
@@ -2621,6 +2635,26 @@ class Pipeline:
                 "since": since,
                 "until": None,
             })
+        for runner, name in ((self._background_runner, "background"), (self._task_runner, "task")):
+            # A task step in flight is work with an end: the learning
+            # module's reading of a chapter beside the conversation, or the
+            # ladder's one bounded step. Between steps there is nothing to
+            # show; the tasks themselves live in the Chart's Tasks section.
+            current = runner.current if runner is not None else None
+            if current is not None:
+                task, since = current
+                step = task.next_step
+                if runner.background:
+                    name = "study" if step.operation.startswith("learning.") else "photo"
+                where = ", ".join(f"{k} {v}" for k, v in step.arguments if k in ("chapter", "window", "chunk", "set", "n", "sheet"))
+                agents.append({
+                    "id": f"{name}-{task.id[:8]}",
+                    "kind": "study" if step.operation.startswith("learning.") else "task",
+                    "label": task.specification.outcome,
+                    "detail": step.operation + (f" ({where})" if where else ""),
+                    "since": since,
+                    "until": None,
+                })
         if self._work_watcher is not None:
             for w in self._work_watcher.active():
                 agents.append({
@@ -2726,6 +2760,7 @@ class Pipeline:
             # Whatever is mid-sentence stops now: the switch was flipped
             # because the room needs silence, not silence-after-this-line.
             self._player.stop()
+        self._sync_ear()
         notice = (
             "muted — Ciel will stay silent and not listen for its name"
             if muted
@@ -2739,6 +2774,30 @@ class Pipeline:
             self._web_link.note_muted(muted)
         if self._world is not None:
             self._world.observe(W.MUTED, muted, source="spoke" if from_spoke else self._who)
+
+    def _sync_ear(self) -> None:
+        """Bring the microphone to where the mute switch is: muted means the
+        device is closed, not captured-and-ignored. The hub has no ear and
+        does nothing here. One task at a time, and it looks at the switch
+        again when it finishes, so a quick mute-unmute-mute ends shut.
+        """
+        if self._mic is None or (self._ear_task is not None and not self._ear_task.done()):
+            return
+        self._ear_task = asyncio.create_task(self._move_ear(self._mic))
+
+    async def _move_ear(self, mic: MicStream) -> None:
+        while mic.paused != self._muted:
+            if self._muted:
+                await mic.pause()
+                log.info("microphone closed for mute")
+                continue
+            try:
+                await mic.resume()
+            except Exception as exc:  # noqa: BLE001 - any failure to open is tried again
+                self._next_ear_try = time.time() + 5.0
+                log.error("the microphone did not open after the unmute (%s) — trying again in 5 s", exc)
+                return
+            log.info("microphone open again after the unmute")
 
     def _set_speak_back(self, on: bool) -> None:
         """Move the speak-back switch — from the Chart's VOICE chip or the
@@ -2989,8 +3048,7 @@ class Pipeline:
             presence=self._presence_now(),
             spoken_today=self._events.spoken_count(today),
             messaged_today=self._events.messaged_count(today),
-            can_message=self._owner_messages is not None
-            or self._remote_messaging(),
+            can_message=self._owner_messages is not None,
             now=now,
             local_minutes=local.tm_hour * 60 + local.tm_min,
         )
@@ -3211,18 +3269,6 @@ class Pipeline:
             )
         return "\n\n".join(parts)
 
-    def _remote_messaging(self) -> bool:
-        """Whether the Discord link can carry an away text *right now* —
-        opted in via ``discord.proactive`` and actually connected, so a
-        dropped gateway reads as no outlet rather than a text into the
-        void. Consulted at decision time on purpose: armed-in-config is a
-        startup claim, deliverable-now is a per-event fact."""
-        return (
-            self._remote_link is not None
-            and self._config.discord.proactive
-            and self._remote_link.can_send
-        )
-
     async def _run_proactive_message(self, event: ProactiveEvent) -> None:
         """One unattended turn whose outlet is a text to the owner.
 
@@ -3231,38 +3277,22 @@ class Pipeline:
         ``mcp__ciel__send_message`` stays denied inside it — because the send
         below is pipeline-owned: the model composes words; deterministic
         code decided a message happens, and config decided to whom. The
-        recipient is pinned either way — the iMessage handle or the Discord
-        owner id — with iMessage keeping priority when both are armed. The
-        texting budget is charged only after the send succeeds.
+        recipient is pinned: the iMessage handle in config. On the hub the
+        send rides through the seated spoke's Messages.app, so a Mac that
+        is asleep means a failed send and a held event, not a text into
+        the void. The texting budget is charged only after the send
+        succeeds.
         """
-        assert self._events is not None and (
-            self._owner_messages is not None or self._remote_link is not None
-        )
+        assert self._events is not None and self._owner_messages is not None
         print(f"\n  [proactive → text: {event.summary}]", flush=True)
         self._record("event", f"proactive (text): {event.summary}")
         reply = await self._compose_unattended(event, outlet="message")
         if reply is None:
             return  # already routed (declined, held, timed out, hastened)
         try:
-            imessage_reachable = self._owner_messages is not None and (
-                self._role != "hub"
-                or (isinstance(self._web_link, HubServer) and self._web_link.spoke_connected)
+            await self._owner_messages.send(
+                self._config.proactive.owner_handle, reply
             )
-            if imessage_reachable:
-                assert self._owner_messages is not None
-                await self._owner_messages.send(
-                    self._config.proactive.owner_handle, reply
-                )
-            elif self._remote_link is not None and self._remote_link.can_send:
-                # The Mac is asleep (no spoke), so the phone's iMessage
-                # can't be reached through it: Discord carries the text.
-                await self._remote_link.send(reply)
-            elif self._owner_messages is not None:
-                await self._owner_messages.send(
-                    self._config.proactive.owner_handle, reply
-                )
-            else:  # unreachable behind the assert; kept for the type story
-                raise MessagesUnavailable("no away outlet armed")
             print(f"  ciel (texted): {reply}", flush=True)
             self._record("ciel", f"[proactive text] {reply}")
             self._events.mark_messaged(
@@ -3278,11 +3308,11 @@ class Pipeline:
             # means at-least-once, which beats silently never.
             self._events.hold(event)
             raise
-        except (MessagesUnavailable, RemoteUnavailable) as exc:
+        except MessagesUnavailable as exc:
             # The send path refused (switch off, handle malformed, osascript
-            # failure, a Discord link that dropped between decision and
-            # send). The event is still owed: held for the next
-            # conversation, and the reason is in the log, not a guess.
+            # failure, no spoke seated to carry it). The event is still
+            # owed: held for the next conversation, and the reason is in
+            # the log, not a guess.
             log.warning("away text failed (%s) — holding the event", exc)
             self._record("event", "proactive (text): send failed")
             try:
@@ -3985,6 +4015,7 @@ class Pipeline:
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     async def _startup(self) -> None:
+        await self._nutrition.start()
         await self._task_controller.start()
         started = time.monotonic()
         # Whisper, the wake model, and the Agent SDK subprocess all take
@@ -4005,10 +4036,6 @@ class Pipeline:
             startup.append(self._speaker.warm_up())
         if self._watcher is not None:
             startup.append(self._watcher.start())
-        if self._remote_link is not None:
-            # Spawns the gateway task and returns; a bad token or missing
-            # dependency is one warning, never a blocked greeting.
-            startup.append(self._remote_link.start())
         if self._web_link is not None:
             # Binds loopback and returns; a taken port or missing
             # dependency is one warning, never a blocked greeting.
@@ -4091,8 +4118,6 @@ class Pipeline:
             closers.append(self._speaker.close())
         if self._watcher is not None:
             closers.append(self._watcher.close())
-        if self._remote_link is not None:
-            closers.append(self._remote_link.close())
         if self._web_link is not None:
             closers.append(self._web_link.close())
         closers.extend(w.close() for w in self._vigil_watchers)
@@ -4102,10 +4127,16 @@ class Pipeline:
         await asyncio.gather(*closers, return_exceptions=True)
         if self._task_runner is not None:
             await self._task_runner.close()
+        if self._background_runner is not None:
+            await self._background_runner.close()
         if self._task_notifier is not None:
             await self._task_notifier.close()
         await self._task_controller.close()
+        await self._nutrition.close()
+        bind_nutrition(None, lambda: None)
         bind_tasks(None, lambda: None)
+        from ciel.brain.tools.learning import bind_learning_tasks
+        bind_learning_tasks(None, lambda: None)
         if self._world is not None:
             self._world.flush()
         if self._transcript is not None:

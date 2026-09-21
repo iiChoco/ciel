@@ -1,6 +1,6 @@
 """Probe the hub's imports — would it start on a machine with no Mac in it?
 
-    uv run scripts/probe_hub_imports.py
+    uv run --no-sync python scripts/probe_hub_imports.py
 
 The hub is meant for a Linux server: no sound device, no VAD library,
 no Metal, no pyobjc, no EventKit. This runs a child interpreter with an
@@ -8,7 +8,9 @@ import hook that refuses every one of those modules by name — the
 audio stack, the Mac frameworks, the speech models — and then imports
 the hub's modules and constructs ``Pipeline(config, role="hub")`` with a
 throwaway state directory. Construction opens no task store; a separate async fixture opens and closes
-the enabled store and retains the disabled case. Every default home path,
+the enabled store and retains the disabled case. Nutrition and learning use
+one background runner; nutrition's namespace remains registered when that
+runner is paused, and photo drafts still open. Every default home path,
 including memory, resolves inside the temporary fixture. Construction builds: it builds
 the tool registry, the brain (unconnected), the broker, the server, and
 Vigil's queue and policy, which is everything the hub touches before
@@ -87,6 +89,36 @@ if what == "hub":
                 assert disabled._task_controller.store is None
                 await disabled._task_controller.close()
                 print("HUB TASK STORE DISABLED")
+                import socket
+                from ciel.nutrition_photos import OPERATION, NAMESPACE
+                for learning in (False,True):
+                    for running in (False,True):
+                        local=tmp / ("photos-" + str(learning) + "-" + str(running))
+                        variant=replace(cfg,state_dir=local,
+                            hub=replace(cfg.hub,require_token=True,token="fixture"),
+                            tasks=replace(cfg.tasks,runner=running,directory=local/"tasks"),
+                            nutrition=replace(cfg.nutrition,enabled=True,owner_host=socket.gethostname(),state_dir=local/"nutrition-state"),
+                            learning=replace(cfg.learning,enabled=learning,background=True),
+                            projects=replace(cfg.projects,enabled=True))
+                        photo=Pipeline(variant,role="hub")
+                        assert NAMESPACE in photo._task_controller.namespaces
+                        assert photo._nutrition.photos.tasks is photo._task_controller
+                        assert (photo._background_runner is not None)==running
+                        if running:
+                            served=photo._background_runner.served
+                            assert OPERATION in served and set(served)<=set(photo._task_runner._excluded)
+                            assert any(op.startswith("learning.") for op in served)==learning
+                            assert len([r for r in (photo._task_runner,photo._background_runner) if r.background])==1
+                            await photo._background_runner.close()
+                            await photo._task_runner.close()
+                        await photo._task_controller.start()
+                        await photo._nutrition.start()
+                        assert photo._nutrition.store is not None
+                        assert photo._nutrition.photos.capabilities()["analysis"]==running
+                        await photo._nutrition.close()
+                        await photo._task_controller.close()
+                print("PHOTO BACKGROUND SHARED WITH LEARNING")
+                print("PHOTO NAMESPACE SURVIVES A PAUSED RUNNER")
             asyncio.run(lifecycle())
             names = [t.name for t in __import__("ciel.brain.tools", fromlist=["TOOLS"]).TOOLS]
             print("HUB FIXTURE MEMORY IS PRIVATE TO THE PROBE")
@@ -120,7 +152,7 @@ def main() -> None:
     print(f"  {'ok  ' if ok else 'FAIL'} the hub imports and constructs with no Mac in it")
     if not ok:
         sys.exit(1)
-    for marker in ("HUB CONSTRUCTION HAS NO TASK STORE", "HUB TASK STORE OPENS AND CLOSES", "HUB TASK STORE DISABLED", "HUB FIXTURE MEMORY IS PRIVATE TO THE PROBE"):
+    for marker in ("HUB CONSTRUCTION HAS NO TASK STORE", "HUB TASK STORE OPENS AND CLOSES", "HUB TASK STORE DISABLED", "HUB FIXTURE MEMORY IS PRIVATE TO THE PROBE", "PHOTO BACKGROUND SHARED WITH LEARNING", "PHOTO NAMESPACE SURVIVES A PAUSED RUNNER"):
         if marker not in out:
             print("FAIL", marker)
             sys.exit(1)
@@ -132,7 +164,7 @@ def main() -> None:
     print(f"  {'ok  ' if ok else 'FAIL'} the spoke needs the room's modules, as it should")
     if not ok:
         sys.exit(1)
-    print("\nall 6 checks passed")
+    print("\nall 8 checks passed")
 
 
 if __name__ == "__main__":

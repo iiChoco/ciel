@@ -2,6 +2,52 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-20 — Muted, the ear is shut
+
+**Why.** Mute meant "captured, and ignored". The microphone stayed open,
+the frames kept arriving, and only the wake word was told not to look; the
+orange dot in the menu bar said exactly what that was. A switch bought for
+a lecture hall, a call, a private conversation should be one the Mac can
+vouch for, not one Ciel promises. The earlier choice — keep capturing so
+the noise floor is sharp the moment mute lifts — is given up on purpose:
+the requirement changed.
+
+**What.**
+
+- *A microphone can be paused.* `MicStream` gains `pause()`, `resume()`,
+  and `hold()`. Paused, the device is closed and `frames()` hands the loop
+  silence at the frame rate, because the loop's clock — the sentinel poll,
+  the reload watch, the timers — is the microphone's. What the room said
+  before the pause is not handed over after it. A real exit still ends
+  `frames()` from a shut ear.
+- *Every backend closes for real.* PortAudio stops and closes its stream.
+  The WebRTC backend ends the capture helper and its idle clock stream, and
+  an unmute starts them again with a fresh echo processor and a clean
+  verdict, so the last run's error is not read as this one's. The Apple
+  session can be started again after a close. The Apple path is untested on
+  hardware.
+- *The switch moves the ear.* In the spoke and in the single-process room,
+  `_set_muted` starts one task that brings the microphone to where the
+  switch is and looks again when it finishes, so a quick mute-unmute-mute
+  ends shut. Muted at startup, the microphone is held and never opened. An
+  unmute whose microphone will not open logs the reason, leaves the ear
+  shut, and is tried again every five seconds. Silence from a shut ear is
+  kept out of the noise floor.
+
+**Probes.** `probe_input.py` 9 → 21: the shut ear against a bench device —
+a pause closes it, silence at the frame pace, pausing twice closes once,
+the room comes back on resume, a failed resume says why and stays shut and
+ticking and can be tried again, a held microphone never opens until
+resumed, and leaving the context ends the stream. It found a three-second
+wait on a closed device, fixed here. `probe_spoke.py` 68 → 73: muting
+closes the microphone, unmuting opens it, a quick flip ends shut, a
+microphone that will not reopen books another try and then opens.
+`probe_shortcuts.py` 66 → 68: the same in local mode. `probe_webrtc_audio.py`
+56, `probe_apple_audio.py` 81, `probe_hub_arbiter.py` 62, `probe_turns.py`
+100, `probe_world.py` 123, `probe_web.py` 67, unchanged. On the live spoke,
+muted: no capture helper process, no `WebRTC audio ready`, and a source
+reload still fired from the silent clock. The unmute was not exercised live.
+
 ## 2026-09-20 — The mark is the interface
 
 **Why.** The Chart was an instrument panel with nothing at its centre:
@@ -52,6 +98,1090 @@ eye against the `chart-echo` and `chart-fixture` servers: desktop and
 caret, the confirm bar, a stale reading, the roster open and folded, the
 task, grant, and feature panels, the white focus ring by keyboard, and an
 empty error console.
+
+## 2026-09-19 — A deaf spoke says so, and tries the door again
+
+**Why.** The spoke spent a night leaving and coming back. WebRTC capture
+timed out at startup, the process left, launchd relaunched it, every model
+loaded again, and the same door was tried — 1755 times. Each failure blamed
+a missing permission it had not established and threw away the helper's own
+stderr, the one line that could have said otherwise. Then a whisper fetch
+that neither finished nor failed held the last relaunch in startup for six
+hours: hub link up, location notes queued, no capture helper, no `spoke
+ready`, nothing in the log to say the room was deaf. A restart cleared all
+of it, and the cause was never learned because nothing kept the evidence.
+
+**What.**
+
+- *The failure says what the helper did.* A capture that delivers no audio
+  before its deadline now reports which stage went quiet — the helper never
+  reported its format, reported it and delivered no paired audio, or stopped
+  delivering after audio flowed — and repeats whatever the helper wrote to
+  stderr. A missing Microphone or System Audio Recording grant is offered as
+  a possibility only when the helper said nothing, never asserted.
+- *The ear that will not open is tried again.* A microphone pair that fails
+  to open no longer ends the spoke. The pair is built afresh and tried
+  again, the wait doubling from one second up to `audio.open_retry_max_s`
+  (30 s), with the models, the link, and the HUD kept up and the reason in
+  the log each time. A source edit during the wait still reloads. A ceiling
+  of 0 is the old door: one attempt, and the spoke leaves. A pair that fails
+  after opening still ends the run for launchd, as before; raw listening is
+  never a fallback for a protected route that would not open. The single
+  process `ciel` keeps its one attempt.
+- *The load has a deadline.* The engine's warm-up — the load and the first
+  decode — must finish within `stt.warm_up_timeout_s` (300 s; 0 waits
+  forever). Past it the engine is treated like any other warm-up failure:
+  mlx falls back to faster-whisper, and faster-whisper ends startup with a
+  line that says how long it waited. The stuck load is left to its thread,
+  which can hold the process's exit for up to five minutes.
+
+**Probes.** `probe_webrtc_audio.py 47 → 56`: a stall before the format, a
+stall after it, and a stall after audio flowed each name their stage; the
+helper's stderr is repeated; the permission hint appears only when it said
+nothing; the two new stalls leave no unprotected mic or helper.
+`probe_spoke.py 59 → 68`: the pair tried again with a doubling wait to its
+ceiling, the failed pairs never played through, the opened pair closed with
+the run, a reload asked for or a source edit during the wait leaving instead,
+the zero ceiling's one attempt; and a hung load falling back to
+faster-whisper within its deadline, a hung fallback ending startup, and a
+zero deadline waiting. `probe_config.py` 23 unchanged.
+
+## 2026-09-16 — A missing food key is a setup question
+
+**Why.** USDA search turned a missing API-key file into the same vague error
+as a provider failure. Ciel then asked for label numbers as though there were
+no other way to propose a meal. The investigation and temporary-state
+reproduction are in `reports/2026-09-16-nutrition-lookup.md`.
+
+**What.**
+
+- *Say which door is closed.* A missing, empty, or unreadable USDA key now
+  reports a setup problem without making a network request. Provider failures
+  stay separate and reveal neither credentials nor request URLs.
+- *An estimate can still be reviewed.* Nutrition tools offer explicitly
+  estimated values when saved and supplied values are unavailable. The
+  controller's question identifies estimated nutrition and its calculated
+  allowance; declining saves nothing. Unknown macros stay unknown, and
+  calories-only logging still requires numeric calories.
+
+**Probes.** `probe_nutrition.py 60 → 66`: setup errors, no attempted requests,
+and an honest fallback. `probe_nutrition_wire.py 69 → 75`: the real SDK's
+missing-key response, no write from lookup, labeled estimate review, refusal,
+and approved calories-only storage. Hub import passes. These checks use
+synthetic data and no model; they do not measure live model estimates.
+
+## 2026-09-15 — The food log is open on the hub
+
+**Why.** The four nutrition milestones had been built and verified locally;
+the owner asked to enable and push them for use.
+
+**What.**
+
+- *One enabled diary on its designated host.* The hub now runs nutrition with
+  required token checks, the existing photo runner, a 04:00 diary cutoff, and
+  the documented 15/10/10 percent portion/oil/estimate allowances. No target,
+  expenditure, meal, photo, or weight was invented for rollout verification.
+- *The existing private door stays in place.* `/nutrition` and `/ws` remain
+  under the owner Access application and healthy tunnel. The spoke keeps its
+  matching token and reconnects; the interview policy is unchanged. Diary
+  directory/database modes are 0700/0600.
+- *Only the nutrition file list was pushed.* The scoped upload preserves
+  unrelated gesture work on the hub. It makes no deletions or dependency
+  changes. Owner-only source/config rollback copies stay on the hub. No Git
+  commit or repository push was made.
+
+**Probes.** This is a configured rollout of the previously verified source;
+no behavior code changed. All six live doctor rows pass, the hub is active,
+and the spoke is connected. Live page, dashboard, and photo-draft reads pass;
+tokenless and unrelated-Origin connections are refused. Unauthenticated
+public requests to both Nutrition and its socket redirect to Access login.
+Credentials were compared without printing them. Real meal/photo accuracy,
+voice friction, and the owner's week-long usability trial remain untested.
+
+## 2026-09-14 — Missing days stay missing
+
+**Why.** A daily total could not say whether a week was complete. Treating
+unfinished intake as a deficit would make missing meals look like progress;
+using an intake target as expenditure would make the estimate mean nothing.
+
+**What.**
+
+- *Read the diary over time.* Milestone 4 adds 7/30/custom graphs for calories
+  versus target, estimated daily/cumulative deficit, protein and other macros.
+  One fenced reader uses saved meal dates, allowance snapshots, and effective
+  owner settings. Eligible completed-day counts accompany averages and
+  subtotals. Missing days, unfinished/future days, unset expenditure, and an
+  empty completed day without zero-intake authority cannot become deficits.
+  Macro subtotals disclose unknown foods; full-day averages exclude incomplete
+  coverage. Planned meals and drafts remain outside intake.
+- *Every point can open its evidence.* The Instrument page offers keyboard
+  point activation, scrollable daily values, day/meal drill-down, and a trailing
+  seven-day review with recurring names, largest allowances, and unresolved
+  nutrients. Lists disclose omitted examples. Ranges and source meal counts are
+  bounded; excessive reads refuse instead of returning partial totals. Private
+  SDK and socket readers share the same aggregates, with no new public route.
+- *Weight is a reading, not a prediction.* Optional daily manual kg/lb entries
+  retain their units and normalized kg. The observed calendar-window mean
+  needs at least two readings, leaves missing dates empty, and never derives
+  weight or targets from calories. Reviewed page edits and broker-approved
+  voice changes keep revisions, receipts, and Undo in nutrition history. No
+  JSONL copy, new dependency, or schema-format change is introduced.
+- *The four implementation milestones are present.* README, configuration,
+  plan, and design record now describe the completed dashboard and initial
+  bounds. Nutrition is still disabled and undeployed; deployment validation
+  and the private trial remain separate.
+
+**Probes.** `probe_nutrition_dashboard.py 0 → 54` covers completion and zero
+intake, effective settings, retained dates/allowances, gaps and cumulative
+coverage, macro averages, bounded review evidence, optional weight units/means,
+revision conflicts, receipt retries, Undo, authority, reopen and limits.
+`probe_nutrition_wire.py 63 → 69` verifies SDK review/receipts, identical page
+and voice aggregates, private responses, and unchanged JSONL behavior.
+`probe_config.py 22 → 23` and `probe_backfill.py 35 → 36` pin typed limits and
+doctor/runtime agreement. All 20 affected probes pass (1181 checks), including
+the existing diary, photos, library, planning, wire, web, turns, confirmation,
+file guards, shared runner, extraction, learning, and hub layers. Hub and
+pipeline imports pass. Synthetic browser runs pass 29 dashboard, 22 planning,
+and 14 photo checks across phone/desktop layouts, keyboard evidence, weight
+Save/Undo, errors, reconnect, and camera fallback. Phone/desktop screenshots
+were inspected; tables keep dates and numeric values intact at narrow widths.
+Real voice/model judgement and production Access/client setup remain untested.
+
+## 2026-09-14 — Familiar food keeps its version
+
+**Why.** Logging a usual meal should not require a new estimate each time.
+Changing tomorrow's recipe must not rewrite an earlier dinner, and thinking
+about a meal must not make it count as eaten.
+
+**What.**
+
+- *Keep a portion under a name.* Milestone 3 adds saved foods and aliases,
+  recipes with whole-batch yields, and prepared batches that retain their
+  recipe version. Validated arithmetic handles servings, explicit fractions,
+  and compatible measured units under the saved calorie policy. Exact usual
+  portions emit receipts without another question; changed portions and
+  voice edits use the controller's broker. Updating a default after a one-off
+  correction requires its own reviewed Save.
+- *A plan waits until it was eaten.* Hypothetical previews write nothing;
+  saved plans show separate projected totals and nutrient coverage. Logging
+  a plan atomically consumes it and writes its meal, with Undo for both.
+  Projection reads cannot double count a meal during consumption, and an
+  empty day's zero never turns an unknown planned nutrient into zero.
+  Diary refreshes clear hypothetical previews and reject their late replies.
+- *Historical changes name their whole scope.* A bounded review shows each
+  meal's old and proposed calories under the current allowance policy.
+  Recalculation and its Undo each require a fresh private broker question,
+  bound to the operation, digest, confirmation ID, initiating socket session,
+  and deadline. Another tab, generic chat/keyboard/voice Yes, ID-less answers,
+  reconnects, and expired scopes cannot approve it. Confirmations-off refuses
+  before changes and again through commit. Source values, dates, and
+  completion stay fixed; stale revisions roll the whole operation back.
+- *One history covers all affected records.* Grouped transactions retain
+  before/after values and one durable receipt in nutrition's Inverse source;
+  no JSONL copy is introduced. Schema version 3 keeps older code from
+  misreading the inverse, and photo initialization cannot downgrade it.
+  Configured library/plan capacities and ephemeral review limits bound the
+  new controls. The Instrument page provides library, portion, planning,
+  review, and approval controls. Nothing is enabled, committed, or deployed;
+  the dashboard remains milestone 4.
+
+**Probes.** `probe_nutrition_library.py 0 → 50` pins snapshots and aliases,
+recipe fractions and unit bases, explicit authority, grouped plan Undo,
+projection coverage/concurrency, strict historical scope and rollback,
+configuration changes, capacities, and reopen/schema behavior.
+`probe_nutrition_planning_wire.py 0 → 21` exercises two real authenticated
+pages, private questions, exact scoped answers, replay exclusion, cancellation,
+expiry, reconnect, idempotent bulk receipts, and scoped Undo.
+`probe_confirm_wire.py 27 → 40` preserves legacy confirmation and checks the
+new strict mode; `probe_nutrition_wire.py 58 → 63` covers real SDK library
+creation, exact-default receipts, hypothetical reads, page-only bulk approval,
+and unchanged JSONL behavior. `probe_config.py 21 → 22` and
+`probe_backfill.py 34 → 35` cover typed limits and doctor/runtime agreement.
+Nutrition (60), photos (42), files (37), wire (84), turns (100), task-tools
+(24), web (67), shellguard (165), hub-arbiter (62), extraction (39), task-runner
+(32), learning (168), and hub-imports (8) pass, as do hub/pipeline imports.
+Twenty-two synthetic browser checks cover phone/desktop library and planning
+flows, recipe/batch stability, one-off versus default edits, reviewed bulk
+apply/cancel/Undo, stale/delayed previews, reload, no overflow, and no JavaScript
+errors. Fourteen photo browser checks also pass after the shared editor changes. Keyboard
+navigation and Escape cancellation were checked in the native approval dialog,
+and phone/desktop screenshots were inspected. Real microphone/model judgement and
+production configuration/Access remain untested.
+
+## 2026-09-14 — A photograph waits for the owner
+
+**Why.** Capturing a meal should be quick without making the camera decide
+what was eaten. A label can be unreadable, a portion unfinished, and a
+connection lost before the phone sees a receipt.
+
+**What.**
+
+- *Received is a draft.* Milestone 2 adds camera/library capture, crop before
+  shrinking, a readable preview, persistent drafts, and PNG/JPEG transport.
+  Upload identities survive retries and interrupted enqueue survives restart.
+  Camera time is a suggestion; a library photo or label waits for the owner
+  to choose an eating time. Notes and unresolved values can be kept for later.
+- *The model proposes; Save logs.* One bounded image reaches an isolated
+  extraction call. Unreadable digits, portions, and macros stay unknown;
+  explanations and questions accompany the proposal. A reviewed fraction
+  eaten scales portions once before the visible calorie allowance. Save
+  atomically commits the meal, its history/receipt, and the consumed draft;
+  ordinary nutrition Undo reverses the logged meal.
+- *Background work takes turns.* Learning and photos share one runner and
+  private lease beside speech. Nutrition's namespace survives a paused
+  runner, and tools enqueue without recursively calling the model. Draft
+  revisions and media hashes fence imports across the two stores. Explicit
+  cancellation stops only the named job; stale edits/results cannot overwrite
+  a draft, and a missing task cannot block another completed result.
+- *Photos keep their own home.* Owner-only atomic media files have bounded
+  uploads, inbox/storage quotas, orphan recovery, and 30-day image retention
+  without numeric loss. Bytes travel only on addressed authenticated sockets,
+  outside replay and GET routes. Importing an admitted Chart attachment makes
+  a private copy and leaves its original under Chart's existing retention.
+  Initial configurable analysis limits are 20 jobs per rolling day, two calls
+  and $0.25 per job, with a 45-second per-call deadline. Nothing is enabled
+  or deployed, and no dependency changed in this milestone.
+
+**Probes.** `probe_nutrition_photos.py 0 → 42` covers synthetic PNG/JPEG,
+permissions, identities, failed receipts/orphans, restart and cross-lane
+resume, bounds, cancellation races, stale/partial imports, unknown values,
+reviewed Save, leftovers, and expiry. `probe_nutrition_wire.py 46 → 58`
+covers real SDK queueing/admitted attachments and private two-socket media
+transport, retry, replay exclusion, and format refusal.
+`probe_extraction.py 36 → 39` retains PNG and checks JPEG's real MIME;
+`probe_task_runner.py 29 → 32` checks named cancellation;
+`probe_turns.py 98 → 100` checks attachment IDs and photo roster labels;
+`probe_hub_imports.py 6 → 8` constructs shared learning/photo runtimes and
+paused runners without Mac modules. `probe_config.py 19 → 21` and
+`probe_backfill.py 33 → 34` cover typed photo settings and doctor agreement.
+Nutrition (60), files (37), wire (84), task-tools (24), confirmation-wire
+(27), web (67), shellguard (165), hub-arbiter (62), and learning (168) pass;
+so do hub/pipeline imports. Fourteen synthetic browser checks cover phone
+and desktop layout, crop dimensions, private media, draft reload, unresolved
+fields, partial-portion Save, Undo, camera decoder fallback, keyboard focus,
+and no JavaScript errors. Screenshots were inspected and the notes field
+brought into the Instrument style. Real camera capture, model accuracy,
+production configuration, and Access policy were not tested.
+
+## 2026-09-13 — The food log remembers what was saved
+
+**Why.** A food log needs one answer whether the meal came from a phone or
+Ciel's voice. Estimates must show their extra calories, a retry must not
+become a second meal, and a mistaken repeat must be easy to undo.
+
+**What.**
+
+- *One diary, with its own history.* Milestone 1 now has an owner-only SQLite
+  store, atomic records/history/receipts, a designated host and runtime role,
+  and a single writer lock. The owner's approved read-time merge makes it
+  an Inverse source with no JSONL copy, including when the journal is off.
+  Revision checks protect Undo; history capacity reserves room for reversal.
+- *The question belongs to the operation.* Reviewed page controls and exact
+  repeats save directly. The controller asks for voice/text proposals and
+  older Undo; the latest ordinary operation in the same session reverses
+  directly. Nutrition stays outside the generic gate, recorder, and Vigil
+  verification. Committed receipts are visible and spoken on the voice path,
+  independently of model prose; hypothetical mentions do not authorize saves.
+- *An estimate keeps its arithmetic.* Foods retain source values and missing
+  nutrients. Distinct portion, oil, and estimate reasons form one visible
+  allowance. Saved dates retain timezone, offset, and cutoff; completion
+  remains the owner's assertion. Cached bounded USDA lookup is optional,
+  and saved source values survive cache eviction.
+- *The page has a private door.* `/nutrition` has meal editing, source lookup,
+  totals and coverage, completion, optional targets, history, and Undo in the
+  Chart's Instrument style. Private socket controls carry data and retain
+  retry identities. The shared doctor/runtime rule requires tokens on every
+  `/ws` client, including loopback. Directory, sidecar, and key guards cover
+  file tools and the spoke shell classifier. Nothing is enabled or deployed;
+  photos and graphs remain later milestones.
+
+**Probes.** `probe_nutrition.py 0 → 60` pins transactions, receipts, retries,
+source/date snapshots, allowance arithmetic, completion, Undo, quotas, and
+bounded provider parsing without secrets. `probe_nutrition_wire.py 0 → 46`
+pins real SDK dispatch, the four journal/nutrition configurations, private
+sockets, token/Origin admission, reconnect, and revoked authority.
+`probe_config.py 17 → 19`, `probe_backfill.py 28 → 33`,
+`probe_files.py 30 → 37`, and `probe_turns.py 95 → 98` cover configuration,
+doctor agreement, secret boundaries, and visible/spoken receipt delivery.
+`probe_wire.py 84` covers the added frame samples; task-tool (24),
+confirmation-wire (27), web (67), shellguard (165), and hub-arbiter (62)
+probes pass, as does importing the hub and pipeline. Synthetic browser
+checks cover desktop/phone layouts, no horizontal overflow or JavaScript
+errors, keyboard focus/order, Save/Undo, repeated settings changes,
+completion, and invalid-edit recovery. Live USDA, microphone/model intent,
+production configuration, and Access policy were not tested.
+
+## 2026-09-13 — The food log has a plan
+
+**Why.** Food logging needs to be easy to keep up by voice or from a phone,
+while a calorie estimate and an unfinished day need to say what they are.
+The owner's reviews found friction and gaps at the existing code's edges.
+
+**What.**
+
+- *One log, wherever the meal is entered.* The
+  [nutrition plan](design/2026-09-13-nutrition-plan.md) starts with the
+  milestone 1 contract; a separate
+  [design record](design/2026-09-13-nutrition-design.md) preserves the full
+  product and later wiring decisions.
+- *The trial gets the useful shortcut.* Exact prior-meal repeats enter the
+  first milestone with direct Save, receipts, and Undo. Nutrition tools stay
+  outside the generic gate and recorder; the controller asks only where the
+  authority table requires it. Hypothetical mentions never log meals; repeats
+  emit visible and voice-path spoken receipts. Direct same-session Undo
+  reverses the latest operation without an extra question, with history and
+  revision checks. Named defaults and recipes follow.
+- *One history has the owner's approval.* On 2026-09-13 the owner asked to
+  start implementing with read-time merge. Nutrition history joins the
+  existing journal when `recent_actions` reads them, satisfying the approved
+  action-journal interpretation. Registry, agent, and prompt changes keep
+  reading and undo available with the JSONL journal off.
+- *A question names who may answer it.* Scoped bulk approval is new later
+  broker work; confirmations off means bulk recalculation is unavailable.
+  The existing grant-approval gap remains a separate follow-up. Milestone 1
+  adds doctor diagnostics for the required token, including on loopback.
+  Nothing is implemented or deployed by this planning change.
+
+**Probes.** Documentation only: code claims, local links, and whitespace
+checked; no runtime probes, deployment-state checks, or live-service changes.
+
+## 2026-09-13 — The gesture ear spends less on a quiet room
+
+**Why.** The CPU investigation in `reports/2026-09-13-audio-cpu.md` found
+that the gesture ear paid for scalar NumPy operations and a Python peak
+scan at 16,000 samples a second, even when the room had no hand sound.
+
+**What.**
+
+- *The recurrence stays; independent work runs together.* The high-pass
+  uses ordinary floats in the same sample order. Envelope roots and peak
+  eligibility run a frame at a time; possible impulses enter the existing
+  stateful scan in order. The measured synthetic quiet-room cost fell from
+  11.3 to 2.7 ms of CPU per second of audio. Ninety seconds of varied PCM
+  kept every filter sample, envelope value, and observation bit-for-bit
+  identical. Echo protection, thresholds, and timing stay as they were.
+
+**Probes.** `probe_gestures.py 154 → 160: analytical high-pass response,
+sixteen-sample RMS, uneven chunks, clear, reset, and empty input.`
+
+## 2026-09-12 — An answer names its question, and a result names its hub
+
+**Why.** A review of the working tree (`reports/2026-09-12-codebase-review.md`)
+reproduced ten runtime defects, all of one shape: work that outlives the
+turn, the process, or the page that started it was trusted on arrival. A
+spoke's "yes" transcribed late approved the next question, because the hub
+dropped the id the spoke sent back. A tool call still running on the Mac
+when the hub restarted answered the new hub's first request, because both
+hubs counted from `r1`. Gmail was called on the event loop, so a slow
+answer held the arbiter, the sockets, the timers, and the very deadline
+meant to bound it. The runner handed adapters one page of records and an
+inbox preview completed with a message still queued behind it. Memories
+and the journal took the umask's mode; a `ture` turned the confirmation
+gate off; a cancelled dictation let the next decode run beside the one
+still going; an upload before a hub restart could be neither found nor
+resent; one non-UTF-8 memory took recall down; a replaced spoke's waits
+hung to their deadlines; and the hub-arbiter probe had been failing on a
+field its fixture never set.
+
+**What.**
+
+- *The broker knows which question is open.* The spoke sink registers the
+  id it puts each listening line under (`expect`), the hub passes the id
+  the spoke answers with, and `answer` refuses an id that is not the open
+  one; the id changes with the re-prompt and clears with the verdict and
+  on cancellation. Answers without an id — typed lines, Chart rows — are
+  judged by the predating rule as before.
+- *RPC ids carry the hub's epoch.* `<epoch>.r<n>`, so an orphaned request
+  on the Mac cannot collide with a fresh hub's counter; the executor's
+  docstring states that a request outlives its hub under the id it was
+  given and its late result is dropped, never taken for another's.
+- *A replaced spoke is settled first.* `_welcome` fails the old seat's
+  waits and tells the pipeline it left before seating the newcomer; the
+  old socket's own leave, arriving later, changes nothing.
+- *The inbox adapter never touches the loop.* Every Gmail and calendar
+  call runs under `asyncio.to_thread`; the read, plan, send, verify, and
+  reconcile steps await it, so the step deadline is enforceable and a
+  timer due mid-call rings on time. Cancellation semantics are unchanged:
+  a send the step stopped waiting for is the unknown outcome the runner
+  already reconciles.
+- *A step sees the whole namespace.* `TaskStore.all_records()` walks the
+  pages to the end; the runner, the reconciliation path, the Chart's
+  rosters and summaries, the readings, the watched paths, and the
+  email-calendar requests all read through it.
+- *Private stores are owner-only whatever the umask.* The memory store's
+  files, index, and directory; the journal, its temporary file, and its
+  folders; a transcript from its first byte; a project file. Existing
+  files keep their mode; the README says how to tighten them.
+- *A boolean is refused when it is not one.* `_coerce` accepts the
+  positive and negative spellings and raises for anything else; `_apply`
+  names the section and field. Enum warnings are unchanged.
+- *The STT lock belongs to the worker.* `stt.base.owned_decode` holds the
+  engine until the thread returns, releases it from the worker's done
+  callback, and re-raises the caller's cancellation at once; both engines
+  use it.
+- *Uploads are recalled from the folder.* `bind_uploads` indexes every
+  file in the Chart's shape — type from bytes, or from a small text-suffix
+  table the platform lacks — and a resend that hits the exclusive create
+  answers with the record on disk.
+- *One unreadable memory costs one memory.* `MemoryStore._read` skips a
+  file that is not UTF-8, naming it and nothing of its contents; a quick
+  note is looked up by its exact path (one scan per save, not two), and a
+  failed index rewrite no longer turns a written note into a failed
+  receipt.
+- *The hub-arbiter fixture is whole again.* It sets `_learning_runner`,
+  and the tautological "the pipeline is told" check now observes the seat
+  hook.
+- *Stale prose corrected on the way.* The task runner's docstring no
+  longer says mutations are not dispatched; the email adapter's no longer
+  says read-only or that no grant is offered.
+
+**Probes.** `probe_confirm_wire.py 22 → 27: a stale id is refused while
+the next question stays open, the re-prompt takes a new id, id-less
+answers still pass, cancellation clears it. probe_tool_rpc.py 96 → 103:
+two hubs' first ids differ, the orphan's result is dropped and the new
+request runs, a replaced seat's RPC fails at once and its late leave
+changes nothing. probe_hub_arbiter.py failing → 62: the fixture loads,
+the seat hook is observed, a sentence owed by a replaced spoke is
+abandoned at the handover. probe_email_calendar.py 111 → 114: a blocking
+listing is abandoned at the deadline and a timer fires on time; a queued
+message behind page one is still read. probe_tasks.py 209 → 212:
+all_records to the end, under a prefix, refused page size.
+probe_notes.py 56 → 62: owner-only under umask 022 for memory, journal,
+transcript, project; a non-UTF-8 memory skipped; one read per memory on
+save; a positive receipt past a failed index. probe_stt.py 33 → 39: a
+cancelled caller returns at once and the next waits its turn, both
+engines. probe_web.py 62 → 67: files recalled after a restart, a retry
+answers with the record, pruning before recall. probe_config.py new, 17:
+defaults, file, environment, accepted spellings, refusals by name.`
+
+## 2026-09-12 — The wake word stops copying ten seconds of audio every 80 ms
+
+**Why.** The wake word is the one model that runs all day whether or not
+anyone speaks, so whatever it costs, the spoke pays idle. A reading of the
+frame loop put the always-on work at `OpenWakeWord.push`, and a measurement
+with synthetic room noise (no mic) put that at 38 ms of CPU per second on
+the spoke's Mac. A third of it was not inference. openWakeWord 0.6.0 keeps
+ten seconds of raw audio in a deque of Python ints and, every 80 ms,
+materializes the whole 160,000-element deque as a list to slice off its
+last 1,760 samples — a millisecond a call, half of it the garbage
+collector's. Another fifth was openWakeWord's own Silero gate, which the
+config's docstring said ran "before the wake model ever runs"; the library
+runs it *after*, and only zeroes scores that were already paid for.
+Through Ciel's own detector the two together take the idle cost from 33
+to 17 ms of CPU per second, and a synthesized "hey jarvis" fires on the
+same frame before and after.
+
+**What.**
+
+- *The tail is read from the tail.* `start` binds `_tail_melspectrogram`
+  to the detector's preprocessor instance in place of the library's
+  method: the same 1,760 samples, walked from the deque's end in 28 µs. The
+  instance, not the class, so the speech gate's copy of the library is
+  untouched; a preprocessor of another shape is left alone and says so.
+- *openWakeWord's gate is off unless asked for.* `wake.vad_threshold`
+  defaults to 0 and its docstring tells the truth about when it runs and
+  what it buys: a little resistance to non-speech false wakes, which the
+  speech gate in `stt/gate.py` already stops short of a turn. `0.3` is the
+  old setting, one line away.
+- *Chunking was measured and left alone.* Feeding 80 ms chunks instead of
+  30 ms frames saved nothing: the library accumulates frames before its
+  expensive path already, and the per-frame overhead it does pay is a
+  tenth of a millisecond.
+
+**Probes.** `probe_gestures.py 146 → 154: the tail read hands the
+melspectrogram the last 1,760 samples in order and matches openWakeWord's
+own copy sample for sample; a buffer under 400 samples is refused in the
+library's words; a short buffer is read whole; the melspectrogram buffer
+is still trimmed to its ceiling; the read binds to one preprocessor and
+leaves the library's class alone; a preprocessor of another shape is left
+as it was; the gate is off unless asked for.`
+
+## 2026-09-11 — The Discord lane is retired
+
+**Why.** Parallel Transport existed to reach Ciel from away. The public
+Chart took that job when it went behind Cloudflare Access on 2026-09-03,
+and the hub's journal for the fortnight since shows two Discord turns —
+both smoke tests on the day the hub came up — against 282 on the Chart,
+while the bot signed in on every one of the hub's 79 reloads for
+nothing. What remained was a network-facing identity whose gate was a
+Discord account and a bot token, a chat-library dependency, and branches
+on the lane's name in the pipeline, the turn registry, the confirmation
+broker, the agent, the prompt, the grant catalog, and the tasks store.
+
+**What.**
+
+- *The lane, its probe, and its extra are gone.* `remote/discord.py`,
+  `scripts/probe_discord.py`, the `[discord]` config section, the
+  `discord` extra and `discord.py` in the lock, the `discord_proactive`
+  grant, the prompt's self-knowledge of the lane, the arbiter's phone
+  rung, and the Chart's `from discord` caption. A `[discord]` table left
+  in config.toml is ignored by the loader, so nothing has to be edited
+  by hand. `discord.token` stays in `FORBIDDEN_NAMES`: the file may still
+  sit in `~/.ciel`, and an unused credential is still a credential.
+- *The confirmation clock moves to the lane that uses it.* Every text-lane
+  question waited on `[discord].confirm_timeout_s` even with the lane off;
+  it is now `[web].confirm_timeout_s`, same default, same meaning.
+- *The public-turn rule outlives its only producer.* `TurnRequest.public`
+  stays, and is now lane-independent: any public turn gets the
+  discretion note, withholds the held Vigil notes, and runs on the
+  brain's public client. No lane sets it today; the next public lane
+  inherits the whole rule by setting one flag.
+- *The away outlet is iMessage alone.* On the hub an away text rides the
+  seated spoke's Messages.app; with the spoke away the send fails and the
+  event is held for the next conversation, as a failed send always was.
+  The ladder that fell to Discord when the Mac slept is gone with it.
+- *The deploy command shrinks.* The infrastructure repository's
+  `deploy.py` syncs the hub with `--extra web` only; `push_hub.sh --sync`
+  removes `discord.py` from the server's environment on the next push.
+
+**Probes.** `probe_turns.py 105 → 95: the Discord checks go, a public
+turn on the web lane pins the discretion note, the withheld notes, and
+the registry`; `probe_world.py → 123: it had crashed at HEAD on the
+public turn (its fake brain predates public audiences) and runs again`;
+`probe_backfill.py 29 → 28: a spoke away means a held event, not a
+Discord text`; `probe_ladder.py 25 → 23: the phone rung is gone, a
+running turn still outranks the machine`; `probe_confirm_wire.py 22`,
+`probe_spoke.py 59`, `probe_tasks.py 209`, `probe_task_notices.py 28`,
+`probe_email_calendar.py 111`, `probe_learning.py 168`,
+`probe_grants.py 37` unchanged in count and green. `probe_hub_arbiter.py`
+fails before and after on the learning session's uncommitted
+`_learning_runner`, which this change does not touch.
+
+## 2026-09-10 — A sheet that looks like a worksheet
+
+**Why.** The first live sheets, once they compiled, were a plain article:
+a bold bracketed id opening every line, the page reference jammed onto
+the statement's last line by an `\hfill`, an empty box, default fonts,
+and the book's numbering producing a theorem 1.31 and a proposition 1.31
+with the same statement — one of them with the book's proof copied after
+it, which a sheet must never carry.
+
+**What.**
+
+- *The design.* Latin Modern with microtype; a centred title with the
+  chapter and what to do; each item's id small and grey above it; a head
+  line with the number in bold, the title in italic, and the page at the
+  right; the statement on its own; and a writing space marked by a light
+  rule down its left rather than a cage. The conventions are a small
+  list. The exam sheet follows the same design. The reader's environments
+  are unchanged: `namedquestion` with the id, `framed` for the space.
+- *No proof on a sheet, one item per number.* A proof the model copied
+  after a statement is cut off at extraction and kept as the item's
+  private reference; the same number under another kind's name is the
+  item already on record. The renderer does both again for records
+  written before this, so a replacement of a chapter read earlier is
+  clean.
+
+**Probes.** `probe_learning.py 167 → 168: a copied proof is cut into the
+private reference and the same number under another kind is one item;
+the sheet checks follow the head line and the writing space.`
+
+## 2026-09-10 — What the model wrote is made to compile
+
+**Why.** The first live sheets did not compile. The prompt asked for
+LaTeX and the model half-obeyed: Greek letters, ⊕, ⟺, and 𝐅ⁿ as Unicode,
+which pdflatex refuses, and `\oplus`, `\in`, and `α^m` left outside math
+mode in a convention, a statement, and a definition's name. A sheet is
+the owner's to write in, and one that does not compile is not a sheet.
+
+**What.**
+
+- *A typesetting pass on everything the model wrote.* `tex_safe` turns
+  Unicode math into LaTeX commands (Greek, the symbol table, super- and
+  subscripts, the mathematical alphanumerics) in math mode or wrapped in
+  it, sets a word carrying a math command or a superscript outside math
+  in math with its punctuation kept outside, escapes the text specials,
+  typesets dashes and quotes, closes an unbalanced dollar, and marks an
+  unknown character rather than dropping it. Every statement, title,
+  number, convention, and exam question goes through it. Typography is
+  not promised; a sheet that compiles with every symbol present is.
+- *The prompts say pdflatex.* Every symbol a command in math mode, never
+  a Unicode symbol — and the pass is the guarantee when they do not.
+
+**Probes.** `probe_learning.py 160 → 167: the translations, the stray
+math, the specials, the marker, no raw Unicode in a rendered sheet, and
+the theorems, definitions, and exam sheets carrying the exact shapes the
+first live sheets failed on compiled under pdflatex with shell escape
+off.` A replacement of a prepared chapter is now new sheets rendered
+from the items on record, at no model cost and without reading a page
+again — the two live chapter-1 sheets were written before this, and
+"prepare chapter 1 again, replace the sheets" writes compiling ones as
+the next version beside them.
+
+## 2026-09-10 — The chapter being read is on the roster
+
+**Why.** The Chart's roster of work in progress showed the deep-thought
+pass, the watches, and the timers, and not the learning runner reading a
+chapter beside the conversation; the owner asked where the worker was.
+
+**What.**
+
+- *A runner names its step in flight.* `TaskRunner.current` is the task a
+  step is running for and since when, None between steps.
+- *Both runners are on the roster.* The learning runner's step shows as
+  study work with the task's outcome, its operation, and the chapter,
+  window, chunk, set, or sheet it is on; the ladder's step shows as task
+  work the same way. Between steps there is nothing to show; the tasks
+  themselves stay in the Chart's Tasks section.
+
+**Probes.** `probe_task_runner.py 28 → 29: a runner names the task in
+flight while its step runs and nothing between steps. probe_turns.py
+104 → 105: a learning step in flight is on the roster as study work with
+its chapter and window, and nothing between steps.`
+
+## 2026-09-10 — A grant that predates a step says so
+
+**Why.** After the images step became a step of its own, the watch on the
+hub derived nothing for chapter 1: the grant approved that afternoon
+named eleven operations and the segment's scope now names twelve, so the
+store refused every derivation, in a log line nobody reads, while the
+tool went on saying the chapter was queued. And every reply still said
+"when the room is quiet" after the learning steps had moved beside the
+conversation, so Ciel repeated it.
+
+**What.**
+
+- *A grant must cover every operation the adapter serves* to count as
+  active for a book, and `prepare_chapter`, `check_sheet`, `study_hint`,
+  `practice`, and `mock_exam` name what an older grant lacks and say to
+  revoke it and approve it again, rather than queueing under it.
+- *The words follow the switch.* With `[learning].background` on, the
+  replies say the work runs beside the conversation; off, when the room
+  is quiet. The tool descriptions say "in the background".
+
+**Probes.** `probe_learning.py 159 → 160: a grant approved before a build
+that added a step is named as lacking it, with what to do, and nothing is
+queued under it; the queued words say beside the conversation.`
+
+## 2026-09-10 — The learning steps run beside the conversation
+
+**Why.** The first live chapter sat queued through a whole study session.
+The runner takes a step only when the ladder finds the room idle and
+every human lane empty, and each step's model call holds the
+conversation's lease, so the next message either waits behind it or
+cancels it. That rule was set so a background call never overlaps a
+turn, which is right for reflection and the inbox; a study session is
+exactly when the room is never quiet, and this revisits the rule for the
+learning module alone. The addendum to
+`design/2026-09-10-learning-plan.md` records the decision.
+
+**What.**
+
+- *A second runner on the same store.* `TaskRunner(background=True)`
+  takes only its own adapters' steps, is never interrupted by human
+  input, and is ticked every second from the pipeline's loop rather than
+  picked by the ladder. It has a lease of its own (`private_lease`) and an
+  extraction client of its own, so it never holds the conversation's turn.
+  The ladder's runner is told to leave those operations alone.
+- *The store narrows by operation.* `eligible()` and `reconcilable()`
+  take `operations` and `exclude`, so two runners on one store never
+  claim each other's tasks; the fencing, checkpoints, grant, journal, and
+  notices are the same as before.
+- *`[learning].background = true`*, the default. Off, the learning steps
+  queue behind the ladder as before. One learning step at a time; spend
+  can double while both are busy, and a window's page images are rendered
+  on the Mac during the session.
+
+**Probes.** `probe_tasks.py 207 → 209: eligibility narrowed to a set,
+away from a set, and to none, and a narrowing that is not names refused.
+probe_task_runner.py 25 → 28: a background runner serves its adapters'
+operations and the ladder's is told to leave them alone, sees the tasks
+the other cannot, and runs a step while the conversation's lease is held
+with the owner's interrupt leaving it alone. probe_learning.py 158 → 159:
+with the conversation's lease held throughout and an interrupt after
+every step, a background runner reads the chapter and writes its sheets
+alone, spending no attempt, while the ladder's runner sees nothing.`
+
+## 2026-09-10 — Seven defects from the learning module's review
+
+**Why.** The review in `reports/2026-09-10-learning-code-review.md`
+reproduced seven defects in the working tree with its script beside it.
+Three would have cost the owner a grade, a submission, or a scanned book;
+one would have refused every publication in the hub-and-spoke split.
+
+**What.**
+
+- *A grading batch is whole problems within the bound.* A problem whose
+  question, rubric, and answer exceed one call is said to be ungraded and
+  kept out of the total, never graded from a prefix; one the model's
+  answer left out is carried to the next call once, then said. Review
+  batches follow the same rule, with an oversized answer assessed as
+  uncertain and told why.
+- *A submission is whole or it is refused.* An include that cannot be
+  read, lies outside the study folder, or lies too deep refuses the
+  submission by name before anything is recorded; a commented-out include
+  is no dependency.
+- *A scanned book reaches the images.* With `images = "always"`, or when
+  a window's text layer is empty, every page goes to the image extractor,
+  which discovers the items itself; the text no longer decides what the
+  images may see.
+- *The study folder is the Mac's.* `learning.pdf_info` answers the Mac's
+  own study root and registration builds the folder under it, so a tilde
+  in the hub's config no longer names a folder under the hub's home that
+  the Mac refuses. A book registered before this carries the hub's path
+  and is closed and registered again.
+- *A set's solution only after the grade.* The reveal refuses every state
+  but graded, not three named ones, so a draft is never exposed while a
+  set is generating or releasing.
+- *A chapter is read from its first page.* The estimator covers the
+  opening before the first section and every gap between sections.
+- *An interrupted publication recovers.* The verification step reads the
+  planned path and digest it carries; a sheet on the Mac as planned is
+  recorded and verified even when the mutation's own record never landed.
+
+**Probes.** `probe_learning.py 147 → 158: the seven cases above, each
+pinned as fixed.`
+
+## 2026-09-10 — One step, one call, and the Mac's absence is a delay
+
+**Why.** The first live chapter. Chapter 1 of the book spans twenty-six
+PDF pages and was cut into two tasks; the short one finished, the long
+one made four attempts at its first window and then parked with "the
+Mac is not connected". Two defects, neither the quiet-room rule. A window
+step made its text call and its image calls inside one step, which the
+runner bounds at sixty seconds, so a slow window was abandoned with all
+its calls spent — eight of the task's sixteen, gone. And a Mac that was
+briefly away became a resource wait, which is durable until an owner
+resumes it: nothing would ever have looked at that task again.
+
+**What.**
+
+- *One model call per step.* `learning.window` makes the text call and
+  keeps the items; `learning.images` makes one image chunk's call per
+  step and records the window as done after its last chunk. An
+  interruption or a timeout now costs one call, and the runner's step
+  bound covers a step.
+- *The Mac's absence is a delay, never a wait.* A step that finds the
+  Mac away — a page, an image, a sheet, a name to check — checkpoints
+  with `[learning].mac_retry_s` and spends no attempt. The watch resumes
+  any learning task an earlier build parked that way, so the task on the
+  hub picks up on the next poll after this lands.
+
+**Probes.** `probe_learning.py 144 → 147: each step is one call and an
+abandoned call is the only one redone, a chapter read while the Mac is
+away twice completes with no attempt spent and never parks, and a task an
+earlier build parked, whose scope cannot take the images step, is ended
+by the watch and its request re-derived afresh.` A practice set now draws
+on the chapters up to the bookmark and not the one past it, pinned in
+passing.
+
+## 2026-09-10 — The form shows the feature it says it shows
+
+**Why.** Approving the worksheets grant in the Chart answered "Only the
+offered operations can be granted." The grant form's feature picker was
+set to the feature the owner chose only after the operation and target
+boxes had been built from the first feature in the list, so with two
+features offering grants — readings of bound documents and the learning
+module — the form sent one feature's operations under the other's name,
+and the hub refused them as not offered. Until the learning module there
+was only ever one feature, so the form never had to choose.
+
+**What.**
+
+- *Pick first, then build.* The picker's value is settled — the draft
+  being edited, else the feature the owner picked, else the first — before
+  the boxes are built from it. The later re-assignment is gone.
+
+**Probes.** None drive the Chart's grant form in a browser; the fix is a
+reorder of two lines in `chart.html`. Not visually rechecked: the form's
+layout, focus, and states are unchanged, only which feature's boxes render.
+
+## 2026-09-10 — The switch that could not be turned on
+
+**Why.** The first live run: `[learning] enabled = true` was written into
+the config on the Mac and on the hub, both restarted, and neither noticed.
+Ciel answered "prepare chapter 1" with a question about what preparing
+meant, and registered the book with the ordinary project tool. The
+learning section was a field on `Config` but not an entry in the loader's
+section registry, so the file's section was skipped in silence, and no
+"unknown config key" warning could say so because the whole table was
+never looked at.
+
+**What.**
+
+- *The section is registered.* `learning` is in `_SECTIONS`, so the file
+  and `CIEL_LEARNING_*` overrides reach it like every other section.
+
+**Probes.** `probe_learning.py 142 → 144: the section loads from a file
+with its switch, a list, and a number, and without it the module is off.`
+
+## 2026-09-10 — A question is released only with a checked answer
+
+**Why.** Milestone 4 of the learning plan
+(`design/2026-09-10-learning-plan.md`). Reading and reviewing a book is
+half of studying; the other half is being asked something you have not
+seen, under a clock, and graded from what you actually wrote — with the
+answer kept where you cannot reach it until you have earned it or asked
+outright.
+
+**What.**
+
+- *Practice and mock midterms are queued, never done in the turn.*
+  `practice` sets one question by default on a topic at a difficulty from
+  the prepared chapters up to the bookmark; `mock_exam` sets five problems
+  mixing definitions, examples or counterexamples, and proofs, sixty
+  minutes, one hundred points, changed at the owner's word. A bound
+  syllabus, assignment set, or sample exam calibrates a midterm and the
+  sheet says so; without one it says book-based practice.
+- *Three calls, one task per question.* One writes the question, a
+  private solution, and a rubric from the book's material; one solves the
+  question alone and lists any assumption it needed; one referees both
+  and releases only a question with consistent assumptions, agreeing
+  solutions, and a rubric that credits the independent route. A rejected
+  draft is written once more; twice rejected is withdrawn and the sheet
+  says so. The watch derives the publishing task when every question is
+  settled; the sheet lands under `Problems` as a new file.
+- *Solutions and rubrics are never in reach.* They live on the
+  `question` records only: never on a sheet, in the notebook, in task
+  evidence, or in a notice. A hint during an exam is written beside the
+  sheet and recorded on the set and the grade; a reveal is refused while
+  the set is open and gives the solution from the record only after the
+  grade, marking the problem.
+- *A submission is a snapshot in records.* `submit_exam` reads the sheet
+  and its includes within the study folder, keeps them whole as
+  `submission` records with the hash before it acknowledges, refuses a
+  submission past `max_submission_chars` rather than truncating it, and
+  is final. Grading reads the records and never the sheet again, so a
+  later edit to the sheet, an include, or the courtesy copy changes
+  nothing; a restart grades the same snapshot; a submission without the
+  grant is kept while grading waits. The grading task publishes the
+  courtesy copy, grades a few problems a call with partial credit per
+  rubric criterion and an explanation that never repeats the solution,
+  and publishes the numbered grade file with the total and the assistance.
+- *The watch renews itself.* The store's polling allowance is captured at
+  creation and spent by every look, so a standing watch would fall silent
+  at 288 looks — two and a half hours at the learning watch's cadence.
+  Nearing it, the watch ends itself and derives its successor under the
+  mandate, whose record then names the new task.
+- *The model evaluation exists.* `scripts/eval_learning.py` runs the
+  review, hint, and referee prompts against the real model on six cases
+  with the verdict expected and the spoiler that must not appear, and
+  fails on either. It costs money, is run by hand, and has not been run;
+  its cases await an independent check.
+
+**Probes.** `probe_learning.py 120 → 142: a practice set and a midterm
+with their defaults and an explicit change, the assumption that rejects a
+draft and the second draft released, the twice-rejected question
+withdrawn, the sheet's header and boxes with no solution anywhere, the
+material and calibration seen by the compose call, solutions absent from
+notices, evidence, and notebook state, the reveal refused while open, the
+hint recorded on the set, the submission refused past the cap and kept
+whole with its include and final, the watch renewed under the mandate,
+the grade after a restart from the record with the edited sheet ignored,
+the courtesy copy, the grade read back for speaking, the solution revealed
+after the grade, study_status's set lines, a submission without the grant
+kept, and an expired grant losing nothing.` probe_turns.py 104,
+probe_tool_rpc.py 96, probe_task_authority.py 97, probe_task_runner.py
+25, probe_task_dispatch.py 37, probe_project_watch.py 30,
+probe_readers.py 30, probe_extraction.py 36, probe_atlas.py 59,
+probe_tasks.py 207, probe_email_calendar.py 111, probe_grants.py 37,
+probe_task_wire.py 30, probe_hub_imports.py 6 pass unchanged; hub import
+clean; the spoke reloaded to ready. The live acceptance — one practice
+question and one mock midterm, graded — is owed, and the evaluation has
+not been run.
+
+## 2026-09-10 — Check my definitions
+
+**Why.** Milestone 3 of the learning plan
+(`design/2026-09-10-learning-plan.md`). A sheet with the owner's proofs
+and definitions written in needs to be looked at, held to the book, with
+the gaps named and the argument left to the owner, and a later edit must
+never wear a verdict it did not earn.
+
+**What.**
+
+- *A review is queued, not done in the turn.* `check_sheet` reads the
+  sheet only to see something is written: every box empty is said and
+  nothing is queued, an id not on the sheet is said with the ones that
+  are, and a review past its allowance names the items left for another
+  request. The request runs under the worksheets grant.
+- *The snapshot is the version assessed.* The review's first step reads
+  the sheet as saved through the workbench, isolates each written answer
+  with the reader, keeps the answers and their hashes in `snapshot`
+  records, names the empty boxes, and puts every item's current hash on
+  its `progress` record. Assessment steps take a few answers a call, each
+  with the theorem's statement or, for a definition, the book's own
+  definition as private reference, and the chapter's conventions, as
+  quoted data; verdicts are assessed correct, needs revision, or
+  uncertain; findings name where an argument fails and never how to fix
+  it, and one that repeats the book's words is withheld. An interrupted
+  review assesses the same snapshot when it runs again.
+- *Feedback is a new numbered file beside the sheet.* Written under the
+  grant like a sheet, read back, and completed with a notice. It says it
+  is a model's assessment and not a verification and gives each answer's
+  hash. Then each `progress` record takes the verdict with the hash it
+  assessed, keeps what stood before in a bounded history, and the
+  snapshot is deleted. The sheet itself is never edited.
+- *Stale by hash.* `study_status` and `read_feedback` read a prepared
+  sheet afresh and compare each answer's hash with the one its verdict
+  assessed: edited since reads as stale with the verdict kept.
+  `read_feedback` returns the latest feedback and that standing for Ciel
+  to speak the verdicts and the named gaps on request.
+- *Hints and reveals, only on the owner's word.* `study_hint` queues one
+  nudge on one item — its own isolated call, at most two sentences,
+  naming no step, no object, and none of the book's words, replaced by a
+  plainer one when it would — written as a numbered hint file and
+  recorded as assistance on the item. `reveal_answer` answers at once
+  with no model: a definition is the book's own words from the record, a
+  theorem is where the book proves it; the item is recorded as revealed.
+- *The grant grows three operations* (`learning.snapshot`,
+  `learning.assess`, `learning.hint`) and the watch derives review and
+  hint tasks from their requests the way it derives preparations.
+
+**Probes.** `probe_learning.py 100 → 120: an all-empty sheet refused and
+said, an id not on the sheet, the queued review and the duplicate, the
+snapshot by hash with the empty boxes named and the interrupted call
+assessed from the same snapshot, the assessment's payload (statement,
+conventions, answer, nothing of the other sheet), the numbered feedback
+with its hashes and verdicts and no argument, the sheet unedited, the
+snapshot gone, the progress record, standing by hash, stale after an
+edit, read_feedback, a second numbered file with the history kept, the
+private definition seen and a leaking finding withheld, hints as numbered
+files recorded on the item with a leaking hint replaced, a definition
+revealed from the record and a theorem by its page, and study_status's
+standing lines.` probe_turns.py 104, probe_tool_rpc.py 96,
+probe_task_authority.py 97, probe_task_runner.py 25,
+probe_project_watch.py 30, probe_readers.py 30, probe_extraction.py 36,
+probe_atlas.py 59, probe_tasks.py 207, probe_hub_imports.py 6 pass
+unchanged; hub import clean. The live acceptance — chapter 3 definitions
+checked, feedback read aloud and opened — is owed, and the model
+evaluation the plan asks for before milestones 3 and 4 close has not
+been written or run.
+
+## 2026-09-10 — A chapter's worksheets, written from the book
+
+**Why.** Milestone 2 of the learning plan
+(`design/2026-09-10-learning-plan.md`). A registered book with a bookmark
+is a place to read; studying needs the chapter's statements and terms in
+front of you with room to write, without the book's proofs and
+definitions, and without a conversation doing the reading.
+
+**What.**
+
+- *Prepare a chapter, and nothing happens in the turn.* `prepare_chapter`
+  takes the chapter's pages from the outline or the owner's words, cuts
+  the range into tasks with an estimator that counts a window's text and
+  image calls with a quarter in reserve against `[tasks].max_model_calls`,
+  writes one `request` record per task and a `chapter` record, and says
+  queued. Without the standing grant *Worksheets and feedback under the
+  study folder* it says so and queues nothing; the grant's targets are the
+  registered books, offered live rather than at startup.
+- *Read in windows, checkpointed.* The watch derives one reading task per
+  request. Each window overlaps the last by one page and is one step: a
+  text extraction for the theorems, lemmas, propositions, corollaries,
+  and defined terms with their numbering, hypotheses, and page (the
+  chapter's conventions on the first), then an image re-read of the pages
+  whose items carry notation or were unsure, and the image reading is
+  kept. A statement across the boundary is provisional until the next
+  window; an unreadable page is flagged, never invented. When every
+  window is read the watch derives one publishing task.
+- *Two sheets, new files only, verified.* A definitions sheet and a
+  theorems sheet are rendered from the item records in the reader's
+  environments, planned as new files under the study folder (a taken name
+  takes the next number), written by the spoke's `learning.publish` — an
+  owner-only temporary file linked into place, never a replacement — and
+  read back before the task completes; the notice says the chapter is
+  prepared. A prepared chapter is reopened; a replacement at the owner's
+  word is the next version. The book's own definitions stay private
+  reference on the item records and reach no sheet.
+- *Page images ride the extraction.* `extract_json` takes optional page
+  images, counted and sized against the limits before the call and handed
+  to the backend only then; the SDK client is sent one message of content
+  blocks with the call's own budget. A text call reaches a backend exactly
+  as before. `StepContext.extract` takes `images` and `limits`.
+- *The readers keep their purpose and grow two things.* A `namedquestion`
+  whose argument has an id's shape is that item; a duplicate id is a gap.
+  Every item now carries its answer isolated exactly — file, offsets, and
+  text — and comments are blanked rather than cut so offsets point into
+  the owner's file; `answer_hash` survives a statement edit.
+- *Two more spoke operations.* `learning.pdf_pages` answers a window's
+  text and greyscale PNGs rendered through Quartz at `render_dpi`,
+  stepped down to fit `max_image_bytes`; `learning.publish` writes one new
+  file under the study root and refuses an existing one in words. The
+  controller's grant setups are asked for each time, so a book registered
+  after startup is a target.
+
+**Probes.** `probe_learning.py 62 → 100: the estimator's windows and
+cuts, a chapter's range from the outline, item ids, the notation rule,
+and a full chapter run through the real runner over a hand-built book —
+the grant, the watch, windows in order with one abandoned and redone, a
+provisional statement made whole, private reference text, image re-reads,
+a flagged page, both sheets landed and verified, the sheets read back with
+their ids and spans, the notice, reopening, replacement past a taken name,
+the journal, and images off. probe_readers.py 22 → 30: ids, exact
+answers on a shared line and through an include, blanked comments, the
+hash across a statement edit, duplicate ids. probe_extraction.py 27 → 36:
+images bounded before the call, the unchanged text path, the content
+blocks and budget the client is sent. probe_tool_rpc.py 87 → 96: a window
+over the wire with and without images, the window bound, publication and
+its refusals.` probe_tasks.py 207, probe_task_runner.py 25,
+probe_task_authority.py 97, probe_task_dispatch.py 37,
+probe_task_notices.py 28, probe_task_tools.py 24, probe_email_calendar.py
+111, probe_project_watch.py 30, probe_turns.py 104, probe_hub_imports.py 6
+pass unchanged; hub import clean. Rendered fixture sheets compiled with
+`latexmk -pdf -no-shell-escape` and the theorem and definition pages
+were inspected by eye. The live acceptance — chapter 3 prepared and the
+sheets opened where the owner is — is owed.
+
+## 2026-09-10 — The book is open where you left it
+
+**Why.** Milestone 1 of the learning plan
+(`design/2026-09-10-learning-plan.md`). "Let's read Axler" had nowhere to
+land: the notebook holds prose and memory holds facts, and neither is a
+book or a bookmark. This makes a book something Ciel can register once and
+come back to, at the place the owner last said they were, with no model
+call and nothing generated.
+
+**What.**
+
+- *A course is a project; the book and its study folder are its
+  resources.* `register_book` binds a PDF as a resource of role `book`
+  and a study folder under `[learning].study_root` as a resource of role
+  `folder`, only on the owner's named PDF and confirmed edition; without
+  the edition it refuses and binds nothing. `find_book` offers candidates
+  from the Mac's search and never chooses. The book's facts, its printed
+  page labels, and its outline are records in the task store's new
+  `learning` namespace; the notebook gets one log line, and
+  `open_project` lists a project's books with their bookmarks.
+- *Resume in the owner's words.* `open_study` resolves a book by the
+  project or by the book's own alias across every project, marks it
+  current, and answers with its bookmark; `set_bookmark` keeps a section,
+  a printed page, a PDF page, a chapter, or an item with its kind. A
+  printed page is placed through the PDF's own labels; a label-less PDF
+  asks for a PDF page or a section; a bare number is asked about; a
+  section is placed by the outline when it names it. Nothing but the
+  owner's words moves it. `study_status` reads without changing.
+- *The Mac owns the PDF.* Two spoke operations, `learning.find_books`
+  and `learning.pdf_info`, search by filename and PDF metadata under the
+  configured roots and read a book's page count, labels, outline, and
+  hash through PDFKit — never page text — each re-checking roots and
+  path on the Mac. A hub without its spoke says so and never reads its
+  own disk.
+- *Closing a book is asked about.* `close_book` is behind the spoken-yes
+  gate and journaled; it cancels the book's tasks, deletes its requests
+  at the revisions it read them, then the rest of its records page by
+  page, and unbinds it. Every file stays.
+- *Records are read by page.* `TaskStore.records()` takes a `prefix` and
+  an `after` cursor; a page shorter than the limit is the end, and exact
+  keys page the same way, so a namespace larger than one page is never
+  silently cut at the limit.
+- *An opt-in `[learning]` section.* The study root, the search roots, and
+  the search and PDF bounds. `check_document_path` takes a caller's
+  suffix set so a book can be a PDF without the readers' list changing.
+
+**Probes.** `probe_learning.py new, 62: places, hand-built PDFs with
+labels and an outline, the search, registering, resolution, bookmarks
+across a fresh store, the public lane, and closing across more than one
+page. probe_tasks.py 202 → 207: pages by prefix and cursor, literal
+wildcards, exact keys past the limit. probe_atlas.py 56 → 59: the book
+role and the study folder as a root. probe_tool_rpc.py 80 → 87: both
+operations over the wire, the Mac's refusals, the module off.
+probe_turns.py 102 → 104: the tools withheld and offered, close_book
+gated.` probe_project_watch.py 30, probe_task_runner.py 25,
+probe_task_authority.py 97, probe_task_tools.py 24,
+probe_email_calendar.py 111, probe_readers.py 22, probe_hub_imports.py 6
+pass unchanged; hub import clean. The live acceptance — "let's read
+Axler" from voice and from a phone — is owed.
 
 ## 2026-09-10 — The Mac's open runs for real
 
@@ -521,6 +1651,38 @@ probe_task_wire.py 28, probe_task_tools.py 24, probe_turns.py 88,
 probe_hub_arbiter.py 61, probe_hub_imports.py 6; hub import clean; the
 spoke reloaded to ready.
 
+## 2026-09-09 — A thought has a way back
+
+**Why.** Quick capture now needs equally quick retrieval, a brief chance to
+undo a mistaken discard, optional context, and a way to write by speaking.
+
+**What.**
+
+- *Recent means confirmed.* A searchable local history keeps the latest 100
+  acknowledged saves, owner-only and available offline. It begins with new
+  saves on this Mac; the brain's older notes still use ordinary recall.
+- *Five seconds to reconsider.* Discard deletes the disk draft immediately.
+  A quiet Undo chip holds only an in-memory copy for five seconds, restores
+  it without a memory write, and forgets it on expiry or a new draft.
+- *The place can come with the thought.* Context attaches the previous app
+  and, on supported browsers, its page title and URL. Reading occurs on the
+  owner's click; the attachment is visible and removable before Save.
+- *Speech stays in the scratchpad.* Dictate borrows idle microphone frames
+  and the existing speech engine, inserts the result into the draft, and
+  never opens a conversation. Capture is bounded to 60 seconds by default;
+  closing, muting, or losing the idle room cancels it. Late results cannot
+  change a new draft. The compact footer exposes all three controls.
+
+**Probes.** `probe_notes.py 37 → 56: confirmed history, fixed context reads,
+bounded PCM, cancellation, and bridge receipts. probe_note_window.py 59 → 78:
+Undo expiry, searchable Recent, visible context, late results, microphone
+acknowledgement, and dictation ahead of context. probe_spoke.py 56 and
+probe_turns.py 88 pass unchanged.` Recent, Undo, attached context, dictation,
+keyboard focus, and narrow layouts were rendered and reviewed. The spoke
+reloaded to ready. Browser reads and speech recognition used fixtures; no
+live microphone recording, browser permission prompt, or production memory
+write was performed for verification.
+
 ## 2026-09-09 — Automatic means the same, without the question
 
 **Why.** A candidate could be added by hand, one approval each. The plan's
@@ -648,6 +1810,62 @@ probe_task_tools.py 24, probe_task_dispatch.py 37, probe_turns.py 88,
 probe_hub_arbiter.py 61, probe_hub_imports.py 6; hub import clean; the
 spoke reloaded to ready. The real Google calendar is not exercised by the
 probes; a live run against a test calendar is separate acceptance.
+
+## 2026-09-09 — Closing lets the thought go
+
+**Why.** Closing a note left its contents waiting on the next opening. The
+owner wants dismissal to discard an unsaved thought, keeping only notes
+explicitly submitted with Shift–Enter or Save.
+
+**What.**
+
+- *Close means discard.* Escape and the renamed Discard button remove the
+  local draft, text, and retry identity. Reopening starts blank. An unexpected
+  restart still recovers an open draft. A failed deletion stays visible with
+  an error instead of claiming the draft is gone.
+- *A receipt belongs to its note.* Closing after submission does not undo
+  that memory write; its late receipt cannot clear a newly opened draft.
+
+**Probes.** `probe_notes.py 34 → 37: explicit and repeated discard, deletion
+failure, and retired identity. probe_note_window.py 54 → 59: Escape and
+Discard clear the draft without a save frame, blank reopening, failed deletion,
+and late receipt isolation.`
+Keyboard-focus and narrow-error renders were reviewed with the Discard label.
+The spoke reloaded to ready. Verification used temporary notes, without
+writing or deleting production memories.
+
+## 2026-09-09 — The thought leaves softly
+
+**Why.** The quicker note dismissal felt abrupt. A little movement can
+mark the receipt without holding attention any longer.
+
+**What.**
+
+- *A soft departure.* The successful receipt fades with a six-point downward
+  drift over the same 0.2 seconds, easing at both ends. Reduce Motion keeps
+  the fade stationary. Reopening cancels the animation, restores opacity
+  and position, and prevents an old callback from hiding the new editor.
+
+**Probes.** `probe_note_window.py 49 → 54: intermediate fade and drift,
+restored position and opacity, Reduce Motion, reopening during a fade, and
+stale callback rejection. The real timer still dismisses within 400 ms.`
+Saved, keyboard-focus, and narrow-error renders were reviewed; intermediate
+opacity and position were checked on the native window. The spoke reloaded
+to ready. No production memory write was used for verification.
+
+## 2026-09-09 — Back to the thought's surroundings
+
+**Why.** The note lingered after Shift–Enter even after memory had accepted
+it, holding attention longer than a passing thought needed.
+
+**What.**
+
+- *A brief receipt.* The green success row now lasts 0.2 seconds instead
+  of 1.1 seconds before tucking away. It still waits for memory's receipt;
+  failures keep the draft and Retry visible.
+
+**Probes.** `probe_note_window.py 48 → 49: a real native timer hides the
+successful note within 400 ms; the existing reopen check pins cancellation.`
 
 ## 2026-09-09 — A file can come with the words
 
