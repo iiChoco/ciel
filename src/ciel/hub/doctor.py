@@ -2,7 +2,7 @@
 
 Five questions, each answered in one line, and a non-zero exit when any
 fails — for the first minute on a new server and for the 3 AM "why is
-Discord silent" that comes later:
+the Chart silent" that comes later:
 
 * the wire's token exists (or the bind is loopback and none is needed);
 * the bind address is an address this machine actually has;
@@ -82,10 +82,16 @@ def run(config: "Config") -> list[tuple[str, bool, str]]:
     """Every check, as (name, ok, detail)."""
     rows: list[tuple[str, bool, str]] = []
 
+    from ciel.nutrition import readiness
+    nutrition_ok, nutrition_detail = readiness(config)
+    rows.append(("nutrition", nutrition_ok, nutrition_detail))
     bind = config.hub.bind or config.web.host
     if bind in _LOOPBACK:
-        rows.append(("bind", True, f"loopback ({bind or '127.0.0.1'}) — reach is identity, no token needed"))
-        rows.append(("token", True, "not required on loopback"))
+        required = config.hub.require_token
+        rows.append(("bind", True, f"loopback ({bind or '127.0.0.1'}) — " + ("token required" if required else "reach is identity, no token needed")))
+        token = config.hub.current_token() if required else ""
+        rows.append(("token", bool(token) if required else True,
+                     ("present; required on loopback" if token else "missing required token; configure every client") if required else "not required on loopback"))
     else:
         ok = _can_bind(bind)
         rows.append(("bind", ok, f"{bind} {'is an address of this machine' if ok else 'is NOT an address of this machine (tailscale down?)'}"))

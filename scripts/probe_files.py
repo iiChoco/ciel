@@ -9,6 +9,8 @@ and file through the same guard. This drives them over a fixture tree
 with a fake secret, a forbidden subtree, and a symlink out, and checks the
 built-in walkers are refused whatever they are given. The signup cookie,
 including a configured filename, is refused by direct reads and searches.
+Nutrition's directory, database sidecars, and key stay outside both file
+access and the spoke shell classifier, including configured basenames.
 
     PYTHONPATH=src .venv/bin/python scripts/probe_files.py
 """
@@ -141,11 +143,21 @@ async def main() -> None:
         result = await shell({"tool_name": "Bash", "tool_input": {"command": f"cat {alternate}"}}, None, None)
         check("the configured cookie is denied by the shell without asking", not questions
               and result["hookSpecificOutput"]["permissionDecision"] == "deny")
-        for name in ('tasks.sqlite3', 'tasks.sqlite3-journal', 'owner.lock'):
+        for name in ('tasks.sqlite3', 'tasks.sqlite3-journal', 'owner.lock', 'nutrition.sqlite3', 'nutrition.sqlite3-journal', 'nutrition.sqlite3-wal', 'nutrition.sqlite3-shm', 'nutrition-api-key'):
             private = ws / name
             private.write_text('private-task-fixture')
             check(f'{name} is refused even in a broad fixture workspace', guard.permits(str(private)) is not None)
         check('file search cannot expose private task records or their journal', await run(files.search_files, pattern='private-task-fixture') == 'No matches.')
+        food_dir = ws / "custom-food-state"
+        food_dir.mkdir()
+        private = food_dir / "receipt.json"
+        private.write_text("private-nutrition-fixture")
+        cfg = replace(cfg, nutrition=replace(cfg.nutrition, state_dir=food_dir, fdc_api_key_file=ws / "food-key"))
+        food_guard = WorkspaceGuard.from_config(cfg)
+        check("the configured nutrition directory is private as a whole", food_guard.permits(str(private)) is not None)
+        shell = ShellGuard(cfg.shell, approve, forbidden=forbidden_names(cfg))
+        result = await shell({"tool_name":"Bash","tool_input":{"command":f"cat {private}"}},None,None)
+        check("the shell cannot bypass nutrition's configured directory guard", result["hookSpecificOutput"]["permissionDecision"] == "deny" and not questions)
         check("an ordinary search still answers", "almost.txt:1:" in await run(files.search_files, pattern="a{29}!"))
 
     print(f"\nall {len(CHECKS)} checks passed" if not FAILED else f"\n{FAILED} FAILED")

@@ -121,6 +121,13 @@ CATALOG: dict[str, FrameSpec] = {
                                         "mandate_id": "str", "grant_id": "str"}),
     "task.result": FrameSpec("h2c", required={"request_id": "str", "ok": "bool", "data": "dict"}, optional={"error": "str"}),
     "task.changed": FrameSpec("h2c"),
+    "nutrition.request": FrameSpec("c2h", required={"request_id": "str", "operation": "str", "data": "dict"}),
+    "nutrition.upload": FrameSpec("c2h", required={"request_id": "str", "capture": "dict", "data": "str"}),
+    "nutrition.result": FrameSpec("h2c", required={"request_id": "str", "ok": "bool", "data": "dict"}, optional={"error": "str", "uncertain": "bool"}),
+    "nutrition.receipt": FrameSpec("h2c", required={"data": "dict"}),
+    "nutrition.question": FrameSpec("h2c", required={"data":"dict"}),
+    "nutrition.question_end": FrameSpec("h2c", required={"confirm_id":"str"}),
+    "nutrition.answer": FrameSpec("c2h", required={"request_id":"str","confirm_id":"str","operation":"str","digest":"str","approve":"bool"}),
     "mute": FrameSpec("c2h", required={"muted": "bool"}),
     "restart": FrameSpec("c2h"),
     "turn.cancel": FrameSpec(
@@ -282,6 +289,17 @@ def validate(frame: Any, direction: Direction) -> dict[str, Any]:
     for name, shape in spec.optional.items():
         if name in frame and frame[name] is not None and not _SHAPES[shape](frame[name]):
             raise WireError(f"{kind}: {name!r} is not {shape}")
+    if kind == "nutrition.answer":
+        if len(json.dumps(frame))>2048 or any(not 0<len(frame[k])<=256 for k in ("request_id","confirm_id","operation","digest")):
+            raise WireError("nutrition answer exceeds its identity bound")
+    if kind == "nutrition.upload":
+        if len(json.dumps(frame)) > 2800000 or not 0 < len(frame["request_id"]) <= 256 or len(json.dumps(frame["capture"])) > 4096:
+            raise WireError("nutrition upload exceeds its byte or identity bound")
+    if kind == "nutrition.request":
+        if len(json.dumps(frame)) > 65536 or not 0 < len(frame["request_id"]) <= 256:
+            raise WireError("nutrition request is too large or has no bounded identity")
+        if frame["operation"] not in ("dashboard", "weight_save", "weight_delete", "day", "search", "history", "save", "repeat", "delete", "complete", "settings", "undo", "drafts", "media", "draft_edit", "draft_discard", "photo_analyze", "photo_cancel", "photo_resume", "catalog", "portion", "preview", "plans", "bulk_preview", "catalog_save", "catalog_delete", "batch_create", "catalog_log", "plan_save", "plan_delete", "plan_log", "bulk_apply"):
+            raise WireError("unknown nutrition operation")
     if kind.startswith('task.'):
         if len(json.dumps(frame)) > 65536:
             raise WireError('task frame exceeds its size bound')
@@ -375,7 +393,7 @@ class ReplayRing:
     already forgotten (the client fell behind more than ``maxlen``
     frames; it gets a fresh hello with the history window instead).
 
-    ``grace_s`` is the Discord catch-up rule applied to live prompts: a
+    ``grace_s`` is the catch-up rule applied to live prompts: a
     ``confirm`` older than the grace is not replayed, because the
     broker has long since timed the question out and a stale banner
     would invite an answer to nothing. Every other frame replays at any

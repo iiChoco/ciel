@@ -1,7 +1,14 @@
 """Spoken yes-or-no confirmation, bridging a brain hook to the mic loop.
 
 Codename: **Proof Obligation** — a side-effectful step is not permitted until
-its obligation has been discharged out loud.
+its obligation has been discharged by the owner.
+
+**A strict question belongs to one page.** Nutrition's historical changes
+opt into an expiring scope: operation, digest, confirmation ID, and the
+server's client identity. Only its private answer frame can discharge it.
+Generic answers are refused while it is pending, confirmations-off never
+answers it automatically, and disconnect/cancellation leave no approval to
+replay. Ordinary questions retain their existing choreography.
 
 The tool guards — the shell gate, the connector gate, whatever fronts an
 outward-acting tool next — need to ask the user a question and hear the
@@ -34,20 +41,19 @@ chatbox can be confirmed without switching to voice. Same classifier, same
 one-re-prompt-then-deny contract — the modality changes, the obligation
 doesn't.
 
-The obligation also follows the user out the door. A turn that arrived over
-a text lane — the Discord link, or the local web GUI — runs inside
-:meth:`remote`, and a question asked there is *shown*, not spoken: the
-person who asked is at their phone or behind a keyboard in a quiet room,
-and a question voiced into an empty room discharges nothing. The answer
-comes back over a text lane (the pipeline routes owner messages to
-:meth:`answer` exactly as it routes typed lines), against a
-notification-time deadline rather than a conversation-time one. Remote
-answers are only ever accepted for remote-origin questions — a question
-asked *aloud at home* must not be answerable by someone who never heard it
-— and lane-matched besides: a Discord text answers only a Discord-origin
-question, because a question shown on the loopback page was never shown to
-the phone. (The page may answer either origin; every question is mirrored
-to it as a ciel-confirm row.)
+The obligation also follows the user away from the microphone. A turn that
+arrived over a text lane — the Chart — runs inside :meth:`remote`, and a
+question asked there is *shown*, not spoken: the person who asked is
+behind a keyboard in a quiet room, and a question voiced into an empty
+room discharges nothing. The answer comes back over the same lane (the
+pipeline routes page messages to :meth:`answer` exactly as it routes
+typed lines), against a notification-time deadline rather than a
+conversation-time one. Remote answers are only ever accepted for
+remote-origin questions — a question asked *aloud at home* must not be
+answerable by someone who never heard it — and lane-matched besides: the
+origin names the lane that showed the question, and an answer from a lane
+that never showed it is not an answer. (The page may answer any origin;
+every question is mirrored to it as a ciel-confirm row.)
 """
 
 from __future__ import annotations
@@ -55,6 +61,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
+from dataclasses import dataclass
 from contextlib import contextmanager
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Awaitable, Callable, Iterator
@@ -109,6 +117,16 @@ class _Phase(Enum):
     LISTEN = auto()     # awaiting the answer; frames go to the endpointer
 
 
+@dataclass(frozen=True)
+class QuestionScope:
+    """A private question's identity is minted by the broker, never its caller."""
+    confirm_id: str
+    operation: str
+    digest: str
+    client: str
+    expires: float
+
+
 class VoiceConfirmBroker:
     """Asks the user a spoken yes/no question and returns their answer."""
 
@@ -135,9 +153,17 @@ class VoiceConfirmBroker:
         (see :meth:`remote`); None for every attended turn. Its presence is
         what routes :meth:`ask` through the texted choreography."""
         self._remote_origin: str | None = None
-        """Which lane installed the sink — "discord" or "web" — so an
+        """Which lane installed the sink — "web" or "spoke" — so an
         answer is only ever accepted from a lane that showed the question
         (see :attr:`remote_origin`)."""
+        self._scope: QuestionScope | None = None
+        self._scope_answer: asyncio.Future[bool] | None = None
+        self._expected_id: str | None = None
+        """The identity the sink put the pending question under (see
+        :meth:`expect`), or None when no identified question is open. An
+        answer that names a different question is not an answer to this
+        one: a "yes" transcribed late, to a question already denied, must
+        not approve whatever was asked next."""
 
         self._player: Player | None = None
         self._mic: MicStream | None = None
@@ -246,7 +272,16 @@ class VoiceConfirmBroker:
         # WAIT_IDLE: dropped. The playing sentence belongs to _respond;
         # interrupting it here would read as barge-in and abandon the turn.
 
-    def answer(self, text: str) -> bool:
+    def expect(self, confirm_id: str | None) -> None:
+        """The sink registered the identity it is putting the question
+        under. Called by a sink whose lane returns answers with an id (the
+        spoke's ``confirm.answer``), before each line that listens — the
+        question and the re-prompt each get their own, so an answer to the
+        first arriving after the second is refused. Cleared with the
+        question: on its verdict and on cancellation."""
+        self._expected_id = confirm_id
+
+    def answer(self, text: str, confirm_id: str | None = None) -> bool:
         """Accept a typed answer to the pending question.
 
         Returns whether the line was consumed — False outside PROMPT/LISTEN,
@@ -255,21 +290,87 @@ class VoiceConfirmBroker:
         question hasn't been put yet, and a line typed before it appears is
         far more likely the user's next request than a clairvoyant answer.
 
+        ``confirm_id`` is the question the answer says it is for, when its
+        lane names one. It must be the question the sink registered with
+        :meth:`expect`; an answer for any other question — one already
+        decided, or one that was never put through this broker — is
+        refused, and says so in the log. An answer with no id (a typed
+        line, a Chart message) is judged by the predating rule alone, as
+        before: those lanes never had an id to carry.
+
         Typing over the prompt is the keyboard's barge-in, and unlike the
         acoustic kind it needs no echo cancellation to be trusted — a
         keystroke is never Ciel's own voice. Stopping the prompt here is
         broker-owned, same as :meth:`_check_early_answer`.
         """
-        if self._phase not in (_Phase.PROMPT, _Phase.LISTEN):
+        if self._scope is not None or self._phase not in (_Phase.PROMPT, _Phase.LISTEN):
+            return False
+        if confirm_id is not None and confirm_id != self._expected_id:
+            log.info("an answer for question %s arrived while %s was pending — ignored",
+                     confirm_id, self._expected_id or "no identified question")
             return False
         self._typed_answer = text
         if self._phase is _Phase.PROMPT and self._player is not None:
             self._player.stop()
         return True
 
+    async def ask_scoped(self, send: Callable[[dict[str, object]], Awaitable[None]], *, operation: str,
+                         digest: str, client: str, expires: float) -> bool:
+        """Ask through a private page, requiring this scope on its answer.
+
+        This opt-in path does not use the ordinary transcript or the
+        confirmations-off shortcut. It shares the broker's one-question lock;
+        generic speech, keyboard, and Chart answers cannot discharge it.
+        """
+        if not self._config.confirm.ask_first or self._suppressed or self.active or self._lock.locked() or self._remote_send is not None:
+            return False
+        if not operation or not digest or not client or expires <= time.monotonic():
+            return False
+        async with self._lock:
+            scope = QuestionScope(str(uuid.uuid4()),operation,digest,client,min(expires,time.monotonic()+self._config.web.confirm_timeout_s))
+            self._scope = scope
+            self._scope_answer = asyncio.get_running_loop().create_future()
+            self._cancelled.clear()
+            self._phase = _Phase.LISTEN
+            self._asked_at,self._asked_at_wall = time.monotonic(),time.time()
+            try:
+                async with asyncio.timeout(max(.001,scope.expires-time.monotonic())):
+                    await send({"confirm_id":scope.confirm_id,"operation":operation,"digest":digest,
+                                "expires_at":time.time()+scope.expires-time.monotonic()})
+                    result = await self._scope_answer
+                    return result and self._config.confirm.ask_first and not self._cancelled.is_set() and time.monotonic()<scope.expires
+            except (TimeoutError, RuntimeError):
+                return False
+            finally:
+                self._scope = None
+                if self._scope_answer is not None and not self._scope_answer.done():
+                    self._scope_answer.cancel()
+                self._scope_answer = None
+                self._phase = _Phase.IDLE
+                self._asked_at = self._asked_at_wall = None
+                self._expected_id = None
+
+    def answer_scoped(self, *, confirm_id: str, operation: str, digest: str, client: str, approve: bool) -> bool:
+        """The socket supplies client identity; no model or frame can choose it."""
+        scope = self._scope
+        if scope is None or self._scope_answer is None or self._scope_answer.done() or type(approve) is not bool:
+            return False
+        if not self._config.confirm.ask_first or time.monotonic()>=scope.expires:
+            self._scope_answer.set_result(False)
+            return False
+        if (confirm_id,operation,digest,client) != (scope.confirm_id,scope.operation,scope.digest,scope.client):
+            return False
+        self._scope_answer.set_result(approve)
+        return True
+
+    def cancel_scoped(self, client: str) -> None:
+        """Disconnecting one page cancels only the question owned by that page."""
+        if self._scope is not None and self._scope.client == client:
+            self.cancel("private page disconnected")
+
     @contextmanager
     def remote(
-        self, send: Callable[[str], Awaitable[None]], origin: str = "discord"
+        self, send: Callable[[str], Awaitable[None]], origin: str = "web"
     ) -> "Iterator[None]":
         """Route confirmations through a remote text channel for the block.
 
@@ -277,7 +378,7 @@ class VoiceConfirmBroker:
         an unattended one: any confirm-tier tool call inside texts its
         question via ``send`` and waits for the owner's reply instead of
         speaking to a room the user is not in. ``origin`` names the lane
-        ("discord", "web", or "spoke" — the hub's voice lane, whose sink
+        ("web", or "spoke" — the hub's voice lane, whose sink
         speaks the question through the spoke and takes ``listen=`` to
         know which lines expect an answer) so the pipeline can accept an
         answer only from a lane that actually showed the question. Not a
@@ -307,7 +408,7 @@ class VoiceConfirmBroker:
         """
         if not self._config.confirm.ask_first:
             return self._answer_myself(question)
-        deadline = time.monotonic() + self._config.discord.confirm_timeout_s
+        deadline = time.monotonic() + self._config.web.confirm_timeout_s
         while self._remote_send is not None or self.active or self._lock.locked():
             if time.monotonic() >= deadline:
                 return False
@@ -345,11 +446,11 @@ class VoiceConfirmBroker:
     @property
     def remote_origin(self) -> str | None:
         """Which lane asked the pending remote question, or None outside a
-        remote turn. The pipeline routes a Discord answer only when this is
-        "discord": a web-origin question is visible only on the loopback
-        page, and a text from a phone that never showed it is not an
-        answer. (The web page may answer *any* origin — every question is
-        mirrored to it as a ciel-confirm row, so its reader has seen it.)"""
+        remote turn. A lane's answer is routed only when this names that
+        lane: an answer from a lane that never showed the question is not
+        an answer. (The web page may answer *any* origin — every question
+        is mirrored to it as a ciel-confirm row, so its reader has seen
+        it.)"""
         return self._remote_origin
 
     @contextmanager
@@ -376,6 +477,9 @@ class VoiceConfirmBroker:
         if self.active:
             log.debug("confirmation cancelled%s", f" ({reason})" if reason else "")
         self._cancelled.set()
+        if self._scope_answer is not None and not self._scope_answer.done():
+            self._scope_answer.set_result(False)
+        self._expected_id = None
         if self._utterance is not None and not self._utterance.done():
             self._utterance.set_result(None)
 
@@ -462,6 +566,7 @@ class VoiceConfirmBroker:
                 self._phase = _Phase.IDLE
                 self._asked_at = None
                 self._asked_at_wall = None
+                self._expected_id = None
                 self._endpointer.reset()
 
     async def _ask_remote(self, question: str) -> bool:
@@ -474,7 +579,7 @@ class VoiceConfirmBroker:
         loop routing answers here — while :meth:`feed` stays inert
         (``_utterance`` is never created, so mic frames fall through).
         Same one-re-prompt-then-deny contract, same cancel-means-deny;
-        the deadline runs on notification time (``discord.confirm_timeout_s``),
+        the deadline runs on notification time (``web.confirm_timeout_s``),
         not the spoken gate's eight seconds. A question that cannot even
         be sent resolves to deny — a gate that cannot ask must still
         resolve, and silently-no is its safe shape.
@@ -530,6 +635,7 @@ class VoiceConfirmBroker:
                 self._phase = _Phase.IDLE
                 self._asked_at = None
                 self._asked_at_wall = None
+                self._expected_id = None
 
     async def _send_remote(
         self,
@@ -568,7 +674,7 @@ class VoiceConfirmBroker:
         timeout = (
             self._config.hub.confirm_timeout_s
             if self._remote_origin == "spoke"
-            else self._config.discord.confirm_timeout_s
+            else self._config.web.confirm_timeout_s
         )
         deadline = time.monotonic() + timeout
         while True:

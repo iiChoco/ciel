@@ -98,13 +98,16 @@ FORBIDDEN_NAMES = frozenset({
     ".bashrc", ".bash_profile", ".profile", ".bash_login",
     # Task records and the rollback journal contain private owner mandates.
     "tasks.sqlite3", "tasks.sqlite3-journal", "owner.lock",
+    # Nutrition's history, cache, and sidecars are one private directory.
+    "nutrition-state", "nutrition.sqlite3", "nutrition.sqlite3-journal",
+    "nutrition.sqlite3-wal", "nutrition.sqlite3-shm", "nutrition-api-key",
     # Credentials and keys
     ".ssh", ".aws", ".gnupg", ".gpg", ".netrc", ".env",
     ".npmrc", ".pypirc", ".docker", ".kube", ".terraform.d",
     "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "credentials.json",
-    # The Discord bot token — the away lane's whole identity. Lives in its
-    # own file precisely so this list can name it; config.toml itself stays
-    # readable.
+    # The retired Discord lane's bot token (the lane was sunset on
+    # 2026-09-11). The file may still sit in ~/.ciel on a machine that
+    # ran it, and a credential nobody uses is still a credential.
     "discord.token",
     # The Oura authorization — client secret and a refresh token, same
     # arrangement: its own file so this list can name it.
@@ -146,6 +149,8 @@ def forbidden_names(config: Any) -> frozenset[str]:
     return FORBIDDEN_NAMES | {
         config.sections.cookie_file.name, config.spotify.token_file.name,
         config.spotify.token_file.name + ".lock",
+        (config.nutrition.state_dir or config.state_dir / "nutrition-state").name,
+        config.nutrition.fdc_api_key_file.name,
     }
 
 

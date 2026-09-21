@@ -120,7 +120,7 @@ Origin and pass. This lane feeds text straight into a brain with tools —
 the checks are small, but they are the whole difference between "the
 user's page" and "whatever tab is open".
 
-Built hub-shaped like the Discord lane: the pipeline sees the same
+Built hub-shaped on purpose: the pipeline sees the same
 queue-and-send surface — ``pending``/``peek``/``pop_batch`` inbound,
 ``send`` outbound — plus four taps (``note_row``/``note_state``/
 ``note_muted``/``note_agents``) that exist because a GUI is a *view*, not
@@ -141,12 +141,13 @@ import hmac
 import ipaddress
 import json
 import logging
+import mimetypes
 import re
 import os
 import secrets
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import urlsplit
@@ -160,6 +161,7 @@ if TYPE_CHECKING:
 from ciel.turn import Attachment, Ingress, TurnBatch, owner_origin, pop_turn_batch
 from ciel.task_controls import TaskController
 from ciel.task_context import TaskBinding
+from ciel.nutrition import NutritionController, OwnerContext
 
 log = logging.getLogger(__name__)
 
@@ -317,6 +319,15 @@ def _sniff(data: bytes, claimed: str) -> str:
 _UPLOAD_NAME = re.compile(r"^[0-9a-f]{32}-")
 """The Chart's own files: the page's id, then the safe basename."""
 
+_TEXT_SUFFIXES = {
+    ".md": "text/markdown", ".markdown": "text/markdown", ".txt": "text/plain", ".log": "text/plain",
+    ".csv": "text/csv", ".json": "application/json", ".yaml": "application/yaml", ".yml": "application/yaml",
+    ".toml": "application/toml", ".xml": "application/xml", ".html": "text/html", ".py": "text/x-python",
+}
+"""What a stored file's suffix says it is, when its bytes say nothing: the
+page's claim is gone after a restart, and the platform's own table does
+not know Markdown. Text-shaped only; images and PDFs are known by bytes."""
+
 
 def _safe_name(raw: str) -> str:
     """A basename that cannot leave the uploads folder or confuse a shell."""
@@ -341,6 +352,11 @@ class WebLink:
     ) -> None:
         self._config = config
         self.task_owner = "local-owner"
+        self._nutrition: NutritionController | None = None
+        self._nutrition_bindings: dict[Any, TaskBinding] = {}
+        self._nutrition_sessions: dict[Any, str] = {}
+        self._nutrition_ingress: dict[str, str] = {}
+        self._nutrition_requests: set[asyncio.Task[None]] = set()
         self._task_controller: TaskController | None = None
         self._task_requests: set[asyncio.Task[None]] = set()
         self._uploads: Path | None = None
@@ -369,7 +385,7 @@ class WebLink:
         hub's arbiter waits on it instead of polling the queues."""
         self._queue: deque[Ingress] = deque()
         """Inbound turns awaiting the frame loop, oldest first:
-        ``(arrival, text, None)`` — the Discord deque's shape, with the
+        ``(arrival, text, None)`` — the lane contract's shape, with the
         channel pinned to None because every reply broadcasts to every
         open chart: they are all the same user looking at the same
         conversation."""
@@ -408,9 +424,55 @@ class WebLink:
         pipeline's frame loop; the link only relays the request."""
 
     def bind_uploads(self, directory: Path) -> None:
-        """Take files from the Chart into ``directory``, created owner-only."""
+        """Take files from the Chart into ``directory``, created owner-only.
+        What an earlier process left there is indexed again, so a say that
+        names a file uploaded before a restart still finds it."""
         self._uploads = directory.expanduser()
         self._prune_uploads()
+        recalled = self._recall_uploads()
+        if recalled:
+            log.info("recalled %d Chart file(s) stored before this process", recalled)
+
+    def _recall_uploads(self) -> int:
+        """Rebuild the id table from the folder: every file in the Chart's
+        own ``<id>-<name>`` shape that is not already known. The record
+        lived only in this process before, so a hub restart between an
+        upload's receipt and the message that named it lost the file —
+        still on disk, unresolvable, and unretryable, since the resend hit
+        the exclusive create. Returns how many were recalled."""
+        if self._uploads is None or not self._uploads.is_dir():
+            return 0
+        recalled = 0
+        for path in sorted(self._uploads.iterdir()):
+            if not _UPLOAD_NAME.match(path.name) or path.name[:32] in self._files:
+                continue
+            attachment = self._recall_file(path)
+            if attachment is not None:
+                self._files[path.name[:32]] = attachment
+                recalled += 1
+        return recalled
+
+    @staticmethod
+    def _recall_file(path: Path) -> Attachment | None:
+        """An attachment record reconstructed from a stored file: the name
+        after the id, the size from the file, the type from its first bytes
+        — an image or a PDF is known by them — and for the rest from the
+        name's suffix, held to the same rule the page's claim was (a
+        text-shaped type is kept for the prompt to decode strictly; anything
+        else is an octet stream). An empty or unreadable file is no record."""
+        try:
+            if not path.is_file():
+                return None
+            size = path.stat().st_size
+            with path.open("rb") as handle:
+                head = handle.read(16)
+        except OSError:
+            return None
+        if not size or not head:
+            return None
+        name = path.name[33:] or "file"
+        claimed = _TEXT_SUFFIXES.get(Path(name).suffix.lower()) or mimetypes.guess_type(name)[0] or ""
+        return Attachment(name, _sniff(head, claimed), str(path), size)
 
     def _prune_uploads(self, now: float | None = None) -> int:
         """Forget what the Chart sent long ago: files in its own ``<id>-<name>``
@@ -485,6 +547,18 @@ class WebLink:
             except BaseException:
                 path.unlink(missing_ok=True)
                 raise
+        except FileExistsError:
+            # The same id and name are already on disk from a process that
+            # is gone: a retry after a restart. The stored file stands —
+            # the exclusive create still protects it — and the page hears
+            # the record it already made, reconstructed.
+            known = self._recall_file(path)
+            if known is None:
+                refuse("The file could not be saved.")
+                return
+            self._files[file_id] = known
+            self._send_to(ws, {"type": "file.result", "file_id": file_id, "ok": True, "name": known.name, "size": known.size})
+            return
         except OSError:
             log.warning("could not save a Chart file", exc_info=True)
             refuse("The file could not be saved.")
@@ -499,6 +573,103 @@ class WebLink:
             return (), 0
         found = [self._files[i] for i in ids if isinstance(i, str) and i in self._files]
         return tuple(found[: self._config.max_files_per_turn]), len(ids) - len(found)
+
+    def bind_nutrition(self, controller: NutritionController, broker: Any = None) -> None:
+        self._nutrition = controller
+        self._nutrition_broker = broker
+        if broker is not None:
+            controller.library.ask_scoped = self._ask_nutrition_scope
+
+    async def _ask_nutrition_scope(self, context: OwnerContext, operation: str, digest: str, report: dict[str, Any], expires: float) -> bool:
+        ws = next((ws for ws,session in self._nutrition_sessions.items() if session == context.session),None)
+        if ws is None or ws not in self._clients:
+            return False
+        question_id = None
+        async def send(scope: dict[str, Any]) -> None:
+            nonlocal question_id
+            if ws not in self._clients:
+                raise RuntimeError("The reviewing page disconnected.")
+            question_id = scope["confirm_id"]
+            self._send_to(ws,{"type":"nutrition.question", "data":{**scope,"review":report}})
+        try:
+            return await self._nutrition_broker.ask_scoped(send,operation=operation,digest=digest,client=context.session,expires=expires)
+        finally:
+            if question_id:
+                self._send_to(ws,{"type":"nutrition.question_end","confirm_id":question_id})
+
+    def _nutrition_answer(self, frame: dict[str, Any], ws: Any) -> None:
+        if ws not in self._peers or ws not in self._clients or ws is getattr(self,"_spoke",None):
+            return
+        broker = getattr(self,"_nutrition_broker",None)
+        accepted = bool(broker and broker.answer_scoped(confirm_id=frame["confirm_id"],operation=frame["operation"],
+                        digest=frame["digest"],client=self._nutrition_sessions.get(ws,""),approve=frame["approve"]))
+        self._send_to(ws,{"type":"nutrition.result","request_id":frame["request_id"],"ok":True,"data":{"accepted":accepted}})
+
+    def nutrition_session(self, origin: Any) -> str:
+        sessions = {self._nutrition_ingress.get(i, "") for i in origin.ingress_ids}
+        return next(iter(sessions)) if len(sessions) == 1 and "" not in sessions else ""
+
+    def nutrition_receipt(self, data: dict[str, Any]) -> None:
+        for ws in tuple(self._peers):
+            if ws is not getattr(self, "_spoke", None):
+                self._send_to(ws, {"type": "nutrition.receipt", "data": data})
+
+    def _nutrition_request(self, frame: dict[str, Any], ws: Any) -> None:
+        controller = self._nutrition
+        if ws not in self._peers or ws not in self._clients:
+            return
+        if controller is None or not self._hub.require_token or not self._token or ws is getattr(self, "_spoke", None) or len(self._nutrition_requests) >= controller.config.nutrition.max_pending_controls:
+            self._send_to(ws, {"type": "nutrition.result", "request_id": frame["request_id"], "ok": False, "data": {}, "error": "Nutrition is unavailable or busy; check ciel hub --check."})
+            return
+        task = asyncio.create_task(self._run_nutrition_request(controller, frame, ws))
+        self._nutrition_requests.add(task)
+        task.add_done_callback(self._nutrition_requests.discard)
+
+    async def _run_nutrition_request(self, controller: NutritionController, frame: dict[str, Any], ws: Any) -> None:
+        response = {"type": "nutrition.result", "request_id": frame["request_id"], "ok": True, "data": {}}
+        try:
+            base = self._nutrition_bindings[ws]
+            origin = owner_origin(controller.config.tasks.owner, "web", frame["request_id"], namespace="nutrition-page")
+            context = OwnerContext(replace(base, origin=origin), self._nutrition_sessions[ws], page=True)
+            if frame["type"] == "nutrition.upload":
+                if len(frame["data"]) > (controller.config.nutrition.photo_max_bytes + 2) // 3 * 4:
+                    raise ValueError("The photo exceeds its upload bound.")
+                try:
+                    data = base64.b64decode(frame["data"], validate=True)
+                except (binascii.Error, ValueError):
+                    raise ValueError("The photo did not decode.") from None
+                response["data"] = await controller.photos.upload(context, frame["capture"], data)
+                self._send_to(ws, response)
+                return
+            operation, args = frame["operation"], frame["data"]
+            from ciel.nutrition_library import READS, WRITES
+            if operation in READS:
+                response["data"] = await controller.library.read(context,operation,args)
+            elif operation in WRITES:
+                response["data"] = await controller.library.apply(context,operation,args)
+            elif operation == "drafts":
+                response["data"] = await controller.photos.listing(context)
+            elif operation == "media":
+                response["data"] = await controller.photos.media(context, args)
+            elif operation == "photo_resume":
+                response["data"] = await controller.photos.resume(context, args)
+            elif operation in ("draft_edit", "draft_discard", "photo_analyze", "photo_cancel"):
+                response["data"] = await controller.photos.control(context, operation, args)
+            elif operation == "dashboard":
+                response["data"] = await controller.dashboard.read(context, args)
+            elif operation == "day":
+                response["data"] = await controller.view(context, args.get("day"))
+            elif operation == "search":
+                response["data"] = await controller.search(context, args.get("query", ""))
+            elif operation == "history":
+                response["data"] = await controller.inspect_history(context, args)
+            else:
+                response["data"] = await controller.apply(context, operation, args)
+        except (ValueError, RuntimeError) as exc:
+            response.update(ok=False, error=str(exc))
+        except Exception:
+            response.update(ok=False, error="Nutrition request failed; inspect the diary before retrying.", uncertain=True)
+        self._send_to(ws, response)
 
     def bind_tasks(self, controller: TaskController) -> None:
         self._task_controller = controller
@@ -595,7 +766,7 @@ class WebLink:
     async def send(self, text: str, channel: Any = None) -> None:
         """Deliver a live confirmation prompt (``confirm.remote``'s send).
 
-        Never raises on an empty room, unlike the Discord link: the
+        Never raises on an empty room: the
         question is also a ``ciel-confirm`` transcript row, so a chart
         opened seconds later still shows it — and the broker's timeout
         already owns the nobody-answered case.
@@ -705,7 +876,7 @@ class WebLink:
         """Bind and serve; never blocks startup on failure.
 
         A missing aiohttp or a taken port is one warning and a disabled
-        lane, mirroring how the Discord lane degrades.
+        lane, degrading to one warning rather than a blocked start.
         """
         try:
             from aiohttp import web
@@ -739,6 +910,7 @@ class WebLink:
 
         app = web.Application()
         app.router.add_get("/", self._serve_page)
+        app.router.add_get("/nutrition", self._serve_nutrition_page)
         app.router.add_get("/ws", self._serve_ws)
         if self._interview is not None:
             await self._interview.start()
@@ -761,6 +933,16 @@ class WebLink:
         log.info("web GUI at %s", self.url)
 
     async def close(self) -> None:
+        for binding in tuple(self._nutrition_bindings.values()):
+            await asyncio.to_thread(binding._lease.revoke)
+        for task in tuple(self._nutrition_requests):
+            task.cancel()
+        if self._nutrition_requests:
+            await asyncio.gather(*self._nutrition_requests, return_exceptions=True)
+        self._nutrition_requests.clear()
+        self._nutrition_bindings.clear()
+        self._nutrition_sessions.clear()
+        self._nutrition_ingress.clear()
         for task in tuple(self._task_requests):
             task.cancel()
         if self._task_requests:
@@ -786,6 +968,11 @@ class WebLink:
             self._site = None
 
     # ── handlers ─────────────────────────────────────────────────────────────
+
+    async def _serve_nutrition_page(self, request: Any) -> Any:
+        from aiohttp import web
+        return web.Response(text=_PAGE.with_name("nutrition.html").read_text(), content_type="text/html",
+                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
     async def _serve_page(self, request: Any) -> Any:
         from aiohttp import web
@@ -890,6 +1077,15 @@ class WebLink:
         finally:
             self._clients.pop(ws, None)
             self._peers.pop(ws, None)
+            binding = self._nutrition_bindings.pop(ws, None)
+            session = self._nutrition_sessions.pop(ws, "")
+            if getattr(self,"_nutrition_broker",None) is not None:
+                self._nutrition_broker.cancel_scoped(session)
+            if self._nutrition is not None:
+                self._nutrition.library.forget(session)
+            self._nutrition_ingress = {i: s for i, s in self._nutrition_ingress.items() if s != session}
+            if binding is not None:
+                await asyncio.to_thread(binding._lease.revoke)
             writer.cancel()
             self._client_left(ws)
             log.debug("web client left (%d open)", len(self._clients))
@@ -940,6 +1136,8 @@ class WebLink:
             queue.put_nowait(data)
         self._clients[ws] = queue
         self._peers[ws] = (verdict.role, verdict.client_id)
+        self._nutrition_sessions[ws] = secrets.token_urlsafe(24)
+        self._nutrition_bindings[ws] = TaskBinding(owner_origin(self.task_owner, "web", namespace="nutrition-session"), 0, 0)
         return queue, replay is not None
 
     async def _write_frames(self, ws: Any, queue: asyncio.Queue[str]) -> None:
@@ -953,7 +1151,7 @@ class WebLink:
             self._clients.pop(ws, None)
 
     def _on_frame(self, raw: str, ws: Any = None) -> None:
-        """One inbound frame: total, like the Discord message handler —
+        """One inbound frame: total —
         a malformed frame costs a debug line, never the socket loop.
         ``ws`` names the sender so the private replies (ack, pong) reach
         it alone; None means a sender already gone, or a caller with no
@@ -970,6 +1168,12 @@ class WebLink:
                 # A second hello mid-session: nothing to renegotiate —
                 # the socket already has its welcome. Ignored, not
                 # refused, so a client that re-sends on a hiccup is fine.
+                return
+            if kind == "nutrition.answer":
+                self._nutrition_answer(frame,ws)
+                return
+            if kind in ("nutrition.request", "nutrition.upload"):
+                self._nutrition_request(frame, ws)
                 return
             if kind == "task.request":
                 self._task_request(frame, ws)
@@ -999,6 +1203,10 @@ class WebLink:
                 origin = None
                 if ws in self._peers and isinstance(identity, str) and identity:
                     origin = owner_origin(self.task_owner, 'web', identity, namespace='chart')
+                    for ingress in origin.ingress_ids:
+                        self._nutrition_ingress[ingress] = self._nutrition_sessions.get(ws, "")
+                    while len(self._nutrition_ingress) > 512:
+                        self._nutrition_ingress.pop(next(iter(self._nutrition_ingress)))
                 self._queue.append(Ingress(time.monotonic(), text, None, origin, attachments))
             elif kind == "file.put":
                 self._store_file(frame, ws)
@@ -1023,7 +1231,7 @@ class WebIndicator:
     """The Indicator-protocol face of a :class:`WebLink`.
 
     start/close are no-ops on purpose: the pipeline owns the server's
-    lifecycle the way it owns the Discord link's — the indicator tee
+    lifecycle — the indicator tee
     must not be able to double-start or half-close the lane.
     """
 

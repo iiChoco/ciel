@@ -19,6 +19,13 @@ reports it (the probe only reports a restart — nothing relaunches here).
 If the page works here but not under Ciel, the lane is fine and the
 pipeline wiring is the place to look; if nothing works here, it is the
 port, the dependency, or the page itself.
+
+Files survive the process that took them: a link bound to a folder an
+earlier process filled recalls every file in the Chart's shape — the id,
+the name, the size, the type from the bytes (an image) or the suffix (a
+text-shaped claim, held to the same rule) — so a say naming one finds
+it, a retry of the same upload answers with the record and rewrites
+nothing, and the keep window still prunes what is old before recall.
 """
 from __future__ import annotations
 
@@ -335,6 +342,42 @@ def probe_files() -> None:
         bounded._on_frame(json.dumps({"type": "file.put", "file_id": "d" * 32, "name": "b.txt", "mime": "text/plain", "data": "aGk="}), peer)
         bounded._on_frame(json.dumps({"type": "say", "text": "both", "files": ["c" * 32, "d" * 32]}), peer)
         check("a turn carries at most the configured number of files", len(bounded.pop().attachments) == 1)
+
+        print("\nfiles survive the process that took them")
+        restarted = WebLink(replace(WebConfig(), max_upload_bytes=4096))
+        restarted.bind_uploads(uploads)
+        rq, _ = restarted._welcome(peer, Admission(True, role="chart"))
+        rq.get_nowait()
+        recalled = restarted._files
+        check("a link bound to the folder an earlier process filled recalls its files: id, name, size, and the type from the bytes or the suffix",
+              recalled["2" * 32].name == "shot.bin" and recalled["2" * 32].mime == "image/png" and recalled["2" * 32].size == len(png)
+              and recalled["4" * 32].mime == "text/markdown" and recalled["c" * 32].mime == "text/plain" and recalled["f" * 32].size == 3)
+        attachments, missing = restarted._attachments_for(["2" * 32, "f" * 32])
+        check("so a say naming one after a restart finds it", missing == 0 and [a.name for a in attachments] == ["shot.bin", "fresh.txt"])
+        restarted._on_frame(json.dumps({"type": "file.put", "file_id": "f" * 32, "name": "fresh.txt", "mime": "text/plain",
+                                        "data": base64.b64encode(b"resent bytes").decode("ascii")}), peer)
+        retried = json.loads(rq.get_nowait())
+        check("a retry of an upload the old process took answers with the record and rewrites nothing",
+              retried["ok"] and retried["size"] == 3 and (uploads / ("f" * 32 + "-fresh.txt")).read_bytes() == b"new")
+        forgotten = WebLink(replace(WebConfig(), max_upload_bytes=4096))
+        forgotten.bind_uploads(uploads)
+        forgotten._files.pop("f" * 32)
+        fq, _ = forgotten._welcome(peer, Admission(True, role="chart"))
+        fq.get_nowait()
+        forgotten._on_frame(json.dumps({"type": "file.put", "file_id": "f" * 32, "name": "fresh.txt", "mime": "text/plain",
+                                        "data": base64.b64encode(b"resent bytes").decode("ascii")}), peer)
+        collided = json.loads(fq.get_nowait())
+        check("even a file the table does not hold is recalled from disk when the exclusive create finds it, never overwritten",
+              collided["ok"] and collided["size"] == 3 and "f" * 32 in forgotten._files and (uploads / ("f" * 32 + "-fresh.txt")).read_bytes() == b"new")
+        stale = uploads / ("a" * 32 + "-stale.txt")
+        stale.write_bytes(b"old")
+        os.utime(stale, (ancient, ancient))
+        (uploads / ("b" * 32 + "-empty.txt")).write_bytes(b"")
+        pruning = WebLink(replace(WebConfig(), max_upload_bytes=4096))
+        pruning.bind_uploads(uploads)
+        check("the keep window prunes before recall, an empty file is no record, and the owner's own files are not indexed",
+              "a" * 32 not in pruning._files and not stale.exists() and "b" * 32 not in pruning._files
+              and all(a.name != "notes-by-hand.txt" for a in pruning._files.values()))
 
 
 def probe_agents() -> None:

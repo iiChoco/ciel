@@ -408,6 +408,7 @@
     <span>Ciel · <span id="statelabel">idle</span></span>
   </div>
   <div class="controls">
+    <a class="chip" href="/nutrition" title="Open the private food diary">FOOD</a>
     <button class="chip" id="agentsbtn" hidden title="Everything working on your behalf right now">
       <span id="agentscount"></span><span class="arr" id="agentsarr">▾</span>
     </button>
@@ -950,7 +951,6 @@ function clock(t) {
 const ROLES = {
   "user":               { cls: "you", cap: (t) => t ? "spoken · " + clock(t) : "spoken" },
   "user-web":           { cls: "you", cap: () => "typed" },
-  "user-remote":        { cls: "you", cap: () => "from discord" },
   "you-confirm":        { cls: "you", cap: () => "confirmation" },
   "you-confirm-remote": { cls: "you", cap: () => "confirmation · remote" },
   "ciel":               { cls: "ciel", head: (t) => t ? "Ciel \u00b7 " + clock(t) : "Ciel" },
@@ -1765,7 +1765,11 @@ function showGrants(data) {
     option.textContent = setup.title;
     picker.appendChild(option);
   }
-  picker.value = editing ? editing.namespace : setups[0].namespace;
+  // The feature picked decides whose operations and targets the boxes show:
+  // with two features offering grants, boxes built from the first while the
+  // picker showed the second sent one feature's operations under the other's
+  // name, and the hub rightly refused them as not offered.
+  picker.value = editing ? editing.namespace : (data._picked && bySetup.has(data._picked) ? data._picked : setups[0].namespace);
   picker.disabled = !!editing;
   form.appendChild(picker);
   const setup = bySetup.get(picker.value);
@@ -1789,7 +1793,6 @@ function showGrants(data) {
   }
   taskText(form, "p", `${setup.outcome} · on ${setup.host} as ${setup.bindings.map(([, v]) => v).join(", ") || "no account"} · up to ${setup.limits.max_per_window} per window, ${setup.limits.max_children} in all, for ${Math.round(setup.limits.lifetime_s / 86400)} days`).className = "dim";
   picker.addEventListener("change", () => { draftEditing = null; showGrants({...data, _picked: picker.value}); });
-  if (data._picked && !editing) picker.value = data._picked;
   const actions = document.createElement("div");
   actions.className = "task-actions";
   form.appendChild(actions);
@@ -1929,6 +1932,8 @@ function connect() {
       }
     } else if (f.type === "task.changed") {
       if (!taskBusy) refreshTasks();
+    } else if (f.type === "nutrition.receipt") {
+      addRow("ciel", f.data.text, Date.now() / 1000);
     } else if (f.type === "row") {
       addRow(f.role, f.text, f.t);
       if (f.role && f.role.startsWith("you-confirm")) clearAsk();

@@ -1,0 +1,783 @@
+<!doctype html>
+<!-- Nutrition uses the Chart's Instrument tokens, copied unchanged 2026-09-13.
+     A self-contained private diary shell; every record arrives on authenticated /ws. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nutrition · Ciel</title>
+<style>
+  :root {
+    /* cyan is structure */
+    --line: rgba(140, 240, 255, .14);
+    --line-strong: rgba(140, 240, 255, .22);
+    --glass-border: rgba(160, 240, 255, .28);
+    --text: #dfe6e6;
+    --text-dim: rgba(223, 230, 230, .65);
+    --text-faint: rgba(223, 230, 230, .34);
+    /* gold is voice and anything that wants you */
+    --gold: #e8c98a;
+    --gold-dim: rgba(232, 201, 138, .45);
+    --gold-line: rgba(232, 201, 138, .16);
+    --serif: Georgia, "Times New Roman", serif;
+    --mono: ui-monospace, Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    /* the HUD's state vocabulary */
+    --st-idle: #8fa8b3;
+    --st-listening: #7adea8;
+    --st-thinking: #e8c98a;
+    --st-reasoning: #b89be8;
+    --st-speaking: #a0f0ff;
+    --st-error: #e88a8a;
+  }
+* { box-sizing: border-box; }
+body { margin:0; background:radial-gradient(100% 80% at 50% 0,#0b1922,#030608); color:var(--text); font:15px/1.55 var(--sans); min-height:100vh; }
+main { max-width:1080px; margin:auto; padding:30px 24px 64px; }
+header { display:flex; align-items:center; justify-content:space-between; gap:16px; border-bottom:1px solid var(--line); padding-bottom:22px; margin-bottom:24px; }
+h1 { font:36px/1.1 var(--serif); margin:7px 0 0; font-weight:normal; }
+h2 { font:24px/1.25 var(--serif); font-weight:normal; margin:0 0 16px; }
+h3 { margin:0 0 4px; font-size:16px; font-weight:500; }
+p { margin:8px 0; }
+.meta { font:11px var(--mono); letter-spacing:.11em; text-transform:uppercase; color:var(--text-dim); }
+a { color:var(--gold); text-underline-offset:4px; }
+button,input,select,textarea { font:inherit; }
+button { cursor:pointer; background:rgba(160,240,255,.04); border:1px solid var(--glass-border); color:var(--text); padding:9px 14px; border-radius:3px; min-height:42px; }
+button:hover { background:rgba(160,240,255,.1); }
+button.primary { border-color:var(--gold-dim); color:var(--gold); background:rgba(232,201,138,.07); }
+button:disabled { opacity:.4; cursor:default; }
+:focus-visible { outline:2px solid var(--st-speaking); outline-offset:3px; }
+input,select,textarea { width:100%; min-width:0; background:#081017; color:var(--text); border:1px solid var(--line-strong); border-radius:3px; padding:9px; min-height:42px; }
+input::-webkit-calendar-picker-indicator { filter:invert(.75); }
+input[type=checkbox] { width:auto; min-height:auto; accent-color:var(--gold); }
+label { display:block; color:var(--text-dim); font-size:12px; }
+label input,label select,label textarea { margin-top:5px; }
+textarea { resize:vertical; }
+input[readonly] { color:var(--text-dim); border-style:dashed; }
+.row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.row>* { min-width:0; }
+.spread { justify-content:space-between; }
+.panel { border:1px solid var(--line); border-radius:4px; background:rgba(9,20,27,.75); padding:22px; margin:20px 0; }
+.grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }
+.stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin:20px 0; }
+.stat { padding:22px; border:1px solid var(--line); border-top-color:var(--gold-dim); background:rgba(9,20,27,.7); }
+.value { font:36px/1.2 var(--serif); color:var(--gold); margin:8px 0; }
+.dim { color:var(--text-dim); font-size:13px; }
+.small { font-size:12px; }
+#status { color:var(--text-dim); }
+#status.error,#message.error { color:var(--st-error); }
+#message { min-height:24px; color:var(--gold); margin:14px 0; overflow-wrap:anywhere; }
+#receipt { border-left:2px solid var(--gold); padding:12px 16px; margin:16px 0; background:rgba(232,201,138,.04); }
+#meal-list article { border-top:1px solid var(--line); padding:18px 0; }
+#meal-list article:first-child { border-top:0; }
+.food { border:1px solid var(--line); border-radius:3px; padding:15px; margin:14px 0; }
+.food-fields { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin:12px 0; }
+.food-name { flex:1; min-width:180px; }
+details { margin:12px 0; }
+summary { cursor:pointer; color:var(--text-dim); }
+ul { padding-left:20px; }
+#photo-canvas, #draft-image { display:block; max-width:100%; height:auto; margin:12px auto; }
+#draft-list article { border-top:1px solid var(--line); padding:14px 0; }
+#photo-progress { min-height:24px; }
+#catalog-list article,#plan-list article { border-top:1px solid var(--line); padding:16px 0; }
+#catalog-query { flex:1; min-width:170px; }
+dialog { width:min(720px,calc(100vw - 32px)); max-height:85vh; overflow:auto; background:#09141b; color:var(--text); border:1px solid var(--gold-dim); border-radius:4px; padding:22px; }
+dialog::backdrop { background:rgba(0,0,0,.75); }
+.review-table { width:100%; border-collapse:collapse; font-size:13px; }
+.review-table th,.review-table td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
+.review-table td:first-child { max-width:250px; }
+.crop-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
+#search-results { display:grid; gap:8px; margin:12px 0; }
+#search-results button { text-align:left; }
+#history article { padding:12px 0; border-top:1px solid var(--line); }
+[hidden] { display:none!important; }
+#connection { max-width:580px; margin:48px auto; }
+.day-input { max-width:190px; }
+.preview { border-top:1px solid var(--line); padding-top:14px; color:var(--gold); }
+footer { margin-top:32px; color:var(--text-faint); font:11px/1.7 var(--mono); }
+.trend-head { display:flex; justify-content:space-between; align-items:center; gap:14px; flex-wrap:wrap; }
+.trend-head h2 { margin:0; }
+.range-fields { margin:16px 0; }
+.range-fields label { flex:1; min-width:130px; }
+#graph-kind { max-width:320px; }
+#trend-graph { width:100%; min-height:260px; }
+#trend-graph svg { display:block; width:100%; overflow:visible; }
+#trend-graph [role=button] { cursor:pointer; }
+#trend-graph [role=button]:focus-visible { outline:none; stroke:var(--st-speaking); stroke-width:4; }
+#trend-readout { min-height:25px; color:var(--gold); }
+.table-scroll { max-width:100%; overflow-x:auto; }
+.table-scroll table { min-width:760px; }
+.table-scroll td:first-child button,.table-scroll td:nth-child(3),.table-scroll td:nth-child(4) { white-space:nowrap; }
+#weekly-content article { padding:12px 0; border-top:1px solid var(--line); }
+#weekly-content h3 { margin-top:18px; }
+#dashboard-error { color:var(--st-error); }
+#daily-heading { scroll-margin-top:20px; margin-top:28px; }
+@media(max-width:640px) {
+ main { padding:22px 16px 40px; } h1 { font-size:30px; } header { align-items:flex-start; }
+ .stats { grid-template-columns:1fr 1fr; } .stat { padding:16px; } .stat:last-child { grid-column:1/-1; }
+ .grid { grid-template-columns:1fr; } .food-fields { grid-template-columns:1fr 1fr; }
+ .panel { padding:16px; } .value { font-size:30px; }
+}
+</style>
+</head>
+<body>
+<main>
+<header><div><span class="meta">Ciel / Private diary</span><h1>Nutrition</h1></div><div><a href="/">Conversation</a><p id="status" class="small" role="status">Disconnected</p></div></header>
+<section id="connection" class="panel">
+<h2>Your food log, through Ciel</h2><p class="dim">Connect with your hub token to open the private diary.</p>
+<form id="token-form"><label>Hub token<input id="token" type="password" autocomplete="off" required></label><p><button class="primary">Connect</button></p></form>
+<p class="dim">If nutrition is unavailable, <code>ciel hub --check</code> explains the host and token setup.</p>
+</section>
+<div id="message" role="status" aria-live="polite"></div>
+<div id="receipt" hidden role="status" aria-live="polite"></div>
+<button id="retry" hidden>Retry the saved request</button>
+<section id="diary" hidden>
+<section id="dashboard" class="panel" aria-labelledby="dashboard-heading">
+<div class="trend-head"><h2 id="dashboard-heading">The diary over time</h2><div class="row"><button id="range-seven" aria-pressed="true">7 days</button><button id="range-thirty" aria-pressed="false">30 days</button><a href="#daily-heading">Open daily log</a></div></div>
+<form id="range-form" class="row range-fields"><label>From diary day<input id="range-from" type="date" required></label><label>Through diary day<input id="range-to" type="date" required></label><button>Show range</button></form>
+<p id="dashboard-loading" class="dim" role="status">Reading the diary…</p><p id="dashboard-error" role="status"></p>
+<div id="dashboard-content" hidden>
+<p id="range-coverage" class="dim"></p>
+<div class="stats"><div class="stat"><span class="meta">Average calories</span><div class="value" id="average-calories">—</div><p class="dim" id="average-coverage"></p></div><div class="stat"><span class="meta">Estimated deficit subtotal</span><div class="value" id="deficit-subtotal">—</div><p class="dim" id="deficit-coverage"></p></div><div class="stat"><span class="meta">Average protein</span><div class="value" id="average-protein">—</div><p class="dim" id="protein-average-coverage"></p></div></div>
+<label>Graph<select id="graph-kind"><option value="calories">Calories and target</option><option value="deficit">Estimated daily deficit</option><option value="cumulative_deficit">Cumulative estimated deficit</option><option value="protein_g">Protein and target</option><option value="carbs_g">Carbohydrate</option><option value="fat_g">Fat</option><option value="weight">Weight observations and trend</option></select></label>
+<p id="graph-description" class="dim"></p><div id="trend-graph"></div><p id="trend-readout" aria-live="polite" class="small">Select a point or a table day to open its evidence.</p>
+<details id="trend-table"><summary>Daily values and evidence</summary><div class="table-scroll" tabindex="0" aria-label="Scrollable daily values"><table class="review-table"><caption id="trend-caption"></caption><thead id="trend-columns"></thead><tbody id="trend-rows"></tbody></table></div></details>
+<p class="dim" id="deficit-explanation"></p>
+<details id="weekly-review"><summary>Weekly review</summary><p class="dim" id="weekly-period"></p><div id="weekly-content"></div></details>
+</div>
+<details id="weight-panel"><summary>Optional manual weight log</summary><p class="dim">One observed reading per calendar date. Saving the same date corrects that reading. Weight is separate from calorie estimates.</p>
+<form id="weight-form"><div class="grid"><label>Measurement date<input id="weight-day" type="date" required></label><label>Weight<input id="weight-value" type="number" min="0.001" max="2204.62" step="any" required></label><label>Unit<select id="weight-unit"><option value="kg">kg</option><option value="lb">lb</option></select></label></div><p id="weight-status" class="dim" role="status"></p><div class="row"><button id="weight-save" disabled>Save weigh-in</button><button id="weight-delete" type="button" hidden>Remove this reading</button><button id="weight-reload" type="button">Reload reading</button></div></form>
+</details>
+</section>
+<h2 id="daily-heading" tabindex="-1">Daily food log</h2>
+<div class="row spread"><div class="row"><label>Diary day<input class="day-input" id="day" type="date"></label><button id="previous" aria-label="Previous diary day">←</button><button id="next" aria-label="Next diary day">→</button></div><span id="day-meta" class="meta"></span></div>
+<div class="stats">
+<div class="stat"><span class="meta">Logged calories</span><div id="calories" class="value">—</div><div id="calorie-target" class="dim"></div></div>
+<div class="stat"><span class="meta">Protein</span><div id="protein" class="value">—</div><div id="macro-coverage" class="dim"></div></div>
+<div class="stat"><span class="meta">Visible allowance</span><div id="allowance" class="value">—</div><div class="dim">Included in logged calories</div></div>
+</div>
+<div class="row spread"><div><strong id="completion"></strong><p id="complete-help" class="dim"></p></div><div class="row"><label id="zero-wrap" hidden><input id="zero" type="checkbox"> I ate nothing this diary day</label><button id="complete"></button></div></div>
+<p id="other-macros" class="dim"></p><p id="yesterday" class="dim"></p>
+<section class="panel">
+<div class="row spread"><h2>Photo drafts</h2><div class="row"><button id="camera">Take a photo</button><button id="choose-photo">Choose image</button></div></div>
+<input id="camera-file" type="file" accept="image/png,image/jpeg" capture="environment" hidden>
+<input id="library-file" type="file" accept="image/png,image/jpeg" hidden>
+<p class="dim">A photo waits here until you review the food and Save. Nothing in this inbox counts toward intake.</p>
+<div id="photo-capture" hidden>
+<label>What is pictured?<select id="photo-purpose"><option value="meal">A meal</option><option value="label">Nutrition label</option></select></label>
+<p class="dim">Crop to the food or readable label before shrinking. Check that the digits are readable in the preview.</p>
+<div class="crop-grid"><label>Left %<input id="crop-x" type="number" min="0" max="99" value="0"></label><label>Top %<input id="crop-y" type="number" min="0" max="99" value="0"></label><label>Width %<input id="crop-w" type="number" min="1" max="100" value="100"></label><label>Height %<input id="crop-h" type="number" min="1" max="100" value="100"></label></div>
+<canvas id="photo-canvas" aria-label="Cropped photo preview"></canvas>
+<div class="row"><button id="keep-photo" class="primary">Keep photo draft</button><button id="cancel-photo">Cancel</button></div>
+</div>
+<p id="photo-progress" class="dim" role="status"></p><p id="photo-limit" class="dim"></p>
+<div id="draft-list"></div>
+</section>
+<div class="panel"><div class="row spread"><h2>Meals</h2><button id="new-meal" class="primary">Log a meal</button></div><div id="meal-list"></div></div>
+<details class="panel" id="library-panel"><summary>Saved foods, recipes, and batches</summary>
+<p class="dim">Save a usual portion or a whole recipe with its yield. Prepared batches keep the recipe version they were made from.</p>
+<div class="row"><input id="catalog-query" aria-label="Find a saved food or recipe" placeholder="Name or alias" maxlength="160"><button id="catalog-search">Search saved foods</button><button id="new-food">New saved food</button><button id="new-recipe">New recipe</button></div>
+<div id="catalog-list"></div><button id="catalog-more" hidden>More saved entries</button>
+</details>
+<section class="panel"><h2>Planned meals</h2><p id="plan-projection" class="dim"></p><div id="plan-list"></div><p class="dim">Plans wait here until you say you ate them. Their values are separate from logged intake.</p></section>
+<section class="panel" id="use-panel" hidden><div class="row spread"><h2 id="use-title">Choose a portion</h2><button id="use-close">Close</button></div>
+<div id="use-portion-fields"><label>Portion basis<select id="use-mode"><option value="amount">Amount from the stated yield</option><option value="fraction">Fraction of the whole yield</option></select></label><div class="grid"><label id="use-quantity-label">Amount<input id="use-quantity" type="number" min="0.001" step="any" value="1"></label><label id="use-unit-label">Unit<select id="use-unit"><option>serving</option><option>g</option><option>kg</option><option>ml</option><option>l</option></select></label><label id="use-fraction-label" hidden>Fraction of whole<input id="use-fraction" type="number" min="0.001" max="1" step="any" value="0.25"></label></div></div>
+<p id="use-yield" class="dim"></p><div id="use-values"></div><div class="grid"><label>Actually eaten at<input id="use-time" type="datetime-local"></label><label>Eating timezone<input id="use-zone" maxlength="100"></label></div>
+<p class="row"><button id="use-log" class="primary">Log this portion</button><button id="use-preview">Preview totals</button><button id="use-plan">Keep as a plan</button></p></section>
+<section class="panel" id="what-if" hidden><h2>Meal preview</h2><p id="what-if-values"></p><p class="dim">These are logged totals plus this hypothetical meal. Nothing has been saved as eaten.</p><button id="preview-close">Close preview</button></section>
+<section id="editor" class="panel" hidden>
+<div class="row spread"><h2 id="editor-title">Log a meal</h2><button id="cancel-edit" type="button">Cancel</button></div>
+<div id="draft-context" hidden><img id="draft-image" alt="Photo attached to this draft" hidden><p id="draft-explanation" class="dim"></p><ul id="draft-questions"></ul><label>Notes for analysis<textarea id="draft-notes" maxlength="2000" rows="2"></textarea></label></div>
+<form id="meal-form">
+<div class="grid"><label>Meal name<input id="meal-name" required maxlength="160" placeholder="Breakfast"></label><label>Eaten at<input id="eaten-at" type="datetime-local" required></label></div>
+<label>Timezone for this meal<input id="eating-zone" required maxlength="100" placeholder="America/Los_Angeles"></label><p class="dim">The diary day starts at <span id="cutoff-label"></span>.</p>
+<details><summary>Find a food in USDA</summary><div class="row"><input id="search-query" aria-label="Food to look up" placeholder="Cooked brown rice" maxlength="120"><button id="search" type="button">Search</button></div><div id="search-results"></div></details>
+<div id="catalog-fields" hidden><label>Aliases, separated by commas<input id="catalog-aliases" maxlength="640"></label><div class="grid" id="recipe-yield"><label>Whole batch yield<input id="yield-quantity" type="number" min="0.001" max="100000" step="any" value="4"></label><label>Yield unit<select id="yield-unit"><option>serving</option><option>g</option><option>kg</option><option>ml</option><option>l</option></select></label></div><p class="dim">The foods below describe the whole recipe yield, or one usual portion for a saved food.</p></div>
+<div id="items"></div><button id="add-food" type="button">Add another food</button>
+<label>Fraction eaten<input id="consumed-fraction" type="number" min="0.01" max="1" step="any" value="1"></label><p class="dim">1 is all of the listed portion; 0.5 is half. Leave the food amounts above as the whole proposed portion.</p>
+<p id="preview" class="preview"></p>
+<p class="dim">Review the food, source values, portion, and allowance before saving.</p>
+<button class="primary" id="save-meal">Save meal</button><button id="editor-preview" type="button">Preview totals</button><button id="editor-plan" type="button">Keep as a plan</button><button id="keep-draft" type="button" hidden>Save draft for later</button>
+</form>
+</section>
+<details class="panel"><summary>Optional targets and expenditure</summary>
+<form id="settings-form"><p class="dim">Apply from this diary day onward. Leave values blank to keep them unset. A target is separate from estimated total daily expenditure.</p>
+<div class="grid"><label>Calorie target<input id="target-calories" type="number" min="0" max="100000" step="any"></label><label>Protein target (g)<input id="target-protein" type="number" min="0" max="100000" step="any"></label><label>Estimated total daily expenditure<input id="expenditure" type="number" min="0" max="100000" step="any"></label></div><p><button>Save settings</button></p></form>
+</details>
+<details class="panel" id="bulk-panel"><summary>Review historical calorie allowances</summary><p class="dim">Recalculate a selected range using the current allowance policy. Review each change before approving it on this page.</p><div class="grid"><label>From diary day<input id="bulk-from" type="date"></label><label>Through diary day<input id="bulk-to" type="date"></label></div><p><button id="bulk-review">Review changes</button></p><div id="bulk-report"></div><button id="bulk-apply" class="primary" hidden>Apply reviewed changes</button></details>
+<dialog id="bulk-question" aria-labelledby="bulk-question-title"><h2 id="bulk-question-title">Approve historical changes</h2><div id="bulk-question-report"></div><p id="bulk-expires" class="dim"></p><div class="row"><button id="scope-approve" class="primary">Approve these changes</button><button id="scope-deny">Cancel</button></div></dialog>
+<details class="panel"><summary>Changes and Undo</summary><div id="history"></div><button id="older-history">Earlier changes</button></details>
+</section>
+<footer>Source snapshots stay with each meal. Unfinished days show logged intake only.<br>USDA food matches: U.S. Department of Agriculture, Agricultural Research Service, FoodData Central.</footer>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let ws, state, editing, editZone, editTime, reconnectTimer, connecting = false, loadVersion = 0;
+let editDisplay, draftState, editingDraft=null, photoBitmap=null, captureContext=null, draftImageUrl=null, draftTimer=null;
+let catalogEntries=[], catalogCursor=null, editorKind=null, catalogEditing=null, copiedMeal=null, copyFingerprint=null;
+let useSource=null, usePlan=null, useMeal=null, useVersion=0, previewVersion=0, bulkReview=null, strictQuestion=null, scopeTimer=null;
+let dashboardState=null, dashboardVersion=0, weightRecord=null, weightVersion=0;
+const pending = new Map(), mealImageUrls = new Set();
+let outbox = null;
+try { outbox = JSON.parse(sessionStorage.getItem("nutrition-pending") || "null"); } catch {}
+$("retry").hidden = !outbox; $("save-meal").disabled = !!outbox;
+const optional = value => value === "" ? null : Number(value);
+const fmt = value => value == null ? "unknown" : Number(value).toLocaleString(undefined,{maximumFractionDigits:1});
+function message(text,error=false) { $("message").textContent=text; $("message").classList.toggle("error",error); }
+function node(tag,text,className) { const n=document.createElement(tag); if(text!=null)n.textContent=text; if(className)n.className=className; return n; }
+function request(operation,data,request_id=crypto.randomUUID()) {
+ return new Promise((resolve,reject)=>{
+  if(!ws || ws.readyState!==WebSocket.OPEN || connecting) return reject(Error("Disconnected. Your form is still here; reconnect and retry."));
+  const timer=setTimeout(()=>{pending.delete(request_id);reject(Error("No receipt yet. Inspect the diary or retry the same saved request."));},15000);
+  pending.set(request_id,{resolve,reject,timer});
+  ws.send(JSON.stringify(operation==="upload"?{type:"nutrition.upload",request_id,capture:data.capture,data:data.encoded}:operation==="answer"?{type:"nutrition.answer",request_id,...data}:{type:"nutrition.request",request_id,operation,data}));
+ });
+}
+async function mutate(operation,data) {
+ if(outbox) throw Error("Resolve the saved request with Retry before starting another change.");
+ outbox={operation,data,request_id:crypto.randomUUID()};
+ try{sessionStorage.setItem("nutrition-pending",JSON.stringify(outbox));}catch{outbox=null;throw Error("Browser storage is full. Crop a smaller photo or free space before uploading; nothing was sent.");}
+ $("retry").hidden=false; $("save-meal").disabled=true;
+ return retry();
+}
+async function retry() {
+ const saved=outbox; if(!saved)return;
+ try {
+  const receipt=await request(saved.operation,saved.data,saved.request_id);
+  outbox=null;sessionStorage.removeItem("nutrition-pending");$("retry").hidden=true;$("save-meal").disabled=false;
+  showReceipt(receipt);await loadDay();await loadDrafts();await loadCatalog();await loadPlans();return receipt;
+ } catch(error) {
+  if(error.definite){outbox=null;sessionStorage.removeItem("nutrition-pending");$("retry").hidden=true;$("save-meal").disabled=false;}
+  throw error;
+ }
+}
+function showReceipt(receipt) {
+ $("receipt").hidden=false; $("receipt").replaceChildren(node("span",receipt.text));
+ if(receipt.operation_id&&!receipt.undo_of) {
+  const undo=node("button","Undo");undo.style.marginLeft="12px";
+  undo.onclick=()=>run(()=>mutate("undo",{operation_id:receipt.operation_id}));
+  $("receipt").append(undo);
+ }
+}
+async function run(fn) { try {message("");return await fn();} catch(error){message(error.message,true);} }
+function connect() {
+ clearTimeout(reconnectTimer);
+ const token=$("token").value || sessionStorage.getItem("nutrition-token") || "";
+ if(!token)return;
+ if(ws)ws.close();connecting=true;$("status").textContent="Connecting…";
+ const socket=new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws");
+ ws=socket;
+ socket.onopen=()=>socket.send(JSON.stringify({type:"hello",v:1,role:"chart",client_id:"nutrition",token}));
+ socket.onmessage=event=>{
+  if(ws!==socket)return;
+  let frame;try{frame=JSON.parse(event.data);}catch{return;}
+  if(frame.type==="hello") {
+   connecting=false;sessionStorage.setItem("nutrition-token",token);$("connection").hidden=true;
+   $("status").textContent="Private connection";run(async()=>{await loadDay();await loadDrafts();await loadCatalog();await loadPlans();});
+  } else if(frame.type==="nutrition.result") {
+   const p=pending.get(frame.request_id);if(!p)return;
+   pending.delete(frame.request_id);clearTimeout(p.timer);
+   if(frame.ok)p.resolve(frame.data);else{const e=Error(frame.error||"Nutrition request failed.");e.definite=!frame.uncertain;p.reject(e);}
+  } else if(frame.type==="nutrition.question") {
+   showQuestion(frame.data);
+  } else if(frame.type==="nutrition.question_end") {
+   if(strictQuestion?.confirm_id===frame.confirm_id){if(strictQuestion.operation==="bulk_apply"){bulkReview=null;$("bulk-apply").hidden=true;}closeQuestion();}
+  } else if(frame.type==="nutrition.receipt") {
+   showReceipt(frame.data);
+   if(!outbox)run(async()=>{await loadDay();await loadCatalog();await loadPlans();});
+  } else if(frame.type==="error")message(frame.reason||"Connection refused.",true);
+ };
+ socket.onclose=event=>{
+  if(ws!==socket)return;
+  connecting=false;clearPreview();++dashboardVersion;$("dashboard-content").hidden=true;$("dashboard-error").textContent="Reconnect to refresh the dashboard.";$("status").textContent="Disconnected";clearTimeout(draftTimer);closeQuestion();bulkReview=null;$("bulk-apply").hidden=true;
+  for(const p of pending.values()){clearTimeout(p.timer);p.reject(Error("Connection lost. Retry keeps the same operation ID."));}pending.clear();
+  if(event.code===4401){sessionStorage.removeItem("nutrition-token");$("connection").hidden=false;message("The hub refused this token.",true);}
+  else reconnectTimer=setTimeout(connect,2000);
+ };
+}
+$("token-form").onsubmit=e=>{e.preventDefault();connect();};
+async function loadDay(day=$("day").value||undefined) {
+ clearPreview();
+ const version=++loadVersion, next=await request("day",day?{day}:{});
+ if(version!==loadVersion)return;
+ state=next;clearPreview();$("diary").hidden=false;$("day").value=state.day;
+ $("day-meta").textContent=state.timezone+" · "+String(state.cutoff).padStart(2,"0")+":00 cutoff";
+ $("calories").textContent=fmt(state.totals.calories);
+ $("protein").textContent=fmt(state.totals.protein_g)+" g";
+ $("allowance").textContent="+"+fmt(state.allowance);
+ $("calorie-target").textContent=state.settings.calorie_target==null?"No calorie target set":"Target "+fmt(state.settings.calorie_target);
+ const coverage=state.coverage.protein_g;
+ $("macro-coverage").textContent=coverage.known_items+"/"+coverage.total_items+" foods have protein values";
+ $("other-macros").textContent=["carbs_g","fat_g"].map(key=>(key==="carbs_g"?"Carbohydrate: ":"Fat: ")+fmt(state.totals[key])+" g ("+state.coverage[key].known_items+"/"+state.coverage[key].total_items+" foods known)").join(" · ");
+ const complete=!!state.completion.value?.complete;
+ $("completion").textContent=complete?"Day marked complete":"Logged so far";
+ $("complete-help").textContent=complete?"Your completeness assertion stays after reviewed corrections.":"Mark complete when this is everything you ate.";
+ $("complete").textContent=complete?"Mark incomplete":"Mark complete";
+ $("zero-wrap").hidden=state.meals.length>0||complete;
+ $("target-calories").value=state.settings.calorie_target??"";
+ $("target-protein").value=state.settings.protein_target_g??"";
+ $("expenditure").value=state.settings.expenditure??"";
+ renderMeals();renderHistory();
+ await loadDashboard();
+ if(!$("bulk-from").value)$("bulk-from").value=state.day;if(!$("bulk-to").value)$("bulk-to").value=state.day;
+ await loadPlans();
+ const prev=new Date(state.day+"T12:00:00Z");prev.setUTCDate(prev.getUTCDate()-1);
+ const previous=await request("day",{day:prev.toISOString().slice(0,10)});
+ if(version!==loadVersion)return;
+ $("yesterday").textContent=previous.completion.value?.complete?"":"Previous diary day ("+previous.day+"): unmarked. Select it to review and complete.";
+}
+function renderMeals() {
+ for(const url of mealImageUrls)URL.revokeObjectURL(url);mealImageUrls.clear();
+ $("meal-list").replaceChildren();
+ if(!state.meals.length){$("meal-list").append(node("p","No meals logged for this day.","dim"));return;}
+ for(const meal of state.meals) {
+  const article=node("article"), top=node("div",null,"row spread"), description=node("div");
+  description.append(node("h3",meal.name),node("p",fmt(meal.totals.calories)+" calories · "+fmt(meal.totals.protein_g)+" g protein · +"+fmt(meal.allowance)+" allowance","dim"));
+  const actions=node("div",null,"row");
+  for(const [text,fn] of [["Edit",()=>openEditor(meal)],["Repeat",()=>mutate("repeat",{source_id:meal.id,source_revision:meal.revision})],["Delete",()=>mutate("delete",{id:meal.id,revision:meal.revision})]]) {
+   const b=node("button",text);b.onclick=()=>run(fn);actions.append(b);
+  }
+  const remember=node("button","Save as usual");remember.onclick=()=>openCatalogEditor("food",null,meal);actions.append(remember);
+  if(meal.saved_from?.kind==="food"){
+   const update=node("button","Update saved food");update.onclick=()=>run(async()=>{const found=await request("catalog",{kind:"food",id:meal.saved_from.id});const entry=found.entries.find(e=>e.id===meal.saved_from.id);if(!entry)throw Error("This saved food is no longer available.");openCatalogEditor("food",entry,meal);});actions.append(update);
+  }
+  top.append(description,actions);article.append(top);
+  const details=node("details"),summary=node("summary","Foods and estimate");details.append(summary);
+  for(const item of meal.items) details.append(node("p",item.name+" · "+fmt(item.quantity)+" "+item.unit+" · "+fmt(item.totals.calories)+" base calories · "+item.source+(item.source_id?" "+item.source_id:"")+(item.uncertainty.length?" · uncertainty: "+item.uncertainty.join(", "):""),"dim"));
+  if(meal.media_id){
+   const view=node("button","View photo");view.onclick=()=>run(async()=>{
+    const media=await request("media",{media_id:meal.media_id});
+    if(!article.isConnected)return;
+    const url=URL.createObjectURL(new Blob([Uint8Array.from(atob(media.data),c=>c.charCodeAt(0))],{type:media.mime}));
+    mealImageUrls.add(url);const img=node("img");img.src=url;img.alt="Photo retained with "+meal.name;img.style.maxWidth="100%";view.replaceWith(img);
+   });details.append(view);
+  }
+  article.append(details);$("meal-list").append(article);
+ }
+}
+function renderHistory() {
+ $("history").replaceChildren();
+ for(const entry of state.history) {
+  const article=node("article");article.append(node("p",entry.response),node("p",new Date(entry.when).toLocaleString(),"small dim"));
+  if(entry.tool!=="nutrition_undo"){const b=node("button","Undo this change");b.onclick=()=>run(()=>mutate("undo",{operation_id:entry.args.operation_id}));article.append(b);}
+  $("history").append(article);
+ }
+}
+function localNow() {
+ const d=new Date();return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);
+}
+function openEditor(meal=null) {
+ editorKind=null;catalogEditing=null;copiedMeal=null;copyFingerprint=null;
+ $("catalog-fields").hidden=true;$("eaten-at").required=true;$("eaten-at").parentElement.hidden=false;$("eating-zone").parentElement.hidden=false;
+ $("save-meal").textContent="Save meal";$("editor-preview").hidden=false;$("editor-plan").hidden=false;
+ editingDraft=null;$("draft-context").hidden=true;$("keep-draft").hidden=true;$("consumed-fraction").value=1;
+ editing=meal;$("editor").hidden=false;$("editor-title").textContent=meal?"Edit meal":"Log a meal";
+ $("meal-name").value=meal?.name||"";editZone=meal?.timezone||Intl.DateTimeFormat().resolvedOptions().timeZone;
+ editTime=meal?.occurred_at||null;
+ $("eaten-at").value=meal?.occurred_at.slice(0,16)||(state.day===localNow().slice(0,10)?localNow():state.day+"T12:00");
+ editDisplay=$("eaten-at").value;
+ $("eating-zone").value=editZone;$("cutoff-label").textContent=String(state.cutoff).padStart(2,"0")+":00";
+ $("items").replaceChildren();for(const item of meal?.items||[{}])addFood(item);
+ $("editor").scrollIntoView({behavior:"smooth",block:"start"});$("meal-name").focus();
+}
+function addFood(item={}) {
+ const box=node("div",null,"food"),top=node("div",null,"row"),name=node("label","Food","food-name"),nameInput=node("input");
+ nameInput.value=item.name||"";nameInput.required=true;nameInput.maxLength=160;nameInput.dataset.key="name";name.append(nameInput);
+ const remove=node("button","Remove");remove.type="button";remove.onclick=()=>{box.remove();preview();};top.append(name,remove);box.append(top);
+ const fields=node("div",null,"food-fields");
+ const spec=[["quantity","Amount eaten","quantity" in item?(item.quantity??""):1],["unit","Unit",item.unit||"serving"],["basis_quantity","Source amount","basis_quantity" in item?(item.basis_quantity??""):1],["basis_unit","Source unit",item.basis_unit||"serving"],["calories","Source calories",item.calories??""],["protein_g","Source protein (g)",item.protein_g??""],["carbs_g","Source carbs (g)",item.carbs_g??""],["fat_g","Source fat (g)",item.fat_g??""]];
+ for(const [key,title,value] of spec) {
+  const wrap=node("label",title),input=node(key.includes("unit")?"select":"input");input.dataset.key=key;
+  if(key.includes("unit"))for(const u of ["g","kg","ml","l","serving"]){const o=node("option",u);o.value=u;input.append(o);}
+  else{input.type="number";input.step="any";input.min=key.includes("quantity")?"0.001":"0";input.max="100000";input.required=["quantity","basis_quantity","calories"].includes(key);}
+  input.value=value;if(item.source==="usda"&&!["quantity","unit"].includes(key))input.disabled=true;
+  wrap.append(input);fields.append(wrap);
+ }
+ box.append(fields);
+ const sourceWrap=node("label","Source"),source=node("select");source.dataset.key="source";
+ for(const s of (item.source==="usda"?["usda"]:["supplied","label","estimate"])){const option=node("option",s);option.value=s;source.append(option);}
+ source.value=item.source||"supplied";sourceWrap.append(source);box.append(sourceWrap);
+ box.dataset.sourceId=item.source_id||"";box.dataset.preparation=item.preparation||"";
+ const reasons=node("div",null,"row");
+ for(const [reason,text] of [["portion","Portion guessed"],["oil","Unknown oil"],["estimate","Nutrition estimated"]]) {
+  const wrap=node("label"),input=node("input");input.type="checkbox";input.dataset.reason=reason;input.checked=(item.uncertainty||[]).includes(reason);
+  wrap.append(input,document.createTextNode(" "+text+" (+"+state.policy[reason]+"%)"));reasons.append(wrap);
+ }
+ box.append(reasons);source.onchange=()=>{if(source.value==="estimate")box.querySelector('[data-reason="estimate"]').checked=true;preview();};box.oninput=preview;$("items").append(box);preview();
+}
+function items() {
+ return [...$("items").children].map(box=>{
+  const item={source_id:box.dataset.sourceId,preparation:box.dataset.preparation,uncertainty:[...box.querySelectorAll("[data-reason]:checked")].map(n=>n.dataset.reason)};
+  for(const input of box.querySelectorAll("[data-key]"))item[input.dataset.key]=["name","unit","basis_unit","source"].includes(input.dataset.key)?input.value:optional(input.value);
+  return item;
+ });
+}
+function preview() {
+ if(!state)return;
+ const margins=copiedMeal&&copyFingerprint===JSON.stringify(items())&&Number($("consumed-fraction").value)===1?copiedMeal.policy.percentages:state.policy;
+ for(const input of $("items").querySelectorAll("[data-reason]")){const captions={portion:"Portion guessed",oil:"Unknown oil",estimate:"Nutrition estimated"};input.parentElement.lastChild.textContent=" "+captions[input.dataset.reason]+" (+"+margins[input.dataset.reason]+"%)";}
+ const units={g:["mass",1],kg:["mass",1000],ml:["volume",1],l:["volume",1000],serving:["serving",1]};
+ let base=0,extra=0,unknown=false;
+ const fraction=optional($("consumed-fraction").value);
+ if(!fraction||fraction>1)unknown=true;
+ for(const item of items()) {
+  if(item.calories==null||!item.quantity||!item.basis_quantity||units[item.unit][0]!==units[item.basis_unit][0]){unknown=true;continue;}
+  const calories=Math.round(item.calories*item.quantity*fraction*units[item.unit][1]/(item.basis_quantity*units[item.basis_unit][1])*10000)/10000;
+  const reasons=new Set(item.uncertainty);if(item.source==="estimate")reasons.add("estimate");
+  base+=calories;extra+=calories*[...reasons].reduce((sum,r)=>sum+margins[r],0)/100;
+ }
+ const allowance=Math.ceil(Math.round(extra*1e6)/1e6);
+ $("preview").textContent=unknown?"Complete the portion and source values to preview this meal.":fmt(base)+" base + "+fmt(allowance)+" allowance = "+fmt(base+allowance)+" calories";
+}
+$("meal-form").onsubmit=e=>{e.preventDefault();run(async()=>{
+ if(editorKind){
+  if(editorKind==="plan"){
+   await mutate("plan_save",{name:$("meal-name").value,items:items(),consumed_fraction:optional($("consumed-fraction").value),day:state.day,id:catalogEditing?.id,revision:catalogEditing?.revision||0});
+  }else{
+   const args={kind:editorKind,name:$("meal-name").value,revision:catalogEditing?.revision||0,aliases:$("catalog-aliases").value.split(",").map(s=>s.trim()).filter(Boolean),yield_quantity:optional($("yield-quantity").value),yield_unit:$("yield-unit").value};
+   if(catalogEditing)args.id=catalogEditing.id;
+   if(copiedMeal&&copyFingerprint===JSON.stringify(items())&&Number($("consumed-fraction").value)===1){args.source_meal_id=copiedMeal.id;args.source_meal_revision=copiedMeal.revision;}
+   else{args.items=items();args.consumed_fraction=optional($("consumed-fraction").value);}
+   await mutate("catalog_save",args);
+  }
+  $("editor").hidden=true;return;
+ }
+ const time=$("eaten-at").value;
+ const zone=$("eating-zone").value;
+ const args={name:$("meal-name").value,items:items(),revision:editing?.revision||0,timezone:zone,occurred_at:editTime&&time===editDisplay&&zone===editZone?editTime:time,consumed_fraction:optional($("consumed-fraction").value)};
+ if(editingDraft){args.draft_id=editingDraft.id;args.draft_revision=editingDraft.revision;}
+ if(editing)args.id=editing.id;
+ await mutate("save",args);$("editor").hidden=true;editingDraft=null;
+});};
+$("settings-form").onsubmit=e=>{e.preventDefault();run(()=>mutate("settings",{effective_from:state.day,revision:state.settings_revision||0,calorie_target:optional($("target-calories").value),protein_target_g:optional($("target-protein").value),expenditure:optional($("expenditure").value)}));};
+$("complete").onclick=()=>run(()=>mutate("complete",{day:state.day,revision:state.completion.revision,complete:!state.completion.value?.complete,zero_intake:$("zero").checked}));
+$("consumed-fraction").oninput=preview;
+$("new-meal").onclick=()=>openEditor();$("cancel-edit").onclick=()=>{$("editor").hidden=true;};
+$("add-food").onclick=()=>addFood();$("retry").onclick=()=>run(retry);
+$("day").onchange=()=>run(()=>loadDay());
+for(const [id,delta] of [["previous",-1],["next",1]])$(id).onclick=()=>run(()=>{const d=new Date(state.day+"T12:00:00Z");d.setUTCDate(d.getUTCDate()+delta);return loadDay(d.toISOString().slice(0,10));});
+$("older-history").onclick=()=>run(async()=>{
+ const last=state.history[state.history.length-1];if(!last)return;
+ const result=await request("history",{before_seq:last.seq});
+ if(!result.history.length){message("No earlier changes.");return;}
+ state.history=result.history;renderHistory();
+});
+$("search-query").onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();$("search").click();}};
+$("search").onclick=()=>run(async()=>{
+ const result=await request("search",{query:$("search-query").value});$("search-results").replaceChildren();
+ if(!result.foods.length)$("search-results").append(node("p","No usable match. Enter the values from your label.","dim"));
+ for(const food of result.foods){const button=node("button",food.name+" · "+fmt(food.calories)+" calories per 100 g");button.type="button";button.onclick=()=>{const first=$("items").firstElementChild;if($("items").children.length===1&&!first.querySelector('[data-key="name"]').value&&!first.querySelector('[data-key="calories"]').value)first.remove();addFood(food);$("search-results").replaceChildren();};$("search-results").append(button);}
+});
+async function loadDrafts() {
+ clearTimeout(draftTimer);
+ const result=await request("drafts",{});draftState=result;
+ $("photo-limit").textContent="Photos expire after "+result.keep_days+" days; saved nutrition values remain. "+result.reason+" "+result.sync_error;
+ $("draft-list").replaceChildren();
+ if(!result.drafts.length)$("draft-list").append(node("p","No unfinished photo drafts.","dim"));
+ for(const draft of result.drafts){
+  const value=draft.value, article=node("article"),title=node("h3",value.meal?.name||"Photo draft");
+  article.append(title,node("p",draft.analysis_state+(draft.image_available?"":" · image unavailable")+(draft.analysis_detail?" · "+draft.analysis_detail:""),"dim"));
+  const controls=node("div",null,"row");
+  const add=(text,fn)=>{const b=node("button",text);b.onclick=()=>run(fn);controls.append(b);return b;};
+  add("Review",()=>openDraft(draft));
+  if(value.job){
+   add("Cancel analysis",()=>mutate("photo_cancel",{draft_id:draft.id,revision:draft.revision}));
+   if(!value.job.task_id)add("Resume request",()=>mutate("photo_resume",{draft_id:draft.id}));
+  } else {
+   const b=add("Analyze",()=>mutate("photo_analyze",{draft_id:draft.id,revision:draft.revision,notes:value.notes}));
+   b.disabled=!result.analysis||!draft.image_available;
+  }
+  add("Discard",()=>mutate("draft_discard",{draft_id:draft.id,revision:draft.revision}));
+  article.append(controls);$("draft-list").append(article);
+ }
+ if(result.drafts.some(d=>d.value.job))draftTimer=setTimeout(()=>run(loadDrafts),2500);
+}
+async function openDraft(draft) {
+ openEditor();editingDraft=draft;
+ const value=draft.value, meal=value.meal||{name:"",items:[]};
+ $("editor-title").textContent="Review photo draft";$("draft-context").hidden=false;$("keep-draft").hidden=false;
+ $("meal-name").value=meal.name||"";$("items").replaceChildren();
+ for(const item of meal.items.length?meal.items:[{}])addFood(item);
+ $("draft-notes").value=value.notes||"";$("draft-explanation").textContent=value.explanation||"Choose the food, portion, and eating time. Analysis proposes values; Save logs the reviewed meal.";
+ $("draft-questions").replaceChildren(...(value.questions||[]).map(q=>node("li",q)));
+ $("consumed-fraction").value=value.consumed_fraction??1;
+ editZone=meal.timezone||value.capture.timezone;$("eating-zone").value=editZone;
+ editTime=meal.occurred_at||null;
+ if(!editTime&&value.capture.source==="camera"&&value.capture.purpose==="meal")editTime=value.capture.captured_at;
+ if(editTime){
+  const d=new Date(editTime);
+  $("eaten-at").value=editTime.includes("Z")?localAt(d,editZone):editTime.slice(0,16);
+ }else $("eaten-at").value="";
+ editDisplay=$("eaten-at").value;
+ $("draft-image").hidden=true;
+ if(draftImageUrl){URL.revokeObjectURL(draftImageUrl);draftImageUrl=null;}
+ preview();$("meal-name").focus();
+ if(draft.image_available){
+  const media=await request("media",{media_id:value.media_id});
+  if(editingDraft?.id!==draft.id)return;
+  const bytes=Uint8Array.from(atob(media.data),c=>c.charCodeAt(0));
+  draftImageUrl=URL.createObjectURL(new Blob([bytes],{type:media.mime}));
+  $("draft-image").src=draftImageUrl;$("draft-image").hidden=false;
+ }
+}
+function localAt(date,zone){
+ const parts=Object.fromEntries(new Intl.DateTimeFormat("sv-SE",{timeZone:zone,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).formatToParts(date).map(p=>[p.type,p.value]));
+ return parts.year+"-"+parts.month+"-"+parts.day+"T"+parts.hour+":"+parts.minute;
+}
+$("keep-draft").onclick=()=>run(async()=>{
+ if(!editingDraft)return;
+ const result=await mutate("draft_edit",{draft_id:editingDraft.id,revision:editingDraft.revision,
+  meal:{name:$("meal-name").value,items:items(),occurred_at:editTime&&$("eaten-at").value===editDisplay&&$("eating-zone").value===editZone?editTime:($("eaten-at").value||null),timezone:$("eating-zone").value},
+  notes:$("draft-notes").value,consumed_fraction:optional($("consumed-fraction").value)});
+ editingDraft=result.draft;
+});
+$("camera").onclick=()=>$("camera-file").click();
+$("choose-photo").onclick=()=>$("library-file").click();
+async function picked(file,source){
+ if(!file)return;
+ if(file.size>state.photos.input_max_bytes)throw Error("This source file exceeds the configured photo limit; choose a smaller image.");
+ if(photoBitmap)photoBitmap.close();
+ if(window.createImageBitmap)photoBitmap=await createImageBitmap(file);
+ else{
+  const url=URL.createObjectURL(file),img=new Image();
+  try{await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=reject;img.src=url;});}
+  catch{URL.revokeObjectURL(url);throw Error("This browser could not decode the image. Try PNG or JPEG.");}
+  img.close=()=>URL.revokeObjectURL(url);photoBitmap=img;
+ }
+ if(photoBitmap.width*photoBitmap.height>state.photos.max_pixels){photoBitmap.close();photoBitmap=null;throw Error("This image exceeds the pixel limit; choose a smaller image.");}
+ captureContext={source,purpose:$("photo-purpose").value,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,captured_at:new Date().toISOString()};
+ $("crop-x").value=0;$("crop-y").value=0;$("crop-w").value=100;$("crop-h").value=100;
+ $("photo-capture").hidden=false;$("photo-progress").textContent="Local photo · crop and check the preview before uploading.";
+ drawCrop();$("photo-purpose").focus();
+}
+$("camera-file").onchange=e=>{const file=e.target.files[0];e.target.value="";run(()=>picked(file,"camera"));};
+$("library-file").onchange=e=>{const file=e.target.files[0];e.target.value="";run(()=>picked(file,"library"));};
+function drawCrop(){
+ if(!photoBitmap)return;
+ const x=Math.max(0,Math.min(99,Number($("crop-x").value))),y=Math.max(0,Math.min(99,Number($("crop-y").value)));
+ const w=Math.max(1,Math.min(100-x,Number($("crop-w").value))),h=Math.max(1,Math.min(100-y,Number($("crop-h").value)));
+ const sw=photoBitmap.width*w/100,sh=photoBitmap.height*h/100,scale=Math.min(1,state.photos.max_edge/Math.max(sw,sh));
+ const canvas=$("photo-canvas");canvas.width=Math.max(1,Math.round(sw*scale));canvas.height=Math.max(1,Math.round(sh*scale));
+ const ctx=canvas.getContext("2d");ctx.fillStyle="#fff";ctx.fillRect(0,0,canvas.width,canvas.height);
+ ctx.drawImage(photoBitmap,photoBitmap.width*x/100,photoBitmap.height*y/100,sw,sh,0,0,canvas.width,canvas.height);
+}
+for(const id of ["crop-x","crop-y","crop-w","crop-h"])$(id).oninput=drawCrop;
+$("cancel-photo").onclick=()=>{if(photoBitmap)photoBitmap.close();photoBitmap=null;$("photo-capture").hidden=true;$("photo-progress").textContent="";};
+$("keep-photo").onclick=()=>run(async()=>{
+ if(!photoBitmap)return;
+ $("keep-photo").disabled=true;$("photo-progress").textContent="Preparing cropped image…";
+ try{
+  let blob;
+  for(const quality of [.9,.8,.65,.5]){
+   blob=await new Promise(resolve=>$("photo-canvas").toBlob(resolve,"image/jpeg",quality));
+   if(blob&&blob.size<=state.photos.max_bytes)break;
+  }
+  if(!blob||blob.size>state.photos.max_bytes)throw Error("The cropped image still exceeds the upload limit; crop a smaller area.");
+  const encoded=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(",")[1]);reader.onerror=reject;reader.readAsDataURL(blob);});
+  $("photo-progress").textContent="Uploading…";
+  const result=await mutate("upload",{capture:{...captureContext,purpose:$("photo-purpose").value},encoded});
+  $("photo-progress").textContent="Received · durable draft, not logged.";
+  $("photo-capture").hidden=true;photoBitmap.close();photoBitmap=null;
+  const draft=draftState.drafts.find(d=>d.id===result.draft.id);if(draft)await openDraft(draft);
+ }finally{$("keep-photo").disabled=false;}
+});
+
+async function loadCatalog(more=false){
+ const result=await request("catalog",{query:$("catalog-query").value,...(more&&catalogCursor?{cursor:catalogCursor}:{})});
+ catalogEntries=more?catalogEntries.concat(result.entries):result.entries;catalogCursor=result.next_cursor;
+ $("catalog-more").hidden=!catalogCursor;$("catalog-list").replaceChildren();
+ if(!catalogEntries.length)$("catalog-list").append(node("p","No saved entries match this search.","dim"));
+ for(const entry of catalogEntries){
+  const v=entry.value,article=node("article"),controls=node("div",null,"row");
+  article.append(node("h3",v.name),node("p",entry.kind+" · "+fmt(v.snapshot.totals.calories)+" calories in "+fmt(v.yield.quantity)+" "+v.yield.unit+(v.aliases.length?" · "+v.aliases.join(", "):""),"dim"));
+  const add=(title,fn)=>{const b=node("button",title);b.onclick=()=>run(fn);controls.append(b);};
+  add("Choose portion",()=>openUse(entry));
+  if(entry.kind!=="batch")add("Edit",()=>openCatalogEditor(entry.kind,entry));
+  if(entry.kind==="recipe")add("Prepare a batch",async()=>{const name=window.prompt("Name this prepared batch",v.name+" batch");if(name?.trim())await mutate("batch_create",{recipe_id:entry.id,recipe_revision:entry.revision,name:name.trim()});});
+  add("Remove",()=>mutate("catalog_delete",{kind:entry.kind,id:entry.id,revision:entry.revision}));
+  article.append(controls);$("catalog-list").append(article);
+ }
+}
+function openCatalogEditor(kind,entry=null,sourceMeal=null){
+ const values=sourceMeal||entry?.value.snapshot;
+ openEditor();editorKind=kind;catalogEditing=entry;copiedMeal=sourceMeal;
+ $("editor-title").textContent=(entry?"Edit ":"Save ")+(kind==="food"?"usual food":"recipe");
+ $("meal-name").value=entry?.value.name||values?.name||"";$("items").replaceChildren();for(const i of values?.items||[{}])addFood(i);
+ $("catalog-fields").hidden=false;$("catalog-aliases").value=entry?.value.aliases.join(", ")||"";
+ $("recipe-yield").hidden=kind!=="recipe";$("yield-quantity").value=entry?.value.yield.quantity||4;$("yield-unit").value=entry?.value.yield.unit||"serving";
+ $("eaten-at").required=false;$("eaten-at").parentElement.hidden=true;$("eating-zone").parentElement.hidden=true;
+ $("save-meal").textContent="Save "+(kind==="food"?"usual food":"recipe");$("editor-preview").hidden=true;$("editor-plan").hidden=true;
+ copyFingerprint=JSON.stringify(items());preview();$("meal-name").focus();
+}
+async function loadPlans(){
+ if(!state)return;const result=await request("plans",{day:state.day});if(result.day!==state.day)return;
+ $("plan-projection").textContent="Logged + saved plans: "+fmt(result.projected.calories)+" calories · "+fmt(result.projected.protein_g)+" g protein ("+result.coverage.protein_g.known_items+"/"+result.coverage.protein_g.total_items+" foods known).";
+ $("plan-list").replaceChildren();if(!result.plans.length)$("plan-list").append(node("p","No planned meals for this diary day.","dim"));
+ for(const plan of result.plans){
+  const article=node("article"),controls=node("div",null,"row");article.append(node("h3",plan.value.name),node("p",fmt(plan.value.snapshot.totals.calories)+" projected calories","dim"));
+  for(const [title,fn] of [["I ate this",()=>openUse(null,plan)],["Edit plan",()=>{openEditor();editorKind="plan";catalogEditing=plan;$("meal-name").value=plan.value.name;$("items").replaceChildren();for(const i of plan.value.snapshot.items)addFood(i);$("eaten-at").required=false;$("eaten-at").parentElement.hidden=true;$("eating-zone").parentElement.hidden=true;$("editor-title").textContent="Edit planned meal";$("save-meal").textContent="Save plan";$("editor-preview").hidden=true;$("editor-plan").hidden=true;}],["Remove",()=>mutate("plan_delete",{id:plan.id,revision:plan.revision})]]){const b=node("button",title);b.onclick=()=>run(fn);controls.append(b);}
+  article.append(controls);$("plan-list").append(article);
+ }
+}
+function useArgs(){
+ const args={source_kind:useSource.kind,source_id:useSource.id,source_revision:useSource.revision};
+ if($("use-mode").value==="fraction")args.fraction=optional($("use-fraction").value);
+ else{args.quantity=optional($("use-quantity").value);args.unit=$("use-unit").value;}
+ return args;
+}
+function renderUseMeal(meal){
+ $("use-values").replaceChildren(node("p",fmt(meal.totals.calories)+" calories · "+fmt(meal.totals.protein_g)+" g protein · +"+fmt(meal.allowance)+" allowance"));
+ for(const i of meal.items)$("use-values").append(node("p",i.name+" · "+fmt(i.quantity)+" "+i.unit+" · "+i.source+(i.preparation?" · "+i.preparation:""),"dim"));
+}
+async function openUse(entry,plan=null){
+ useSource=entry;usePlan=plan;useMeal=null;$("use-panel").hidden=false;$("use-portion-fields").hidden=!!plan;
+ $("use-title").textContent=plan?plan.value.name:entry.value.name;$("use-time").value=state.day===localNow().slice(0,10)?localNow():state.day+"T12:00";$("use-zone").value=Intl.DateTimeFormat().resolvedOptions().timeZone;
+ $("use-plan").hidden=!!plan;$("use-preview").hidden=!!plan;
+ if(plan){++useVersion;useMeal=plan.value.snapshot;$("use-yield").textContent="Review the saved portion and actual eating time. Edit the plan first if the portion changed.";renderUseMeal(useMeal);$("use-log").disabled=false;}
+ else{$("use-mode").value="amount";$("use-quantity").value=1;$("use-unit").value=entry.value.yield.unit;$("use-yield").textContent="Whole yield: "+fmt(entry.value.yield.quantity)+" "+entry.value.yield.unit;await refreshPortion();}
+ $("use-panel").scrollIntoView({behavior:"smooth",block:"start"});$("use-time").focus();
+}
+async function refreshPortion(){
+ const version=++useVersion;useMeal=null;for(const id of ["use-log","use-plan","use-preview"])$(id).disabled=true;
+ const fraction=$("use-mode").value==="fraction";$("use-fraction-label").hidden=!fraction;$("use-quantity-label").hidden=fraction;$("use-unit-label").hidden=fraction;
+ const result=await request("portion",useArgs());if(version!==useVersion)return;useMeal=result.meal;renderUseMeal(useMeal);for(const id of ["use-log","use-plan","use-preview"])$(id).disabled=false;
+}
+function clearPreview(){++previewVersion;$("what-if").hidden=true;}
+async function previewTotals(data){
+ const version=++previewVersion,dayVersion=loadVersion;$("what-if").hidden=true;
+ const result=await request("preview",data);
+ if(version===previewVersion&&dayVersion===loadVersion)showPreview(result);
+}
+function showPreview(result){$("what-if").hidden=false;$("what-if-values").textContent=fmt(result.logged.calories)+" logged → "+fmt(result.projected.calories)+" projected calories · "+fmt(result.projected.protein_g)+" g protein ("+result.coverage.protein_g.known_items+"/"+result.coverage.protein_g.total_items+" foods known).";$("what-if").scrollIntoView({behavior:"smooth"});}
+$("use-log").onclick=()=>run(async()=>{if(!useMeal||!$("use-time").value)throw Error("Choose the actual eating time.");const args={occurred_at:$("use-time").value,timezone:$("use-zone").value};if(usePlan)await mutate("plan_log",{...args,plan_id:usePlan.id,plan_revision:usePlan.revision});else await mutate("catalog_log",{...useArgs(),...args});$("use-panel").hidden=true;});
+$("use-plan").onclick=()=>run(async()=>{await mutate("plan_save",{...useArgs(),day:state.day,revision:0});$("use-panel").hidden=true;});
+$("use-preview").onclick=()=>run(()=>previewTotals({...useArgs(),day:state.day}));
+for(const id of ["use-mode","use-quantity","use-unit","use-fraction"])$(id).onchange=()=>run(refreshPortion);
+$("use-close").onclick=()=>{$("use-panel").hidden=true;++useVersion;};$("preview-close").onclick=clearPreview;
+$("new-food").onclick=()=>openCatalogEditor("food");$("new-recipe").onclick=()=>openCatalogEditor("recipe");
+$("catalog-search").onclick=()=>run(()=>loadCatalog());$("catalog-more").onclick=()=>run(()=>loadCatalog(true));
+$("catalog-query").onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();run(()=>loadCatalog());}};
+function editorProposal(){return {name:$("meal-name").value,items:items(),day:state.day,consumed_fraction:optional($("consumed-fraction").value)};}
+$("editor-preview").onclick=()=>run(()=>previewTotals(editorProposal()));
+$("editor-plan").onclick=()=>run(async()=>{await mutate("plan_save",{...editorProposal(),revision:0});$("editor").hidden=true;});
+function renderReview(target,report){
+ target.replaceChildren(node("p",report.explanation||"Review every affected meal."));
+ if(report.before!=null)target.append(node("p",fmt(report.before)+" → "+fmt(report.after)+" calories across "+report.count+" meals."));
+ const table=node("table",null,"review-table"),head=node("tr");for(const title of ["Meal / diary day","Before","After"])head.append(node("th",title));table.append(head);
+ for(const meal of report.meals){const row=node("tr");row.append(node("td",meal.name+" · "+meal.day),node("td",fmt(meal.before)),node("td",fmt(meal.after)));table.append(row);}target.append(table);
+}
+$("bulk-review").onclick=()=>run(async()=>{bulkReview=null;$("bulk-apply").hidden=true;const result=await request("bulk_preview",{from:$("bulk-from").value,to:$("bulk-to").value});bulkReview=result;renderReview($("bulk-report"),result);$("bulk-apply").hidden=false;});
+for(const id of ["bulk-from","bulk-to"])$(id).onchange=()=>{bulkReview=null;$("bulk-apply").hidden=true;$("bulk-report").replaceChildren();};
+$("bulk-apply").onclick=()=>run(async()=>{if(!bulkReview)throw Error("Review the date range first.");await mutate("bulk_apply",{preview_id:bulkReview.preview_id,digest:bulkReview.digest});bulkReview=null;$("bulk-apply").hidden=true;});
+function closeQuestion(){strictQuestion=null;clearTimeout(scopeTimer);if($("bulk-question").open)$("bulk-question").close();}
+function showQuestion(question){
+ closeQuestion();strictQuestion=question;renderReview($("bulk-question-report"),question.review);$("bulk-question-title").textContent=question.operation==="bulk_undo"?"Undo historical recalculation":"Approve historical recalculation";
+ $("scope-approve").disabled=false;$("scope-deny").disabled=false;$("bulk-expires").textContent="This approval belongs to this page and expires at "+new Date(question.expires_at*1000).toLocaleTimeString()+".";
+ const remaining=Math.max(0,question.expires_at*1000-Date.now());const waiting=outbox&&pending.get(outbox.request_id);if(waiting){clearTimeout(waiting.timer);waiting.timer=setTimeout(()=>waiting.reject(Error("No receipt yet. Retry the saved request.")),remaining+15000);}
+ $("bulk-question").showModal();$("scope-deny").focus();scopeTimer=setTimeout(closeQuestion,remaining);
+}
+async function answerQuestion(approve){const q=strictQuestion;if(!q)return;$("scope-approve").disabled=true;$("scope-deny").disabled=true;const result=await request("answer",{confirm_id:q.confirm_id,operation:q.operation,digest:q.digest,approve});if(!result.accepted){closeQuestion();throw Error("This approval expired or no longer matches. Review the range again.");}}
+$("scope-approve").onclick=()=>run(()=>answerQuestion(true));$("scope-deny").onclick=()=>run(()=>answerQuestion(false));$("bulk-question").oncancel=e=>{e.preventDefault();run(()=>answerQuestion(false));};
+
+function shiftDay(day,delta){const d=new Date(day+"T12:00:00Z");d.setUTCDate(d.getUTCDate()+delta);return d.toISOString().slice(0,10);}
+async function loadDashboard(){
+ const version=++dashboardVersion;$("dashboard-loading").hidden=false;$("dashboard-content").hidden=true;$("dashboard-error").textContent="";
+ if(!$("range-to").value){$("range-to").value=state.day;$("range-from").value=shiftDay(state.day,1-Math.min(7,state.dashboard_max_days));}
+ try{
+  const data=await request("dashboard",{from:$("range-from").value,to:$("range-to").value});if(version!==dashboardVersion)return;
+  dashboardState=data;$("dashboard-content").hidden=false;renderDashboard();
+  if(!$("weight-day").value){$("weight-day").value=state.day;await loadWeight();}
+ }catch(error){if(version===dashboardVersion){dashboardState=null;$("dashboard-error").textContent=error.message;}}
+ finally{if(version===dashboardVersion)$("dashboard-loading").hidden=true;}
+}
+function rangePreset(days){$("range-to").value=state.day;$("range-from").value=shiftDay(state.day,1-days);return loadDashboard();}
+$("range-seven").onclick=()=>run(()=>rangePreset(7));$("range-thirty").onclick=()=>run(()=>rangePreset(30));
+$("range-form").onsubmit=e=>{e.preventDefault();run(loadDashboard);};
+for(const id of ["range-from","range-to"])$(id).onchange=()=>{++dashboardVersion;$("dashboard-content").hidden=true;$("dashboard-loading").hidden=true;$("dashboard-error").textContent="Show range to refresh these dates.";};
+function dayStatus(row){return {complete:row.zero_intake?"Complete · zero intake":"Complete",incomplete:"Logged so far",missing:"No intake reading",empty_without_zero:"Empty · zero intake not asserted"}[row.status]+(row.day>dashboardState.today?" · future":"");}
+function deficitReason(row){return {future:"Future day",not_complete:"Day not complete",intake_unknown:"Intake unknown",expenditure_unset:"Expenditure not set"}[row.deficit_exclusion]||"Included";}
+function averageText(a,unit=""){return a.value==null?"—":fmt(a.value)+unit;}
+function renderDashboard(){
+ const d=dashboardState,a=d.averages,n=d.summary;
+ $("range-coverage").textContent=d.from+" – "+d.to+" · "+n.complete_days+"/"+n.days+" days complete. Missing days remain gaps; unfinished intake is logged so far.";
+ $("average-calories").textContent=averageText(a.calories);$("average-coverage").textContent=a.calories.days+" completed days with usable calories";
+ $("average-protein").textContent=averageText(a.protein_g," g");$("protein-average-coverage").textContent=a.protein_g.days+" completed days with full protein coverage";
+ $("deficit-subtotal").textContent=n.cumulative_deficit==null?"—":fmt(n.cumulative_deficit);$("deficit-coverage").textContent=n.deficit_days+"/"+n.days+" days included · "+n.gap_days+" gaps. Positive: deficit; negative: surplus.";
+ $("deficit-explanation").textContent=d.explanation;
+ for(const [id,count] of [["range-seven",7],["range-thirty",30]]){$(id).setAttribute("aria-pressed",String(n.days===count));$(id).disabled=count>d.max_days;}
+ renderGraph();renderWeekly();
+}
+async function openEvidence(day,mealId){
+ await loadDay(day);$("daily-heading").scrollIntoView({behavior:"smooth",block:"start"});$("daily-heading").focus();
+ if(mealId){const entries=[...$("meal-list").querySelectorAll("article")];const index=state.meals.findIndex(m=>m.id===mealId);const entry=entries[index];if(entry){const detail=entry.querySelector("details");if(detail)detail.open=true;entry.scrollIntoView({behavior:"smooth",block:"center"});}}
+}
+function dayButton(day,mealId,text=day){const b=node("button",text);b.type="button";b.onclick=()=>run(()=>openEvidence(day,mealId));return b;}
+function svgNode(tag,attrs={},text){const n=document.createElementNS("http://www.w3.org/2000/svg",tag);for(const [key,value] of Object.entries(attrs))n.setAttribute(key,String(value));if(text!=null)n.textContent=text;return n;}
+function graphValues(row,kind){
+ if(kind==="weight")return [row.weight.value?.kg??null,row.weight_trend.kg];
+ if(kind==="deficit"||kind==="cumulative_deficit")return [row[kind],null];
+ return [row.totals[kind],kind==="calories"?row.settings.calorie_target??null:kind==="protein_g"?row.settings.protein_target_g??null:null];
+}
+function renderGraph(){
+ if(!dashboardState||$("dashboard-content").hidden)return;
+ const kind=$("graph-kind").value,d=dashboardState,weight=kind==="weight",deficit=kind.includes("deficit"),unit=weight?"kg":deficit||kind==="calories"?"calories":"g";
+ const secondary=weight?d.weight_trend_days+"-day observed mean":kind==="calories"||kind==="protein_g"?"Owner target":null;
+ const description=weight?"Dots are observed weight in kg. The dashed mean needs at least two readings in the trailing "+d.weight_trend_days+" calendar days; missing weigh-ins stay gaps. Enter kg or lb below.":deficit?"Only eligible complete days contribute. Positive values are estimated deficits; negative values are surpluses. Lines stop at gaps; the cumulative subtotal resumes with the next eligible day.":"Solid dots are complete-day readings; hollow dots are logged so far or have incomplete nutrient coverage. Gold is logged intake"+(secondary?"; dashed cyan is the owner's target":"")+". Missing nutrients stay unknown; the table shows coverage and allowances.";
+ $("graph-description").textContent=description;$("trend-readout").textContent="Select a point or a table day to open its evidence.";
+ const rows=d.days,values=rows.map(r=>graphValues(r,kind)),available=values.flat().filter(v=>v!=null);
+ const width=Math.max(260,$("trend-graph").clientWidth),height=260,left=56,right=16,top=24,bottom=38;
+ let lo=available.length?Math.min(...available):0,hi=available.length?Math.max(...available):1;
+ if(!weight){lo=Math.min(0,lo);hi=Math.max(0,hi);}if(hi===lo){hi+=weight?1:Math.max(1,Math.abs(hi)*.05);lo-=weight?1:0;}
+ const span=hi-lo;hi+=span*.08;if(lo<0)lo-=span*.08;
+ const x=i=>left+(width-left-right)*(rows.length===1?.5:i/(rows.length-1)),y=v=>top+(height-top-bottom)*(hi-v)/(hi-lo);
+ const svg=svgNode("svg",{viewBox:`0 0 ${width} ${height}`,role:"group","aria-label":$("graph-kind").selectedOptions[0].text+". Daily values are also in the table."});
+ for(let i=0;i<3;i++){const value=lo+(hi-lo)*i/2,yy=y(value);svg.append(svgNode("line",{x1:left,x2:width-right,y1:yy,y2:yy,stroke:"var(--line)"}),svgNode("text",{x:left-8,y:yy+4,fill:"var(--text-dim)","font-size":11,"text-anchor":"end"},fmt(value)));}
+ if(deficit)svg.append(svgNode("line",{x1:left,x2:width-right,y1:y(0),y2:y(0),stroke:"var(--line-strong)"}));
+ const labels=[...new Set([0,Math.floor((rows.length-1)/2),rows.length-1])];
+ for(const i of labels)svg.append(svgNode("text",{x:x(i),y:height-9,fill:"var(--text-dim)","font-size":11,"text-anchor":i===0?"start":i===rows.length-1?"end":"middle"},rows[i].day.slice(5)));
+ for(let channel=0;channel<2;channel++){
+  let path="",prior=false;
+  values.forEach((v,i)=>{if(v[channel]==null){prior=false;return;}const point=x(i)+" "+y(v[channel]);path+=(prior?(channel===1&&!weight?" H "+x(i)+" V "+y(v[channel]):" L "+point):" M "+point);prior=true;});
+  if(path)svg.append(svgNode("path",{d:path,fill:"none",stroke:channel?"var(--st-speaking)":"var(--gold)","stroke-width":channel?1.5:2,"stroke-dasharray":channel?"5 4":"none"}));
+ }
+ rows.forEach((row,i)=>{
+  const v=values[i][0],partial=!weight&&!deficit&&(row.status!=="complete"||row.coverage[kind].known_items<row.coverage[kind].total_items);
+  const detail=row.day+": "+(v==null?"no "+(weight?"weigh-in":deficit?"eligible deficit":"intake reading"):fmt(v)+" "+unit)+" · "+(deficit?deficitReason(row):weight?"observed weight":dayStatus(row));
+  const dot=svgNode("circle",{cx:x(i),cy:v==null?height-bottom+9:y(v),r:v==null?3:4,fill:v==null||partial?"#09141b":"var(--gold)",stroke:v==null?"var(--text-dim)":"var(--gold)","stroke-width":1.5,tabindex:0,role:"button","aria-label":detail});
+  dot.append(svgNode("title",{},detail));dot.onfocus=dot.onpointerenter=()=>$("trend-readout").textContent=detail;
+  const activate=()=>run(()=>weight?selectWeight(row.day):openEvidence(row.day));dot.onclick=activate;dot.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();activate();}};svg.append(dot);
+ });
+ $("trend-graph").replaceChildren(svg);
+ if(!available.length)$("trend-graph").append(node("p",weight?"No weigh-ins in this range. Weight tracking is optional.":deficit?"No eligible deficits yet. Complete a usable diary day and supply its expenditure to include it.":"No intake readings in this range.","dim"));
+ $("trend-caption").textContent=d.from+" through "+d.to+" · "+$("graph-kind").selectedOptions[0].text;
+ const head=node("tr");for(const title of ["Day",weight?"Entered value":"Status",unit,secondary||"Allowance",weight?"Readings in mean window":deficit?"Eligibility / included days":"Nutrient coverage"])head.append(node("th",title));$("trend-columns").replaceChildren(head);$("trend-rows").replaceChildren();
+ rows.forEach((r,i)=>{const tr=node("tr"),day=node("td"),v=values[i];const b=dayButton(r.day);if(weight)b.onclick=()=>run(()=>selectWeight(r.day));day.append(b);tr.append(day);
+  tr.append(node("td",weight?r.weight.value?fmt(r.weight.value.value)+" "+r.weight.value.unit:"No weigh-in":dayStatus(r)),node("td",fmt(v[0])),node("td",secondary?fmt(v[1]):fmt(r.allowance)));
+  const coverage=weight?r.weight_trend.readings+" readings":deficit?deficitReason(r)+" · "+r.included_days+" included":r.coverage[kind].known_items+"/"+r.coverage[kind].total_items+" foods known"+(r.allowance==null?"":" · "+fmt(r.allowance)+" allowance calories");tr.append(node("td",coverage));$("trend-rows").append(tr);
+ });
+}
+$("graph-kind").onchange=renderGraph;
+let graphWidth=0;new ResizeObserver(entries=>{const width=Math.round(entries[0].contentRect.width);if(width&&width!==graphWidth){graphWidth=width;renderGraph();}}).observe($("trend-graph"));
+function renderWeekly(){
+ const w=dashboardState.weekly_review,box=$("weekly-content");box.replaceChildren();$("weekly-period").textContent=w.from+" – "+w.to+" · "+w.complete_days+"/7 days complete · "+w.meal_count+" logged meals. This is the seven days ending on the range's last day.";
+ for(const [key,title] of [["calories","Calories"],["protein_g","Protein (g)"],["carbs_g","Carbohydrate (g)"],["fat_g","Fat (g)"],["deficit","Estimated deficit"]]){const a=w.averages[key];box.append(node("p",title+": "+averageText(a)+" average across "+a.days+" eligible completed days.","dim"));}
+ for(const [key,title] of [["recurring","Recurring meals"],["allowances","Largest calorie allowances"],["unresolved","Missing nutrient values"]]){
+  const group=w[key];box.append(node("h3",title),node("p","Showing "+group.entries.length+" of "+group.total+(key==="recurring"?" recurring names (portions may differ).":" meals."),"dim"));
+  for(const entry of group.entries){const article=node("article");if(key==="recurring"){article.append(node("strong",entry.name+" · "+entry.count+" times"));const links=node("div",null,"row");for(const m of entry.examples)links.append(dayButton(m.day,m.id,m.day));article.append(links);if(entry.count>entry.examples.length)article.append(node("p","Showing "+entry.examples.length+" examples.","dim"));}else{article.append(node("strong",entry.name),node("p",key==="allowances"?fmt(entry.allowance)+" extra calories included in "+fmt(entry.calories)+" logged calories":"Unknown: "+entry.missing_nutrients.map(k=>({protein_g:"protein",carbs_g:"carbohydrate",fat_g:"fat",calories:"calories"}[k])).join(", "),"dim"),dayButton(entry.day,entry.id,entry.day+" · Review meal"));}box.append(article);}
+ }
+}
+async function selectWeight(day){$("weight-panel").open=true;$("weight-day").value=day;await loadWeight();$("weight-value").focus();$("weight-panel").scrollIntoView({behavior:"smooth"});}
+async function loadWeight(){
+ const version=++weightVersion,day=$("weight-day").value;weightRecord=null;$("weight-save").disabled=true;$("weight-delete").hidden=true;$("weight-status").textContent="Reading this date…";
+ try{const d=await request("dashboard",{from:day,to:day});if(version!==weightVersion)return;weightRecord=d.days[0].weight;$("weight-value").value=weightRecord.value?.value??"";$("weight-unit").value=weightRecord.value?.unit||"kg";$("weight-delete").hidden=!weightRecord.value;$("weight-save").disabled=false;$("weight-status").textContent=weightRecord.value?"Review the saved value before correcting it. Undo is available.":"No measurement for this date.";}
+ catch(error){if(version===weightVersion)$("weight-status").textContent=error.message;}
+}
+$("weight-day").onchange=()=>run(loadWeight);$("weight-reload").onclick=()=>run(loadWeight);
+$("weight-form").onsubmit=e=>{e.preventDefault();run(async()=>{if(!weightRecord||weightRecord.id!==$("weight-day").value)throw Error("Load this measurement date first.");await mutate("weight_save",{day:weightRecord.id,revision:weightRecord.revision,value:Number($("weight-value").value),unit:$("weight-unit").value});await loadWeight();});};
+$("weight-delete").onclick=()=>run(async()=>{if(!weightRecord?.value||weightRecord.id!==$("weight-day").value)throw Error("Load the saved reading first.");await mutate("weight_delete",{day:weightRecord.id,revision:weightRecord.revision});await loadWeight();});
+
+window.addEventListener("beforeunload",()=>{if(draftImageUrl)URL.revokeObjectURL(draftImageUrl);for(const url of mealImageUrls)URL.revokeObjectURL(url);if(photoBitmap)photoBitmap.close();});
+connect();
+</script>
+</body>
+</html>

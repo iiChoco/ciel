@@ -13,7 +13,18 @@ the spoke's own timeout arriving as an empty answer and reading as
 "no answer", a spoke that dies mid-question resolving the hook to deny
 within a second (a wedged hook is a dead assistant), and a late answer
 after the verdict being ignored rather than approving the next thing.
+An answer names its question: the sink registers the id it puts each
+listening line under, an answer carrying the id of a question already
+decided is refused while the next question stays open, the re-prompt
+takes a new id so a late answer to the first wording is refused too, an
+answer with no id (the Chart's row, a typed line) is judged by the
+predating rule alone, and the identity is cleared with the verdict and
+on cancellation. The opt-in scoped path instead requires the exact question,
+operation, digest, initiating client, and unexpired deadline; generic answers,
+confirmations-off, cancellation, and concurrent requests cannot approve it.
 """
+
+from __future__ import annotations
 
 import asyncio
 import sys
@@ -113,7 +124,7 @@ async def main() -> None:
 
     print("\na question with no turn behind it, through one channel")
     broker, rows = make_broker(timeout_s=5.0)
-    broker._config = replace(broker._config, discord=replace(broker._config.discord, confirm_timeout_s=1.0))
+    broker._config = replace(broker._config, web=replace(broker._config.web, confirm_timeout_s=1.0))
     shown: list[str] = []
 
     async def chart_send(text: str) -> None:
@@ -206,13 +217,112 @@ async def main() -> None:
         broker.answer("yes")
 
     verdict, _ = await asyncio.gather(
-        ask_via(broker, plain_send, origin="discord"), yes_soon()
+        ask_via(broker, plain_send, origin="web"), yes_soon()
     )
     check(
-        "a Discord-origin answer is still you-confirm-remote",
+        "a web-origin answer is still you-confirm-remote",
         verdict is True and rows[-1] == ("you-confirm-remote", "yes"),
     )
 
+    print("\nan answer names its question")
+
+    class IdSink(FakeSink):
+        """The spoke sink's shape: every listening line goes out under an
+        id the broker is told to expect, the way _WireSink mints one."""
+
+        def __init__(self, broker):
+            super().__init__()
+            self.broker = broker
+            self.ids: list[str] = []
+
+        async def __call__(self, text: str, *, listen: bool = False) -> None:
+            if listen:
+                self.ids.append(f"q{len(self.ids) + 1}")
+                self.broker.expect(self.ids[-1])
+            await super().__call__(text, listen=listen)
+
+    broker, rows = make_broker()
+    sink = IdSink(broker)
+    verdict, _ = await asyncio.gather(ask_via(broker, sink, "Fixture action A?"), answer_soon(broker, "no"))
+    check("question A is denied and its identity is cleared with the verdict", verdict is False and broker._expected_id is None)
+
+    async def a_stale_yes_then_the_real_answer():
+        await asyncio.sleep(0.05)
+        stale = broker.answer("yes", confirm_id="q1")
+        await asyncio.sleep(0.05)
+        still_open = broker.active
+        fresh = broker.answer("no", confirm_id="q2")
+        return stale, still_open, fresh
+
+    verdict, (stale, still_open, fresh) = await asyncio.gather(
+        ask_via(broker, sink, "Fixture action B?"), a_stale_yes_then_the_real_answer()
+    )
+    check("a yes carrying A's id arriving while B is open is refused, and B stays open for its own answer",
+          stale is False and still_open and fresh is True and verdict is False and sink.ids == ["q1", "q2"])
+
+    async def an_unclear_answer_then_a_late_yes_to_the_first_wording():
+        await asyncio.sleep(0.05)
+        broker.answer("hmm what", confirm_id="q3")
+        await asyncio.sleep(0.1)
+        late = broker.answer("yes", confirm_id="q3")
+        await asyncio.sleep(0.05)
+        return late, broker.answer("yes", confirm_id="q4")
+
+    verdict, (late, reprompted) = await asyncio.gather(
+        ask_via(broker, sink, "Fixture action C?"), an_unclear_answer_then_a_late_yes_to_the_first_wording()
+    )
+    check("the re-prompt takes a new id: a yes to the first wording after it is refused, a yes to the re-prompt approves",
+          late is False and reprompted is True and verdict is True and sink.ids[-2:] == ["q3", "q4"])
+
+    verdict, accepted = await asyncio.gather(ask_via(broker, sink, "Fixture action D?"), answer_soon(broker, "yes"))
+    check("an answer with no id — the Chart's row, a typed line — is still judged by the predating rule alone",
+          verdict is True and accepted)
+
+    async def cancelled_mid_question():
+        await asyncio.sleep(0.05)
+        broker.cancel("spoke gone")
+
+    verdict, _ = await asyncio.gather(ask_via(broker, sink, "Fixture action E?"), cancelled_mid_question())
+    check("cancellation clears the identity too, so nothing can be answered under it later",
+          verdict is False and broker._expected_id is None and broker.answer("yes", confirm_id=sink.ids[-1]) is False)
+
+    print("\nstrict private questions")
+    broker,rows=make_broker();shown=[]
+    async def scoped_send(scope: dict) -> None:shown.append(scope)
+    async def start_scoped(client: str="page-a", seconds: float=1.0):
+        task=asyncio.create_task(broker.ask_scoped(scoped_send,operation="bulk_apply",digest="review-digest",client=client,expires=time.monotonic()+seconds))
+        for _ in range(100):
+            if broker._scope is not None:return task
+            if task.done():return task
+            await asyncio.sleep(.001)
+        raise AssertionError("scope was not shown")
+    def scoped_answer(**changes):
+        values={"confirm_id":shown[-1]["confirm_id"],"operation":"bulk_apply","digest":"review-digest","client":"page-a","approve":True}
+        return broker.answer_scoped(**{**values,**changes})
+    task=await start_scoped()
+    check("a strict question is private and not copied to the transcript",broker.active and not rows and len(shown)==1)
+    check("a generic keyboard or Chat yes cannot answer a strict question",not broker.answer("yes") and not broker.answer("yes",confirm_id=shown[-1]["confirm_id"]))
+    check("another page cannot answer the question even with its ID",not scoped_answer(client="page-b") and not task.done())
+    check("an altered digest or operation cannot answer the question",not scoped_answer(digest="changed") and not scoped_answer(operation="bulk_undo"))
+    check("the initiating page can answer its exact scope",scoped_answer() and await task)
+    check("a decided approval cannot be replayed",not scoped_answer() and not broker.active and broker._scope is None)
+    previous=shown[-1]["confirm_id"];task=await start_scoped()
+    check("the next question rejects the previous confirmation ID",not scoped_answer(confirm_id=previous))
+    broker.cancel_scoped("page-b")
+    check("disconnecting another page leaves the question open",not task.done())
+    broker.cancel_scoped("page-a")
+    check("disconnecting the initiating page denies and clears approval",not await task and broker._scope is None)
+    task=await start_scoped(seconds=.03)
+    check("an unanswered scope expires without approval",not await task and broker._scope is None)
+    broker._config=replace(broker._config,confirm=replace(broker._config.confirm,ask_first=False))
+    count=len(shown)
+    check("confirmations-off never answers a strict question automatically",not await broker.ask_scoped(scoped_send,operation="bulk_apply",digest="d",client="page-a",expires=time.monotonic()+1) and len(shown)==count and not rows)
+    broker._config=replace(broker._config,confirm=replace(broker._config.confirm,ask_first=True))
+    task=await start_scoped();broker._config=replace(broker._config,confirm=replace(broker._config.confirm,ask_first=False))
+    check("turning confirmations off while a scope is pending denies its answer",not scoped_answer() and not await task)
+    broker._config=replace(broker._config,confirm=replace(broker._config.confirm,ask_first=True))
+    task=await start_scoped();task.cancel();await asyncio.gather(task,return_exceptions=True)
+    check("cancelling a strict ask releases the broker for ordinary questions",broker._scope is None and not broker.active and not broker._lock.locked())
     print(f"\nall {len(CHECKS)} checks passed")
 
 

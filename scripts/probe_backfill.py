@@ -8,9 +8,11 @@ and when — local at its time, the hub's only with the link down or past
 the grace — the rung record that keeps a late delivery silent, persistence
 across a restart, the offline cancel and listing); the hub's say-id
 dedupe (a resend after a reconnect is acked, not queued twice); the
-timers.sync broadcast deduped at the server; the away ladder on the hub
-(iMessage through the spoke when it is seated, Discord when it is not);
-and the doctor's checks with the CLI probe stubbed.
+timers.sync broadcast deduped at the server; the away text on the hub
+(iMessage through the spoke, and a send that fails holds the event
+rather than losing it); and the doctor's checks with the CLI probe
+stubbed. Nutrition and the doctor share the required-token rule, including
+loopback, missing-token diagnostics, and the disabled state, without secrets.
 """
 
 import asyncio
@@ -20,12 +22,14 @@ import tempfile
 from collections import deque
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from ciel.config import Config, HubConfig, ProactiveConfig, WebConfig
 from ciel.hub import doctor
 from ciel.hub.server import HubServer
+from ciel.messages import MessagesUnavailable
 from ciel.pipeline import Pipeline
 from ciel.remote.web import Admission
 from ciel.spoke.timers import TimerMirror
@@ -119,20 +123,17 @@ def probe_say_dedupe() -> None:
 
 
 class FakeOwner:
-    def __init__(self):
+    """The Messages client as the hub sees it: the RPC binding raises
+    MessagesUnavailable when no spoke is seated to carry the send."""
+
+    def __init__(self, seated=True):
         self.sent = []
+        self.seated = seated
 
     async def send(self, handle, text):
+        if not self.seated:
+            raise MessagesUnavailable("no spoke seated")
         self.sent.append((handle, text))
-
-
-class FakeDiscord:
-    def __init__(self, can_send=True):
-        self.sent = []
-        self.can_send = can_send
-
-    async def send(self, text, channel=None):
-        self.sent.append(text)
 
 
 class FakeEvents:
@@ -157,7 +158,7 @@ class FakeEvent:
 
 
 async def probe_away_ladder() -> None:
-    print("\nthe away ladder on the hub")
+    print("\nthe away text on the hub")
     cfg = replace(Config(), proactive=replace(ProactiveConfig(), owner_handle="+15550000001"))
 
     def make(spoke_seated: bool):
@@ -169,8 +170,7 @@ async def probe_away_ladder() -> None:
             server._welcome("spoke", Admission(True, role="spoke"))
         p._web_link = server
         p._events = FakeEvents()
-        p._owner_messages = FakeOwner()
-        p._remote_link = FakeDiscord()
+        p._owner_messages = FakeOwner(seated=spoke_seated)
         p._transcript = None
         p._presence = None
         p._calendar = None
@@ -184,21 +184,16 @@ async def probe_away_ladder() -> None:
     p = make(spoke_seated=True)
     await p._run_proactive_message(FakeEvent())
     check("spoke seated: the text goes through the Mac's iMessage",
-          p._owner_messages.sent == [("+15550000001", "Heads up.")] and p._remote_link.sent == []
+          p._owner_messages.sent == [("+15550000001", "Heads up.")]
           and p._events.messaged == ["ev1"])
     p = make(spoke_seated=False)
     await p._run_proactive_message(FakeEvent())
-    check("spoke away: the ladder inverts to Discord",
-          p._owner_messages.sent == [] and p._remote_link.sent == ["Heads up."]
-          and p._events.messaged == ["ev1"])
-    p = make(spoke_seated=False)
-    p._remote_link = FakeDiscord(can_send=False)
-    await p._run_proactive_message(FakeEvent())
-    check("spoke away and Discord down: the iMessage is attempted anyway (held on failure)",
-          p._owner_messages.sent == [("+15550000001", "Heads up.")])
+    check("spoke away: the send fails and the event is held, not lost",
+          p._owner_messages.sent == [] and p._events.messaged == []
+          and p._events.held == ["ev1"])
 
 
-def probe_doctor() -> None:
+def _probe_doctor() -> None:
     print("\nthe doctor")
     tmp = Path(tempfile.mkdtemp())
     doctor._cli_auth = lambda config: (True, "stubbed")
@@ -218,6 +213,31 @@ def probe_doctor() -> None:
     cfg3 = replace(cfg, hub=replace(HubConfig(), bind="127.0.0.1", token="x"))
     check("every row carries a name, a verdict, and a sentence",
           all(isinstance(r[0], str) and isinstance(r[1], bool) and r[2] for r in doctor.run(cfg3)))
+
+
+def probe_doctor() -> None:
+    with tempfile.TemporaryDirectory() as tmp, patch.object(Path, "home", return_value=Path(tmp)):
+        _probe_doctor()
+        cfg = Config()
+        cfg = replace(cfg, state_dir=Path(tmp), hub=replace(cfg.hub, require_token=True, token="fixture-token"))
+        from ciel.nutrition import readiness
+        with patch("ciel.nutrition.socket.gethostname", return_value="fixture-host"):
+            cfg = replace(cfg, nutrition=replace(cfg.nutrition, enabled=True, owner_host="fixture-host"))
+            rows = {name:(ok,text) for name,ok,text in doctor.run(cfg)}
+            check("nutrition and the doctor share the token readiness rule", rows["nutrition"] == readiness(cfg))
+            check("loopback diagnostics say when a token is required", rows["token"][0] and "required" in rows["token"][1] and "no token needed" not in rows["bind"][1])
+            missing = replace(cfg, hub=replace(cfg.hub, token=""))
+            missing_rows = {name:(ok,text) for name,ok,text in doctor.run(missing)}
+            check("missing required tokens fail nutrition even on loopback", not missing_rows["nutrition"][0] and not missing_rows["token"][0])
+            check("nutrition diagnostics never print the token value", "fixture-token" not in str(rows))
+            bad = replace(cfg,nutrition=replace(cfg.nutrition,photo_max_bytes=3000000))
+            check("the doctor and runtime both refuse photo bounds above the wire ceiling",not readiness(bad)[0] and ("nutrition",*readiness(bad)) in doctor.run(bad))
+            bad = replace(cfg,nutrition=replace(cfg.nutrition,bulk_max_meals=101))
+            check("the doctor and runtime refuse unbounded historical reviews",not readiness(bad)[0] and ("nutrition",*readiness(bad)) in doctor.run(bad))
+            bad = replace(cfg,nutrition=replace(cfg.nutrition,dashboard_max_days=367))
+            check("the doctor and runtime refuse unbounded dashboard reads",not readiness(bad)[0] and ("nutrition",*readiness(bad)) in doctor.run(bad))
+            off = replace(cfg, nutrition=replace(cfg.nutrition, enabled=False))
+            check("nutrition off is explicitly reported as off", ("nutrition", True, "off") in doctor.run(off))
 
 
 async def main() -> None:

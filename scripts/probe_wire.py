@@ -3,7 +3,8 @@
     uv run scripts/probe_wire.py
 
 Task requests require bounded identities and rendered revisions; task replies
-never enter replay. Four layers, no network until the last: the codec round-trips every
+never enter replay. Nutrition requests, results, and receipts round-trip
+through the same catalog. Four layers, no network until the last: the codec round-trips every
 frame in the catalog and refuses what it doesn't name; the replay ring
 numbers frames and answers resume claims (matching, stale, foreign,
 scrolled-off, too old to replay); ``admit`` — the whole auth policy as
@@ -68,6 +69,13 @@ SAMPLES: dict[str, dict] = {
     'task.request': {'request_id': 'r', 'operation': 'list'},
     'task.result': {'request_id': 'r', 'ok': True, 'data': {}},
     'task.changed': {},
+    'nutrition.request': {'request_id': 'meal-1', 'operation': 'day', 'data': {}},
+    'nutrition.question': {'data': {'confirm_id':'question','digest':'review','operation':'bulk_apply'}},
+    'nutrition.question_end': {'confirm_id':'question'},
+    'nutrition.answer': {'request_id':'answer','confirm_id':'question','digest':'review','operation':'bulk_apply','approve':True},
+    'nutrition.upload': {'request_id': 'photo-1', 'capture': {'source':'library','purpose':'meal','timezone':'UTC'}, 'data': 'aW1hZ2U='},
+    'nutrition.result': {'request_id': 'meal-1', 'ok': True, 'data': {}},
+    'nutrition.receipt': {'data': {'text': 'Logged breakfast.'}},
     "ping": {}, "pong": {"t_wall": 1.5},
     "speakback.set": {"on": True}, "speakback": {"on": True},
     "say": {"text": "hi", "seq": 1}, "mute": {"muted": True}, "restart": {},
