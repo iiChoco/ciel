@@ -17,11 +17,16 @@ without a call, records candidates and a roster, and completes with
 evidence; a replay of the window records nothing twice; a preview that runs
 out of model calls, or has no extraction backend, marks the rest unread and
 completes honestly; a mailbox that is not connected is a resource wait that
-names the fix; a restart resumes; the controller's door creates the task
-from an owner turn's arguments, refuses a public lane, and describes the
-task's records with message text quoted; and a message that tries to give
-instructions reaches the model as quoted data and cannot cite what is not
-there.
+names the fix; a restart resumes; a listing that blocks past the step
+deadline (a synchronous transport, the length of a slow Gmail answer) is
+abandoned at the deadline rather than checkpointed when it returns, and a
+timer due during the call fires on time because the loop was never held;
+with more records in the namespace than one page, the queued message
+behind page one is still read and the preview completes with it
+extracted; the controller's door creates the task from an owner turn's
+arguments, refuses a public lane, and describes the task's records with
+message text quoted; and a message that tries to give instructions
+reaches the model as quoted data and cannot cite what is not there.
 
     uv run --no-sync python scripts/probe_email_calendar.py
     uv run --no-sync python scripts/probe_email_calendar.py --live --since 2026-09-01
@@ -65,7 +70,7 @@ from ciel.task_context import TaskBinding
 from ciel.task_controls import TaskController
 from ciel.proactive.events import ProactiveEvent
 from ciel.task_runner import TaskNotifier, TaskRunner
-from ciel.tasks import DerivedOrigin, HumanOrigin, Origin, Scope, TaskConflict, TaskStore
+from ciel.tasks import DerivedOrigin, HumanOrigin, Origin, RecordSet, RecordWrite, Scope, TaskConflict, TaskStore
 
 CHECKS: list[str] = []
 OWNER = 'fixture-owner'
@@ -468,6 +473,42 @@ async def probe_preview(root: Path) -> None:
           and records['message:m3']['status'] == 'review')
     await f.close()
 
+    print('\nthe service off the loop, and every record in view')
+    f = Fixture(root, 'blocking', [CONFIRMATION], backend=ScriptedBackend({}), step_timeout_s=0.01)
+    store = await f.open()
+    slow = f.inbox.list_messages
+
+    def blocking_transport(since: str, until: str, limit: int) -> list[str]:
+        time.sleep(0.12)  # a synchronous HTTP round trip, the length of a slow Gmail answer
+        return slow(since, until, limit)
+
+    f.inbox.list_messages = blocking_transport  # type: ignore[method-assign]
+    task = await f.preview()
+    ticks: list[float] = []
+    started = time.monotonic()
+    handle = asyncio.get_running_loop().call_later(0.02, lambda: ticks.append(time.monotonic() - started))
+    report = await f.runner.step(now=1000)
+    await asyncio.sleep(0.15)
+    handle.cancel()
+    check('a listing that blocks past the step deadline is abandoned at the deadline, not checkpointed when it finally returns',
+          report is not None and report.result == 'abandoned' and 'timed out' in report.detail)
+    check('and an unrelated timer due during the call fires on time, because the loop was never held', bool(ticks) and ticks[0] < 0.1)
+    await f.close()
+
+    f = Fixture(root, 'paged', [CONFIRMATION], backend=ScriptedBackend({'Your appointment is confirmed': CONFIRMED_ANSWER}))
+    store = await f.open()
+    old = tuple(RecordWrite(f'candidate:old-{i:03}:0', {'kind': 'candidate', 'message_id': f'old-{i}', 'title': 'Fixture', 'decision': 'ignored',
+                                                        'reason': 'fixture', 'category': '', 'commitment': ''}, 0) for i in range(300))
+    await store.write_records(OWNER, RecordSet(NAMESPACE.name, old))
+    task = await f.preview()
+    results = await f.run(task.id)
+    done = await store.get(OWNER, task.id)
+    message = (await store.records(OWNER, NAMESPACE.name, ('message:m1',)))[0]
+    check('with more records than one page, the queued message behind page one is still read and the preview completes with it extracted',
+          results[-1] == 'done' and done.status == 'done' and f.inbox.fetched == ['m1'] and message.payload['status'] == 'candidate'
+          and len(await store.records(OWNER, NAMESPACE.name)) == 256 and len(await store.all_records(OWNER, NAMESPACE.name)) > 300)
+    await f.close()
+
 
 async def probe_controller(root: Path) -> None:
     print("\nthe owner's door")
@@ -484,7 +525,7 @@ async def probe_controller(root: Path) -> None:
     created = (await controller.apply(binding, 'inbox_preview', {'since': '2026-09-01'}))['task']
     check('an owner turn asks for a preview and gets a finite task naming the mailbox',
           created['status'] == 'queued' and created['specification']['scope']['targets'] == ('mailbox:me@example.test',))
-    public = TaskBinding(Origin(OWNER, 'public-turn', 'discord', private=False, ingress_ids=('dm:1',)), 1, 1)
+    public = TaskBinding(Origin(OWNER, 'public-turn', 'web', private=False, ingress_ids=('dm:1',)), 1, 1)
     await refused('a public lane cannot ask for a preview', controller.apply(public, 'inbox_preview', {'since': '2026-09-01'}))
     await f.run(created['id'], now=time.time() + 1)
     detail = await controller.view(binding, created['id'])

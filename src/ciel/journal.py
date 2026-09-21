@@ -21,6 +21,9 @@ would leave the model holding a snapshot path it cannot open.
 
 Entries live in one JSONL file, snapshots beside it, both pruned together:
 when an entry falls off the end of the journal, its snapshot goes with it.
+The directory, the journal, its temporary file, and every snapshot are
+created owner-only, whatever the umask: what Ciel did on your behalf,
+and what your files held before it did, is nobody else's to read.
 """
 
 from __future__ import annotations
@@ -73,7 +76,8 @@ class ActionJournal:
         self._max_snapshot_bytes = config.max_snapshot_kb * 1024
 
     def ensure(self) -> None:
-        self._snapshots.mkdir(parents=True, exist_ok=True)
+        self._dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._snapshots.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     # ── recording ────────────────────────────────────────────────────────────
 
@@ -158,7 +162,8 @@ class ActionJournal:
             # append — the record exists precisely for the moments things go
             # wrong, so it must not evaporate at one.
             tmp = self._file.with_suffix(".jsonl.tmp")
-            with tmp.open("w", encoding="utf-8") as f:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 for e in kept:
                     f.write(json.dumps(e, ensure_ascii=False) + "\n")
             tmp.replace(self._file)

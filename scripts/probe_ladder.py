@@ -39,7 +39,6 @@ EVERYTHING = dict(
     timers_due=True,
     typed_pending=True,
     web_pending=True,
-    remote_pending=True,
     vigil_ready=True,
 )
 
@@ -65,7 +64,7 @@ def main() -> int:
         "a spoken turn already heard outranks every queue but timers",
         pick_next(
             Snapshot(state=W, voice_pending=True, typed_pending=True,
-                     web_pending=True, remote_pending=True, vigil_ready=True)
+                     web_pending=True, vigil_ready=True)
         ) is Source.VOICE
         and pick_next(Snapshot(state=W, timers_due=True, voice_pending=True))
         is Source.TIMERS,
@@ -77,23 +76,17 @@ def main() -> int:
         and pick_next(Snapshot(state=B, voice_pending=True)) is Source.NONE,
     )
     check(
-        "the keyboard outranks the page, the phone, and the machine",
+        "the keyboard outranks the page and the machine",
         pick_next(
             Snapshot(state=W, typed_pending=True, web_pending=True,
-                     remote_pending=True, vigil_ready=True)
+                     vigil_ready=True)
         ) is Source.TYPED,
     )
     check(
-        "the page outranks the phone and the machine",
+        "the page outranks the machine",
         pick_next(
-            Snapshot(state=W, web_pending=True, remote_pending=True,
-                     vigil_ready=True)
+            Snapshot(state=W, web_pending=True, vigil_ready=True)
         ) is Source.WEB,
-    )
-    check(
-        "the phone outranks the machine",
-        pick_next(Snapshot(state=W, remote_pending=True, vigil_ready=True))
-        is Source.REMOTE,
     )
     check(
         "the machine goes last",
@@ -121,18 +114,14 @@ def main() -> int:
         pick_next(Snapshot(state=L, typed_pending=True)) is Source.TYPED,
     )
 
-    print("\nthe WAITING-only rule (phone, machine)")
-    check(
-        "a follow-up window outranks the phone",
-        pick_next(Snapshot(state=L, remote_pending=True)) is Source.NONE,
-    )
+    print("\nthe WAITING-only rule (the machine)")
     check(
         "a follow-up window outranks the machine",
         pick_next(Snapshot(state=L, vigil_ready=True)) is Source.NONE,
     )
     check(
-        "a running turn outranks the phone",
-        pick_next(Snapshot(state=B, remote_pending=True)) is Source.NONE,
+        "a running turn outranks the machine",
+        pick_next(Snapshot(state=B, vigil_ready=True)) is Source.NONE,
     )
 
     print("\nthe confirmation exception")
@@ -165,7 +154,7 @@ def main() -> int:
     check(
         "and never ahead of a human lane, aged or not",
         all(pick_next(Snapshot(state=W, task_ready=True, task_aged=True, **{lane: True})) is not Source.TASK
-            for lane in ("typed_pending", "web_pending", "remote_pending", "voice_pending", "timers_due")),
+            for lane in ("typed_pending", "web_pending", "voice_pending", "timers_due")),
     )
     check(
         "aging without a task pending picks nothing",

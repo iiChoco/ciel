@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import IO
@@ -58,7 +59,7 @@ class Transcript:
             self._failed = True
 
     def _open(self) -> None:
-        self._dir.mkdir(parents=True, exist_ok=True)
+        self._dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         path = self._dir / f"conversation-{stamp}.csv"
         # A second conversation starting within the same second gets a suffix
@@ -68,7 +69,10 @@ class Transcript:
             n += 1
             path = self._dir / f"conversation-{stamp}-{n}.csv"
 
-        self._file = path.open("w", newline="", encoding="utf-8")
+        # Owner-only from the first byte: a conversation is the most private
+        # thing this process writes, and the umask is not a policy.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        self._file = os.fdopen(fd, "w", newline="", encoding="utf-8")
         self._writer = csv.writer(self._file)
         self._writer.writerow(["timestamp", "speaker", "text"])
         self.path = path

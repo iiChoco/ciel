@@ -31,6 +31,19 @@ under the task's own model-call allowance, records what it found in the
 feature's namespace, and completes with the roster. No calendar is touched
 by it.
 
+**The service is never called on the loop.** Every call to the mailbox
+or the calendar — a listing, a page of history, one message's bytes, a
+lookup, an insertion — is a synchronous HTTP round trip with a token
+lock behind it, and a step that made it on the event loop stalled
+everything the loop serves for its duration: the voice arbiter, the
+sockets, the timers, and the runner's own step deadline, which cannot
+fire while the loop is held. Each call runs in a worker thread and the
+step awaits it, so the deadline stays enforceable and cancellation
+stays prompt. A call the step no longer waits for finishes on its own,
+bounded by the client's HTTP timeout, and its result is dropped; a send
+in that state is exactly the "outcome nobody saw" the runner already
+treats as unknown and reconciles, never resends.
+
 **A page is queued before the cursor moves.** A watch reads the mailbox's
 history from the anchor it took at its start, never before it, one page a
 step: the messages a page names are recorded as queued and the page token
@@ -81,6 +94,7 @@ import email
 import email.policy
 import email.utils
 import hashlib
+import asyncio
 import html.parser
 import logging
 import re
@@ -861,21 +875,28 @@ def approve_proposal_request(config: EmailCalendarConfig, proposal_key: str, rec
 # ── the adapter ──────────────────────────────────────────────────────────────
 
 class EmailCalendarAdapter:
-    """The inbox as the task runner sees it: read steps only, for now.
+    """The inbox and the calendar as the task runner sees them.
 
     ``inbox.read`` lists the window and records each message once, queued.
     ``inbox.extract`` takes the oldest queued message, normalizes it, decides
     deterministically where it can (bulk mail is a promotion without a model
     call), otherwise spends one of the task's model calls on the isolated
     extraction, checks the answer against the message, and records the
-    candidates. The preview completes when nothing is queued; a task whose
-    model calls run out records the rest as unread and completes honestly.
+    candidates. The preview completes when nothing is queued anywhere in
+    the records the runner handed it — the whole namespace, never a page;
+    a task whose model calls run out records the rest as unread and
+    completes honestly. ``inbox.poll`` is the watch's page of history.
+    ``calendar.check``, ``calendar.create``, ``calendar.update``,
+    ``calendar.delete``, and ``calendar.verify`` are the writer: a check
+    before the plan, one send under the runner's authority, a read-back
+    after. Every call to either service runs off the loop (see the module
+    docstring).
     """
 
     namespace = NAMESPACE
     operations = OPERATIONS
     setup = None
-    """No standing grant is offered yet: the calendar writer is a later milestone."""
+    """The standing grant's form, when a calendar is configured; see ``_setup``."""
 
     def __init__(self, config: EmailCalendarConfig, source: InboxSource, *, calendar: CalendarSource | None = None,
                  host: str = 'local', clock: Any = time.time) -> None:
@@ -919,7 +940,7 @@ class EmailCalendarAdapter:
         """The feature's first move under a new mandate: the watch, as the
         attended owner turn that approved, remembered by mandate so the
         mandate's controls can find it."""
-        spec, step = watch_request(self._config, self.identity_for_scope(), mandate.id)
+        spec, step = watch_request(self._config, await asyncio.to_thread(self.identity_for_scope), mandate.id)
         task = await store.create(origin, spec, step, now=self._clock())
         await store.write_records(origin.owner, RecordSet(NAMESPACE_NAME, (RecordWrite(f'watch:{mandate.id}', {'kind': 'watch', 'task_id': task.id, 'mandate_id': mandate.id}, None),)))
 
@@ -952,13 +973,13 @@ class EmailCalendarAdapter:
         step = ctx.task.next_step
         target = step.target
         if step.operation == 'inbox.read':
-            return self._list(ctx, target)
+            return await self._list(ctx, target)
         if step.operation == 'inbox.poll':
-            return self._poll(ctx, target)
+            return await self._poll(ctx, target)
         if step.operation == 'calendar.check':
-            return self._check(ctx, target)
+            return await self._check(ctx, target)
         if step.operation == 'calendar.verify':
-            return self._verify(ctx, target)
+            return await self._verify(ctx, target)
         return await self._extract(ctx, target)
 
     # ── adding one event ─────────────────────────────────────────────────────
@@ -996,7 +1017,7 @@ class EmailCalendarAdapter:
         return RecordWrite(f'event:{key}', {'kind': 'event', 'candidate': key, 'calendar': calendar, 'event_id': event_id, 'digest': digest,
                                             'status': status, 'etag': etag, 'task_id': task_id, 'note': note}, None)
 
-    def _check(self, ctx: StepContext, target: str) -> Outcome:
+    async def _check(self, ctx: StepContext, target: str) -> Outcome:
         """Before anything is planned: is it there already, ours or anyone's?"""
         assert self._calendar is not None
         key, candidate, calendar, event_id, body, existing = self._event_context(ctx)
@@ -1004,7 +1025,7 @@ class EmailCalendarAdapter:
         if existing is not None and existing.payload.get('status') == 'suppressed':
             return Outcome(evidence=(Evidence('placed', target, 'deleted after adding', 'calendar', ctx.now),),
                            wait=('external', 'This event was deleted on the calendar after Ciel added it; it is not added again.'))
-        ours = self._calendar.get(calendar, event_id)
+        ours = await asyncio.to_thread(self._calendar.get, calendar, event_id)
         if ours is not None and ours.get('status') == 'cancelled':
             records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'suppressed', existing, ctx.task.id, note='deleted on the calendar'),))
             return Outcome(evidence=(Evidence('placed', target, 'deleted after adding', 'calendar', ctx.now),),
@@ -1026,7 +1047,7 @@ class EmailCalendarAdapter:
         except (ZoneInfoNotFoundError, ValueError):
             offset = 'Z'
         for other in (calendar, *self._config.check_calendars):
-            found = self._calendar.find(other, window_start + offset, window_end + offset)
+            found = await asyncio.to_thread(self._calendar.find, other, window_start + offset, window_end + offset)
             match = next((e for e in found if _matches(e, candidate)), None)
             if match is not None:
                 status = 'added' if _owned(match) else 'present'
@@ -1041,7 +1062,7 @@ class EmailCalendarAdapter:
         assert self._calendar is not None
         key, candidate, calendar, event_id, body, existing = self._event_context(ctx)
         operation = ctx.task.next_step.operation
-        current = self._calendar.get(calendar, event_id)
+        current = await asyncio.to_thread(self._calendar.get, calendar, event_id)
         state = 'absent' if current is None else ('cancelled' if current.get('status') == 'cancelled' else ('ours' if _owned(current) else 'foreign'))
         verify = Step('read', 'calendar.verify', ctx.task.next_step.target, ctx.task.next_step.arguments)
         if operation == 'calendar.create':
@@ -1071,9 +1092,9 @@ class EmailCalendarAdapter:
         existing = next((r for r in ctx.records if r.key == f'event:{key}'), None)
         if operation == 'calendar.create':
             try:
-                created = self._calendar.insert(calendar, plan.payload)
+                created = await asyncio.to_thread(self._calendar.insert, calendar, plan.payload)
             except CalendarConflict:
-                current = self._calendar.get(calendar, event_id)
+                current = await asyncio.to_thread(self._calendar.get, calendar, event_id)
                 if current is None or current.get('status') == 'cancelled' or _owned(current) != digest:
                     raise
                 created = current
@@ -1081,10 +1102,11 @@ class EmailCalendarAdapter:
         etag = str(intent.recipe.get('etag') or '')
         try:
             if operation == 'calendar.delete':
-                self._calendar.delete(calendar, event_id, etag)
+                await asyncio.to_thread(self._calendar.delete, calendar, event_id, etag)
                 changed: dict[str, Any] = {}
             else:
-                changed = self._calendar.update(calendar, event_id, {k: v for k, v in plan.payload.items() if k not in ('operation', 'etag')}, etag)
+                changed = await asyncio.to_thread(self._calendar.update, calendar, event_id,
+                                                  {k: v for k, v in plan.payload.items() if k not in ('operation', 'etag')}, etag)
         except CalendarMoved as exc:
             raise PreconditionFailed(str(exc)) from exc
         status = 'removing' if operation == 'calendar.delete' else 'adding'
@@ -1096,7 +1118,7 @@ class EmailCalendarAdapter:
         assert self._calendar is not None
         calendar, event_id, digest, key = intent.recipe['calendar'], intent.recipe['event_id'], intent.recipe['digest'], intent.recipe['candidate']
         existing = next((r for r in ctx.records if r.key == f'event:{key}'), None)
-        current = self._calendar.get(calendar, event_id)
+        current = await asyncio.to_thread(self._calendar.get, calendar, event_id)
         operation = intent.recipe.get('operation', 'calendar.create')
         if operation == 'calendar.delete':
             if current is None or current.get('status') == 'cancelled':
@@ -1122,12 +1144,12 @@ class EmailCalendarAdapter:
             return Reconciliation('applied', detail='the event is on the calendar')
         return Reconciliation('unknown', detail='an event exists under the id but it is not this one')
 
-    def _verify(self, ctx: StepContext, target: str) -> Outcome:
+    async def _verify(self, ctx: StepContext, target: str) -> Outcome:
         """The read-back that completes the task, or says why it cannot."""
         assert self._calendar is not None
         key, candidate, calendar, event_id, body, existing = self._event_context(ctx)
         digest = _owned(body) or ''
-        current = self._calendar.get(calendar, event_id)
+        current = await asyncio.to_thread(self._calendar.get, calendar, event_id)
         expected = ctx.task.specification.criteria[0].expected
         if expected == 'removed':
             gone = current is None or current.get('status') == 'cancelled'
@@ -1168,26 +1190,28 @@ class EmailCalendarAdapter:
         records = RecordSet(NAMESPACE_NAME, (self._event_write(key, calendar, event_id, digest, 'added', existing, ctx.task.id, str(current.get('etag') or ''), note),))
         return Outcome(evidence=(Evidence('placed', target, 'on the calendar', 'calendar', ctx.now),), records=records)
 
-    def _poll(self, ctx: StepContext, target: str) -> Outcome:
+    async def _poll(self, ctx: StepContext, target: str) -> Outcome:
         """One page of history, queued before the cursor moves."""
         key = f'cursor:{target}'
         cursor = next((r for r in ctx.records if r.key == key), None)
         stamp = datetime.fromtimestamp(ctx.now).strftime('%Y-%m-%d')
         if cursor is None:
-            anchor = self._source.anchor()
+            anchor = await asyncio.to_thread(self._source.anchor)
             write = RecordWrite(key, {'kind': 'cursor', 'history_id': anchor, 'page_token': None, 'anchored': stamp, 'resyncs': 0, 'task_id': ctx.task.id}, 0)
             return Outcome(evidence=(Evidence(_criterion(ctx), target, 'active', 'inbox', ctx.now),),
                            next_step=ctx.task.next_step, delay_s=self._config.poll_s, records=RecordSet(NAMESPACE_NAME, (write,)))
         state = dict(cursor.payload)
-        changes = self._source.changes(str(state['history_id']), state.get('page_token') or None, self._config.max_messages_per_poll)
+        changes = await asyncio.to_thread(self._source.changes, str(state['history_id']), state.get('page_token') or None,
+                                          self._config.max_messages_per_poll)
         writes: list[RecordWrite] = []
         known = {r.key for r in ctx.records}
         if changes.expired:
             # The source forgot back to the cursor: list the window since the
             # anchor once, take what is new, and anchor again. Bounded by the
             # page limit; a backlog larger than that is visible in the record.
-            ids = self._source.list_messages(str(state['anchored']), '', self._config.max_messages_per_poll)
-            state.update(history_id=self._source.anchor(), page_token=None, anchored=stamp, resyncs=int(state.get('resyncs', 0)) + 1)
+            ids = await asyncio.to_thread(self._source.list_messages, str(state['anchored']), '', self._config.max_messages_per_poll)
+            state.update(history_id=await asyncio.to_thread(self._source.anchor), page_token=None, anchored=stamp,
+                         resyncs=int(state.get('resyncs', 0)) + 1)
         else:
             ids = list(changes.ids)
             state['page_token'] = changes.next_page
@@ -1211,10 +1235,10 @@ class EmailCalendarAdapter:
         return Outcome(evidence=(Evidence(_criterion(ctx), target, 'active', 'inbox', ctx.now),), next_step=next_step, delay_s=delay,
                        records=RecordSet(NAMESPACE_NAME, tuple(writes)))
 
-    def _list(self, ctx: StepContext, target: str) -> Outcome:
+    async def _list(self, ctx: StepContext, target: str) -> Outcome:
         arguments = dict(ctx.task.next_step.arguments)
         limit = int(arguments.get('limit') or self._config.max_messages_per_preview)
-        ids = self._source.list_messages(arguments.get('since', ''), arguments.get('until', ''), limit)
+        ids = await asyncio.to_thread(self._source.list_messages, arguments.get('since', ''), arguments.get('until', ''), limit)
         known = {r.key for r in ctx.records}
         writes = []
         for message_id in ids:
@@ -1239,7 +1263,7 @@ class EmailCalendarAdapter:
         message_id = str(record.payload['message_id'])
         writes: list[RecordWrite] = []
         try:
-            message = normalize(self._source.fetch(message_id), self._config.max_body_chars)
+            message = normalize(await asyncio.to_thread(self._source.fetch, message_id), self._config.max_body_chars)
         except Exception as exc:  # noqa: BLE001 - one unreadable message is recorded, not fatal
             log.warning('inbox message %s could not be read', message_id, exc_info=True)
             writes.append(RecordWrite(record.key, {**record.payload, 'status': 'failed', 'reason': type(exc).__name__}, record.revision))

@@ -16,6 +16,21 @@ The index is *derived* from the files rather than stored alongside them. A
 stored index is a second source of truth that drifts the moment anything writes
 a file without updating it; at personal scale, reading a few hundred small
 files is far cheaper than the class of bug that avoids.
+
+**What Ciel knows about you is yours alone to read.** Every file this store
+writes — a memory, the human index, the directory itself — is created
+owner-only, whatever the process umask says; a private store that leaves
+the mode to the umask is public on any machine whose umask is the usual
+``022``. Files written before this rule are left as they are: they are the
+user's to tighten (``chmod -R go-rwx ~/.ciel/memory``), and a store that
+silently rewrote modes across the user's own directory would be presuming.
+
+**One unreadable file costs one file.** The store scans every file for the
+index, for recall, and for a hand-authored name; a file that is not UTF-8,
+or that vanished between the listing and the read, is skipped with a
+warning that names it and nothing of what is in it. Before this, one byte
+of Latin-1 in one hand-written note took the prompt index, recall, and the
+saving of every later note down with it.
 """
 
 from __future__ import annotations
@@ -241,8 +256,13 @@ class MemoryStore:
     def _read(self, path: Path) -> Memory | None:
         try:
             raw = path.read_text(encoding="utf-8")
+            modified = path.stat().st_mtime
         except OSError:
             log.warning("could not read memory %s", path)
+            return None
+        except UnicodeDecodeError as exc:
+            # Named, never quoted: the file may hold something private.
+            log.warning("memory %s is not UTF-8 (byte %d) — skipped", path, exc.start)
             return None
 
         match = _FRONTMATTER.match(raw)
@@ -257,7 +277,7 @@ class MemoryStore:
                 description=first[:120],
                 kind="fact",
                 content=body,
-                created_at=path.stat().st_mtime,
+                created_at=modified,
                 path=path,
             )
 
@@ -268,9 +288,9 @@ class MemoryStore:
                 meta[key.strip()] = value.strip()
 
         try:
-            created = float(meta.get("created_at", 0)) or path.stat().st_mtime
+            created = float(meta.get("created_at", 0)) or modified
         except ValueError:
-            created = path.stat().st_mtime
+            created = modified
 
         return Memory(
             name=meta.get("name", path.stem),
@@ -319,8 +339,8 @@ class MemoryStore:
             context=context,
         )
 
-        self._dir.mkdir(parents=True, exist_ok=True)
-        atomic_write(path, memory.to_markdown())
+        self._dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        atomic_write(path, memory.to_markdown(), mode=0o600)
         self._write_human_index()
         log.info("%s memory: %s", "updated" if existing else "saved", name)
         return memory
@@ -431,8 +451,7 @@ class MemoryStore:
                 lines.append(f"- [{memory.description}]({memory.path.name})")
             lines.append("")
 
-        atomic_write(self._dir / "MEMORY.md", "\n".join(lines),
-                     mode=0o600 if any(m.context == "note" for m in memories) else None)
+        atomic_write(self._dir / "MEMORY.md", "\n".join(lines), mode=0o600)
 
 
 __all__ = ["MemoryStore", "Memory", "MemoryKind", "VALID_KINDS", "slugify", "atomic_write"]

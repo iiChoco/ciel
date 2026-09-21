@@ -16,13 +16,27 @@ One seat. A second spoke that connects takes the seat from the first
 their own roles). A spoke that drops fails every wait the hub had open
 on it, so a turn mid-sentence abandons instead of hanging, and the
 pipeline is told so it can cancel a pending confirmation the way it
-does on barge-in.
+does on barge-in. A spoke that is *replaced* is settled the same way,
+before the newcomer is seated: every wait the old seat held fails, the
+pipeline hears it leave, and only then does the new one take the seat —
+a wait left open across the handover would hang until its deadline and
+send its cancellation to a spoke that never saw the request.
+
+**A result names the process that asked.** Each hub process mints its
+tool-call ids under an epoch of its own, so an RPC still running on the
+Mac when this hub restarts cannot answer a request the next hub makes
+under the same counter value; the stale result arrives, matches nothing,
+and is dropped. Likewise a spoken answer names the question it is for,
+and the hub hands that identity to the broker rather than the bare
+text, so a late yes cannot approve the question asked after the one it
+answered.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import time
 from collections import deque
 from typing import TYPE_CHECKING, Any, Callable
@@ -69,6 +83,13 @@ class HubServer(WebLink):
         self._rpc: dict[str, asyncio.Future[dict[str, Any]]] = {}
         """rpc_id → the tool call's result frame."""
         self._rpc_seq = 0
+        self._rpc_epoch = secrets.token_hex(4)
+        """This process's mark on every rpc_id it mints. A request that
+        outlives the hub keeps running on the Mac under the id this
+        process gave it; the next process counts from zero again, and
+        without the epoch its first request would collide with the
+        orphan — the executor would call it a duplicate, and the orphan's
+        result would resolve the new request."""
         self._timers_sent: list[dict[str, Any]] | None = None
         """The last timer set broadcast, so an unchanged poll costs nothing."""
         self._say_ids: deque[str] = deque(maxlen=256)
@@ -93,8 +114,9 @@ class HubServer(WebLink):
         self.on_voice_state: Callable[[bool, str | None], None] | None = None
         """Every ``voice.state``: the listening flag and its source — the
         Chart's chip is drawn from this."""
-        self.on_confirm_answer: Callable[[str], bool] | None = None
-        """The broker's ``answer``: a spoken yes or no came back."""
+        self.on_confirm_answer: Callable[[str, str], bool] | None = None
+        """The broker's ``answer``: a spoken yes or no came back, with the
+        id of the question the spoke says it answers."""
         self.on_turn_cancel: Callable[[str, str], None] | None = None
         """The spoke barged in between sentences: (turn_id, reason)."""
         self.on_spoke_mute: Callable[[bool], None] | None = None
@@ -175,7 +197,7 @@ class HubServer(WebLink):
         if not self.spoke_connected:
             raise RpcUnavailable("the Mac is not connected")
         self._rpc_seq += 1
-        rpc_id = f"r{self._rpc_seq}"
+        rpc_id = f"{self._rpc_epoch}.r{self._rpc_seq}"
         fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._rpc[rpc_id] = fut
         try:
@@ -228,17 +250,24 @@ class HubServer(WebLink):
         queue, resumed = super()._welcome(ws, verdict)
         if verdict.role == "spoke":
             old = self._spoke
-            self._spoke = ws
-            self.spoke_listening = False
-            self.spoke_speaking = False
             if old is not None and old is not ws and old in self._clients:
                 # The newer spoke takes the seat; the older one is shed
                 # the way a fallen-behind chart is — forgotten here,
-                # closed asynchronously.
+                # closed asynchronously — but its obligations are settled
+                # first, while it still holds the seat: every wait it
+                # owed fails now (an RPC, a sentence, a delivery), and
+                # the pipeline hears it leave so a question it was asked
+                # is denied. Seating the newcomer first would leave those
+                # waits to their deadlines, since _client_left skips a
+                # socket that no longer holds the seat.
                 log.warning("a second spoke connected — replacing the first")
                 self._clients.pop(old, None)
                 self._peers.pop(old, None)
+                self._unseat()
                 asyncio.get_running_loop().create_task(self._drop(old))
+            self._spoke = ws
+            self.spoke_listening = False
+            self.spoke_speaking = False
             log.info("spoke seated (%s)", verdict.client_id or "-")
             if self.on_spoke_seated is not None:
                 try:
@@ -262,14 +291,19 @@ class HubServer(WebLink):
 
     def _client_left(self, ws: Any) -> None:
         if ws is self._spoke:
-            self._spoke = None
-            self.spoke_listening = False
-            self.spoke_speaking = False
-            self._fail_waits()
-            log.warning("spoke left the seat")
-            if self.on_spoke_change is not None:
-                self.on_spoke_change(False)
+            self._unseat()
         self.stir.set()
+
+    def _unseat(self) -> None:
+        """The seated spoke is gone — dropped, or replaced: the seat
+        empties, every wait it held fails, and the pipeline is told."""
+        self._spoke = None
+        self.spoke_listening = False
+        self.spoke_speaking = False
+        self._fail_waits()
+        log.warning("spoke left the seat")
+        if self.on_spoke_change is not None:
+            self.on_spoke_change(False)
 
     # ── inbound ──────────────────────────────────────────────────────────────
 
@@ -347,7 +381,7 @@ class HubServer(WebLink):
                     self.on_turn_cancel(frame["turn_id"], frame.get("reason") or "")
             elif kind == "confirm.answer":
                 if self.on_confirm_answer is not None:
-                    self.on_confirm_answer(frame["text"])
+                    self.on_confirm_answer(frame["text"], frame["confirm_id"])
             elif kind == "voice.state":
                 self.spoke_listening = frame["listening"]
                 self.spoke_speaking = frame["speaking"]

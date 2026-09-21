@@ -85,9 +85,13 @@ class FakeConfirm:
     def cancel(self, reason=""):
         self.cancels.append(reason)
 
-    def answer(self, text):
+    def answer(self, text, confirm_id=None):
         self.answers.append(text)
+        self.answered_ids = getattr(self, "answered_ids", []) + [confirm_id]
         return True
+
+    def expect(self, confirm_id):
+        self.expected = confirm_id
 
     def bind_record(self, record):
         self.record = record
@@ -166,7 +170,6 @@ def make_hub(script, *, speak_timeout=2.0):
     p._presence = None
     p._events = None
     p._timers = FakeTimers()
-    p._remote_link = None
     p._typed = deque()
     p._muted = False
     p._mute_sentinel = tmp / "mute"
@@ -174,6 +177,9 @@ def make_hub(script, *, speak_timeout=2.0):
     p._mic = None
     p._tts = None
     p._stt = None
+    p._background_runner = None
+    from types import SimpleNamespace
+    p._nutrition = SimpleNamespace(photos=SimpleNamespace(refresh=lambda now: None))
     p._wake = None
     p._endpointer = None
     p._turn = None
@@ -255,11 +261,13 @@ async def probe_seat() -> None:
     print("the seat")
     p, server = make_hub(STREAM)
     check("no spoke: the seat is empty", not server.spoke_connected)
+    told: list[bool] = []
+    server.on_spoke_change = lambda connected: (told.append(connected), p._on_spoke_change(connected))
     q1 = seat_spoke(server, "spoke")
     hello = json.loads(q1.get_nowait())
     check("a spoke hello seats it and gets the hub's hello",
           server.spoke_connected and hello["type"] == "hello")
-    check("the pipeline is told", ("event", "spoke connected") in rows_of(frames(q1)) or True)
+    check("the pipeline is told", told == [True])
     server._on_frame(json.dumps({"type": "say", "text": "hello there", "seq": 1}), "spoke")
     check(
         "a spoke say is a voice turn, acked, not a chart turn",
@@ -286,12 +294,17 @@ async def probe_seat() -> None:
           seen == [(True, None), (True, "snap"), (False, None)] and server.spoke_wake_source is None)
     server.on_voice_state = None
     server._on_frame(json.dumps({"type": "voice.state", "listening": True, "speaking": True}), "spoke")
+    unfinished = asyncio.create_task(server.speak("t-old", 1, "reply", "still talking", 5))
+    await asyncio.sleep(0)
     q2 = seat_spoke(server, "spoke2")
     await asyncio.sleep(0)
     check(
         "a second spoke takes the seat; the first is shed",
         server._spoke == "spoke2" and "spoke" not in server._clients,
     )
+    check("the sentence the first spoke owed is abandoned at the handover, not left to its deadline, and the pipeline heard it leave",
+          unfinished.done() and unfinished.result() is False and not server._played and told == [True, False, True]
+          and p._confirm.cancels[-1:] == ["spoke gone"])
     check("the seat change resets the reported state",
           not server.spoke_listening and not server.spoke_speaking)
     server._clients.pop("spoke2", None)
