@@ -1,8 +1,8 @@
 """The lane contract — the queue-and-send surface every remote lane speaks.
 
 This Protocol is the package docstring's "small queue-and-send surface"
-made checkable. Discord and the web GUI already implement it by
-convention (their docstrings each say "built hub-shaped on purpose");
+made checkable. The web GUI implements it by convention (its docstring
+says "built hub-shaped on purpose");
 writing the shape down means the third implementation — the hub link the
 endgame notes describe — conforms by type check rather than by prose.
 
@@ -14,9 +14,9 @@ an opaque channel the lane's ``send`` knows how to route back to —
 only a contiguous same-channel run, because a DM and a server mention
 are different conversations whose replies must not fuse.
 
-``can_send`` is a *right-now* fact, not a config claim: a Discord
-gateway that dropped reads False even though the lane is armed, which is
-what keeps the proactive policy from texting into the void.
+``can_send`` is a *right-now* fact, not a config claim: a lane whose
+connection dropped reads False even though it is armed, which is what
+keeps anything proactive from sending into the void.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from ciel.turn import Ingress, TurnBatch
 @runtime_checkable
 class Lane(Protocol):
     """A remote text lane: messages in through a queue, replies out
-    through ``send``. Implemented by ``DiscordLink`` and ``WebLink``;
+    through ``send``. Implemented by ``WebLink``;
     the pipeline talks to this shape and never to a chat library."""
 
     @property

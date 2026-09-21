@@ -96,8 +96,7 @@ class InterruptionPolicy:
         Away routes to "message" only when the event clears the higher
         texting bar, the caller says messaging is actually wired
         (``can_message``: the iMessage outlet — owner handle pinned and both
-        messages switches on — or a connected Discord link with
-        ``discord.proactive``), and the texting budget has room. Everything
+        messages switches on), and the texting budget has room. Everything
         else holds — except the expired event, which drops: held notes are
         the safety net that makes every other rule cheap to apply.
         """

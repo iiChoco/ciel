@@ -46,7 +46,7 @@ from ciel import world as W
 from ciel.config import BrainConfig, Config, HubConfig, WebConfig, WorldConfig
 from ciel.hub.server import HubServer
 from ciel.oura import today_readings
-from ciel.pipeline import Pipeline, _DiscordSink, _TextSink
+from ciel.pipeline import Pipeline, _TextSink
 from ciel.remote.web import Admission
 from ciel.spoke.publisher import WorldRelay
 from ciel.turn import _WEB_NOTE, TurnRequest
@@ -500,7 +500,7 @@ class FakeBrain:
         self.last_turn_cost_usd = 0.0
         self.last_reconnect_s = 0.0
 
-    async def ask(self, text):
+    async def ask(self, text, *, origin=None, public_audience=None):
         self.prompts.append(text)
         yield ("reply", "Sure.")
 
@@ -557,19 +557,6 @@ class FakePresence:
         return None
 
 
-class FakeRemoteLink:
-    def __init__(self):
-        self.sent = []
-
-    async def send(self, text, channel=None):
-        self.sent.append((text, channel))
-
-    def typing(self, channel=None):
-        import contextlib
-
-        return contextlib.nullcontext()
-
-
 class FakeCalendar:
     def __init__(self):
         self.answer = ["4:00 PM — Dentist"]
@@ -596,7 +583,6 @@ def make_pipeline(*, in_prompt=True, world=True):
     p._presence = FakePresence()
     p._events = FakeEvents()
     p._timers = None
-    p._remote_link = None
     p._remote = None
     p._muted = False
     p._spoke = False
@@ -634,10 +620,7 @@ async def probe_turn() -> None:
     p._world.observe(W.PLACE, {"place": "home", "via": "wifi", "network": "Nest", "device": None,
                                "at": NOON}, source="mac")
     p._world.observe(W.SPOKE, {"connected": True, "node": "mac"}, source="hub")
-    link = FakeRemoteLink()
-    p._remote_link = link
-    await p._run_turn(TurnRequest(lane="discord", text="hi", channel=None, public=True),
-                      _DiscordSink(p, link.send))
+    await p._run_turn(TurnRequest(lane="web", text="hi", public=True), _TextSink(p))
     prompt = p._brain.prompts[0]
     check("a public channel's turn opens with the shared readings only",
           "(Now — It is 3:42 PM" in prompt and "is connected" in prompt
@@ -648,9 +631,8 @@ async def probe_turn() -> None:
     check("...and the world_now tool is scoped the same way for that turn",
           world_tool._public is True)
     check("a public turn closes the Spotify account tools too", spotify_tool._public is True)
-    await p._run_turn(TurnRequest(lane="discord", text="hi", channel=None, public=False),
-                      _DiscordSink(p, link.send))
-    check("a DM's turn has the lot",
+    await p._run_turn(TurnRequest(lane="web", text="hi", public=False), _TextSink(p))
+    check("a private turn has the lot",
           "Place: home" in p._brain.prompts[1] and world_tool._public is False)
     check("a private turn reopens the Spotify account tools", spotify_tool._public is False)
 

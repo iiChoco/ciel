@@ -179,7 +179,7 @@ async def probe_notifier(root: Path) -> None:
     detail = await controller.view(binding, failed_task.id)
     check('an attended private look through the controller is the receipt', detail['received'] == 1 and (await controller.view(binding, failed_task.id))['received'] == 0
           and await notifier.poll_now(1000 + 2 * controller.config.notice_retry_s) == 0)
-    public = TaskBinding(Origin(OWNER, 'public-turn', 'discord', private=False, ingress_ids=('dm:9',)), 1, 1)
+    public = TaskBinding(Origin(OWNER, 'public-turn', 'web', private=False, ingress_ids=('dm:9',)), 1, 1)
     await refused('a public lane cannot look', controller.view(public, failed_task.id))
     await refused('a public lane cannot touch the switch', controller.apply(public, 'notices_mute', {}))
     muted = await controller.apply(binding, 'notices_mute', {})

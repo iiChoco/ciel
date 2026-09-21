@@ -6,7 +6,7 @@ the asking needs the same shape every escalation in this codebase has:
 
 * **Enabling passes the enforced gate.** ``grant_capability`` sits on the
   confirm tier, so the question ("Enable shell access — okay?") is spoken
-  at home or texted over the Discord lane, and the hook blocks until the
+  at home or shown on the Chart, and the hook blocks until the
   user answers. The conversational "yes, enable it" that triggered the
   call is a request, not a proof; the gate's yes is the proof.
 * **Disabling never waits.** ``revoke_capability`` runs quietly —
@@ -14,8 +14,8 @@ the asking needs the same shape every escalation in this codebase has:
   which is the opposite of what a permission system wants. It is still
   journaled, still denied to unattended turns by the Witness rule.
 * **The catalog is the boundary.** Only names in ``CAPABILITIES`` can be
-  touched at all, and the security-critical keys — the Discord pinning
-  and token, the voice gate, tool tiers, the workspace path — are simply
+  touched at all, and the security-critical keys — the voice gate, tool
+  tiers, the workspace path — are simply
   not in it. No phrasing reaches them; that is deny-by-construction, the
   shell gate's hard tier applied to configuration.
 
@@ -105,11 +105,6 @@ CAPABILITIES: dict[str, Capability] = {
         "the morning brief (a time arms it)",
         "Set the morning brief to",
     ),
-    "discord_proactive": Capability(
-        "discord", "proactive", "bool",
-        "urgent away texts over the Discord link",
-        "Enable Discord away texts",
-    ),
     "act_without_asking": Capability(
         "confirm", "ask_first", "bool",
         "acting without asking first: every confirm-tier question answers itself yes; the journal still records",
@@ -118,8 +113,8 @@ CAPABILITIES: dict[str, Capability] = {
     ),
 }
 """Everything grantable, and therefore the complete list of what is not:
-no entry reaches [discord] enabled/owner_id/token, [voice], the [mcp]
-tiers, deny_extra/auto_allow, or the workspace path. Additions here are
+no entry reaches [voice], the [mcp] tiers, deny_extra/auto_allow, or
+the workspace path. Additions here are
 additions to what a texted yes can change — review them as such."""
 
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")

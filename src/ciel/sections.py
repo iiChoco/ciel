@@ -10,7 +10,7 @@ an *empty* section list (no error, just nothing), and only a session
 signed in through the course's Canvas OAuth sees real data. There is no
 token flow to automate — the user logs in once in a browser and hands
 Ciel the request's ``Cookie`` header, which lives in ``[sections]`` config
-like the Discord token does.
+or the launch environment, like every other credential.
 
 Everything is synchronous stdlib urllib on purpose, same reasoning as
 ``oura.py``: the callers wrap requests in ``asyncio.to_thread``, so the

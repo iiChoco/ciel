@@ -20,7 +20,12 @@ validated write-sets, expected revisions, a per-namespace allowance, write-sets
 riding a checkpoint, adapter-owned migration at open, unsupported and unknown
 namespaces preserved untouched, a failed migration rolled back, and a
 version-two store lifted through every version to the current one with every task in place and
-its origin saying it was human. No actual tool,
+its origin saying it was human. Records are read by page: a plain read is
+one page at the default limit, a prefix pages by cursor to a short final
+page, LIKE's wildcards are literal in a prefix, and exact keys page the
+same way past the limit; ``all_records`` walks the pages to the end, under
+a prefix or whole, and refuses a page size that is not a positive
+integer. No actual tool,
 model, mic, network, or user's runtime state is used.
 
     uv run --no-sync python scripts/probe_tasks.py
@@ -551,7 +556,7 @@ async def probe_retarget(root: Path) -> None:
 
 async def probe_owner_controls(root: Path) -> None:
     cfg = config(root / 'owner-controls')
-    origin = Origin(OWNER, 'batch', 'discord', ingress_ids=('dm:1', 'dm:2'))
+    origin = Origin(OWNER, 'batch', 'web', ingress_ids=('dm:1', 'dm:2'))
     async with TaskStore(cfg) as store:
         task = await store.create(origin, SPEC, READ, resource_wait=True, now=100)
         check('an owner DM saves directly into a resource wait', task.status == 'waiting' and task.wait_reason == 'resource' and task.revision == 2)
@@ -612,6 +617,33 @@ def validate_record(payload: dict) -> None:
         raise ValueError('n')
 
 
+async def probe_record_pages(root: Path) -> None:
+    print('\nrecords are read by page, never cut at the limit')
+    store = TaskStore(config(root / 'record-pages'))
+    store.register(Namespace('fixture', 1, validate_record))
+    async with store:
+        for start in range(0, 300, 50):
+            await store.write_records(OWNER, RecordSet('fixture', tuple(RecordWrite(f'item:{n:03d}', {'n': n}) for n in range(start, start + 50))))
+        await store.write_records(OWNER, RecordSet('fixture', (RecordWrite('item_x', {'n': 1}), RecordWrite('other:1', {'n': 2}))))
+        first = await store.records(OWNER, 'fixture')
+        check('a plain read is one page at the default limit, in key order', len(first) == 256 and first[0].key == 'item:000')
+        page = await store.records(OWNER, 'fixture', prefix='item:', after='')
+        second = await store.records(OWNER, 'fixture', prefix='item:', after=page[-1].key)
+        check('a prefix pages by cursor: a full page, then the rest, and a short page is the end',
+              len(page) == 256 and len(second) == 44 and second[-1].key == 'item:299' and not any(r.key in ('item_x', 'other:1') for r in page + second))
+        check('the wildcards of LIKE are literal in a prefix', [r.key for r in await store.records(OWNER, 'fixture', prefix='item_')] == ['item_x'])
+        keys = tuple(f'item:{n:03d}' for n in range(300))
+        by_key = await store.records(OWNER, 'fixture', keys)
+        rest = await store.records(OWNER, 'fixture', keys, after=by_key[-1].key)
+        check('exact keys page the same way, in key order, past the limit', len(by_key) == 256 and len(rest) == 44 and rest[-1].key == 'item:299')
+        await refused('a prefix or cursor that is not a string is refused', store.records(OWNER, 'fixture', prefix=3), ValueError)  # type: ignore[arg-type]
+        whole = await store.all_records(OWNER, 'fixture')
+        check('all_records walks every page to the end, in key order, and never cuts at the limit',
+              len(whole) == 302 and [r.key for r in whole] == sorted(r.key for r in whole) and whole[-1].key == 'other:1')
+        check('...under a prefix too, at any page size', [r.key for r in await store.all_records(OWNER, 'fixture', prefix='item:', page=7)] == [f'item:{n:03d}' for n in range(300)])
+        await refused('a page size that is not a positive integer is refused', store.all_records(OWNER, 'fixture', page=0), ValueError)
+
+
 async def probe_runner_side(root: Path) -> None:
     print('\nthe runner\'s side of the store')
     cfg = config(root / 'runner-side', max_attempts=2, max_model_calls=2)
@@ -622,6 +654,12 @@ async def probe_runner_side(root: Path) -> None:
               [t.id for t in await store.eligible(OWNER, now=101)] == [task.id, later.id]
               and [t.id for t in await store.eligible(OWNER, now=100)] == [task.id]
               and not await store.eligible(OWNER, now=99) and not await store.eligible('someone-else', now=101))
+        check('eligibility narrows by the step\'s operation: to a set, away from a set, and to none',
+              [t.id for t in await store.eligible(OWNER, now=101, operations=('inspect',))] == [task.id, later.id]
+              and not await store.eligible(OWNER, now=101, operations=('other',)) and not await store.eligible(OWNER, now=101, exclude=('inspect',))
+              and [t.id for t in await store.eligible(OWNER, now=101, exclude=('other',))] == [task.id, later.id]
+              and not await store.eligible(OWNER, now=101, operations=()))
+        await refused('a narrowing that is not a tuple of names is refused', store.eligible(OWNER, now=101, operations=['inspect']), ValueError)  # type: ignore[arg-type]
         attempt = await store.claim(OWNER, task.id, task.revision, now=101)
         check('a running task is not eligible', task.id not in [t.id for t in await store.eligible(OWNER, now=200)])
         counted = await store.note_model_call(OWNER, attempt, now=101)
@@ -794,6 +832,7 @@ async def main() -> None:
         await probe_owner_controls(root)
         await probe_runner_side(root)
         await probe_feature_records(root)
+        await probe_record_pages(root)
         await probe_migration(root)
     print(f'\nall {len(CHECKS)} checks passed')
 

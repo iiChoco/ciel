@@ -220,7 +220,7 @@ class HumanOrigin:
 
     owner: str
     request_id: str
-    lane: Literal['voice', 'typed', 'web', 'discord']
+    lane: Literal['voice', 'typed', 'web']
     attended: bool = True
     private: bool = True
     ingress_ids: tuple[str, ...] = ()
@@ -573,6 +573,23 @@ def _origin(raw: dict[str, Any]) -> TaskOrigin:
 
 def _trigger(event_key: str, source_revision: str) -> str:
     return _json((event_key, source_revision))
+
+
+def _operation_clauses(operations: tuple[str, ...] | None, exclude: tuple[str, ...]) -> tuple[str, list[str]]:
+    """SQL narrowing a task by its next step's operation, matched inside
+    the step's JSON as it is stored: sorted keys, no spaces."""
+    def like(name: str) -> str:
+        return '%' + _json({'operation': name})[1:-1].replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+    clauses, params = '', []
+    if operations is not None:
+        if not operations:
+            return ' AND 0', []
+        clauses += ' AND (' + ' OR '.join(["step_json LIKE ? ESCAPE '\\'"] * len(operations)) + ')'
+        params.extend(like(n) for n in operations)
+    if exclude:
+        clauses += ' AND NOT (' + ' OR '.join(["step_json LIKE ? ESCAPE '\\'"] * len(exclude)) + ')'
+        params.extend(like(n) for n in exclude)
+    return clauses, params
 
 
 def _digest(host: str, namespace: str, outcome: str, scope: Scope, limits: GrantLimits, bindings: tuple[tuple[str, str], ...]) -> str:
@@ -990,7 +1007,7 @@ class TaskStore:
                 raise ValueError('ingress identities must be a unique immutable tuple')
             for identity in origin.ingress_ids:
                 _text(identity, 'ingress identity')
-            if origin.attended is not True or origin.private is not True or origin.lane not in ('voice','typed','web','discord'):
+            if origin.attended is not True or origin.private is not True or origin.lane not in ('voice','typed','web'):
                 raise TaskConflict('only an attended private owner request may create task responsibility')
             if origin.approval_ref is not None:
                 _text(origin.approval_ref, 'approval reference')
@@ -2181,24 +2198,31 @@ class TaskStore:
             return tuple(self._intent_from(row) for row in self._db.execute('SELECT * FROM intents WHERE task_id=? ORDER BY created_at,rowid', (task_id,)))
         return await self._run(lambda: self._transaction(read))
 
-    async def reconcilable(self, owner: str, *, limit: int = 8) -> tuple[tuple[Task, Attempt, Intent], ...]:
+    async def reconcilable(self, owner: str, *, limit: int = 8, operations: tuple[str, ...] | None = None,
+                           exclude: tuple[str, ...] = ()) -> tuple[tuple[Task, Attempt, Intent], ...]:
         """Tasks waiting on an outcome nobody knows, oldest first, with the
-        attempt and the intent recovery must ask about."""
+        attempt and the intent recovery must ask about; narrowed by the
+        intent's operation the way ``eligible`` narrows by the step's."""
         if type(limit) is not int or limit < 1:
             raise ValueError('limit must be a positive integer')
         def read() -> tuple[tuple[Task, Attempt, Intent], ...]:
             assert self._db is not None
             found = []
             for row in self._db.execute("SELECT * FROM tasks WHERE owner=? AND status IN ('waiting','cancelled') AND wait_reason='reconciliation' "
-                                        'ORDER BY updated_at,id LIMIT ?', (owner, limit)).fetchall():
+                                        'ORDER BY updated_at,id', (owner,)).fetchall():
                 task = self._task(row)
                 attempt_row = self._db.execute("SELECT id FROM attempts WHERE task_id=? AND phase='unknown' ORDER BY created_at DESC LIMIT 1", (task.id,)).fetchone()
                 if attempt_row is None:
                     continue
                 attempt = self._attempt(attempt_row['id'])
                 intent = self._intent_of(attempt.id)
-                if intent is not None and intent.resolution is None:
-                    found.append((task, attempt, intent))
+                if intent is None or intent.resolution is not None:
+                    continue
+                if (operations is not None and intent.operation not in operations) or intent.operation in exclude:
+                    continue
+                found.append((task, attempt, intent))
+                if len(found) >= limit:
+                    break
             return tuple(found)
         return await self._run(lambda: self._transaction(read))
 
@@ -2450,16 +2474,24 @@ class TaskStore:
 
     # ── the runner's side ─────────────────────────────────────────────────────
 
-    async def eligible(self, owner: str, *, now: float | None = None, limit: int = 8) -> tuple[Task, ...]:
-        """The oldest queued tasks whose time has come and whose allowances remain."""
+    async def eligible(self, owner: str, *, now: float | None = None, limit: int = 8, operations: tuple[str, ...] | None = None,
+                       exclude: tuple[str, ...] = ()) -> tuple[Task, ...]:
+        """The oldest queued tasks whose time has come and whose allowances
+        remain. ``operations`` narrows to tasks whose next step is one of
+        them; ``exclude`` leaves those out. Two runners on one store each
+        pass their own, so neither claims the other's tasks."""
         stamp = _clock(now)
         if type(limit) is not int or limit < 1:
             raise ValueError('limit must be a positive integer')
+        for names in (operations, exclude):
+            if names is not None and (not isinstance(names, tuple) or any(not isinstance(n, str) or not n for n in names)):
+                raise ValueError('step operations are a tuple of names')
+        clauses, params = _operation_clauses(operations, exclude)
         def read() -> tuple[Task, ...]:
             assert self._db is not None
             rows = self._db.execute(
-                "SELECT * FROM tasks WHERE owner=? AND status='queued' AND eligible_at<=? AND attempts<max_attempts AND polls<max_polls "
-                'ORDER BY eligible_at,created_at,id LIMIT ?', (owner, stamp, limit)).fetchall()
+                "SELECT * FROM tasks WHERE owner=? AND status='queued' AND eligible_at<=? AND attempts<max_attempts AND polls<max_polls " + clauses +
+                ' ORDER BY eligible_at,created_at,id LIMIT ?', (owner, stamp, *params, limit)).fetchall()
             return tuple(self._task(row) for row in rows)
         return await self._run(lambda: self._transaction(read))
 
@@ -2512,23 +2544,57 @@ class TaskStore:
             return self._get(owner, task.id)
         return await self._run(lambda: self._transaction(write))
 
-    async def records(self, owner: str, namespace: str, keys: tuple[str, ...] | None = None, *, limit: int = 256) -> tuple[FeatureRecord, ...]:
-        """An adapter's own records, by key or in key order, never another namespace's."""
+    async def records(self, owner: str, namespace: str, keys: tuple[str, ...] | None = None, *, limit: int = 256,
+                      prefix: str = '', after: str = '') -> tuple[FeatureRecord, ...]:
+        """An adapter's own records, by key or in key order, never another namespace's.
+
+        A page: the records whose key starts with ``prefix`` and sorts after
+        ``after``, in key order, at most ``limit`` of them. A page shorter
+        than the limit is the end; the last key of a full page is the next
+        call's ``after``. Exact keys page the same way, in key order, so a
+        namespace larger than one page is read whole by whoever pages, and
+        never silently cut at the limit."""
         spec = self._namespace(namespace)
         if type(limit) is not int or limit < 1:
             raise ValueError('limit must be a positive integer')
         if keys is not None and (not isinstance(keys, tuple) or any(not isinstance(k, str) for k in keys)):
             raise ValueError('record keys are a tuple of strings')
+        if not isinstance(prefix, str) or not isinstance(after, str):
+            raise ValueError('a record prefix and cursor are strings')
         def read() -> tuple[FeatureRecord, ...]:
             assert self._db is not None
             if keys is None:
-                rows = self._db.execute('SELECT * FROM feature_records WHERE owner=? AND namespace=? ORDER BY record_key LIMIT ?',
-                                        (owner, spec.name, limit)).fetchall()
+                pattern = prefix.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+                rows = self._db.execute("SELECT * FROM feature_records WHERE owner=? AND namespace=? AND record_key LIKE ? ESCAPE '\\' "
+                                        'AND record_key>? ORDER BY record_key LIMIT ?', (owner, spec.name, pattern, after, limit)).fetchall()
             else:
+                wanted = sorted(k for k in set(keys) if k > after and k.startswith(prefix))[:limit]
                 rows = [r for r in (self._db.execute('SELECT * FROM feature_records WHERE owner=? AND namespace=? AND record_key=?',
-                                                     (owner, spec.name, key)).fetchone() for key in keys[:limit]) if r is not None]
+                                                     (owner, spec.name, key)).fetchone() for key in wanted) if r is not None]
             return tuple(FeatureRecord(r['namespace'], r['record_key'], r['revision'], json.loads(r['payload_json'])) for r in rows)
         return await self._run(lambda: self._transaction(read))
+
+    async def all_records(self, owner: str, namespace: str, *, prefix: str = '', page: int = 256) -> tuple[FeatureRecord, ...]:
+        """Every record under a prefix, paged to the end — the whole
+        namespace when a caller must see all of it.
+
+        :meth:`records` is a page, and a caller that takes one page for
+        the whole set is wrong the day the set outgrows it: an adapter
+        deciding it is finished because no queued message is *on the first
+        page* has finished nothing. This walks the pages, bounded by the
+        namespace's own allowance, and is what the runner hands a step,
+        what the roster and the summaries read, and what the readings and
+        the watched paths are gathered from."""
+        if type(page) is not int or page < 1:
+            raise ValueError('page must be a positive integer')
+        found: list[FeatureRecord] = []
+        after = ''
+        while True:
+            batch = await self.records(owner, namespace, limit=page, prefix=prefix, after=after)
+            found.extend(batch)
+            if len(batch) < page:
+                return tuple(found)
+            after = batch[-1].key
 
     async def owed_questions(self, owner: str, *, limit: int = 32) -> tuple[FeatureRecord, ...]:
         """Feature records that carry a question the owner has not been asked.
