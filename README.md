@@ -645,7 +645,10 @@ due while muted appear as text on the page instead of ringing. The state
 survives restarts (the autoreloader re-execs constantly) as
 `~/.ciel/mute` — a sentinel like Vigil's `hold`, so `touch ~/.ciel/mute`
 from a hotkey or another shell flips it without the page open, and it is
-announced on the page, in the terminal, and in the transcript either way.
+announced on the page, in the terminal, and in the transcript either way. On the
+Chart, muted is a label on the rule over the composer — `MIC MUTED ·
+UNMUTE`, and the label is the button — with the MIC chip struck through and
+the mark dimmed; nothing on the page moves when it appears.
 
 **Trust model.** The server binds `127.0.0.1` only: reaching the port
 means being at the machine, the same trust the keyboard gets — so web

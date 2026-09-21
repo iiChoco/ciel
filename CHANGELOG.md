@@ -2,6 +2,41 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-21 — Muted is a label on the rule, not a band
+
+**Why.** The Chart said "muted" with a full-width grey strip borrowed from
+the reconnecting banner: the one filled band on a page that fills nothing,
+pushing everything below it down when it appeared, repeating what the MIC
+chip and the input's placeholder already said, with its lone "unmute"
+stranded a screen's width from the sentence it answered. A calm choice was
+dressed as a fault, and it was ugly.
+
+**What.**
+
+- *The rule over the composer wears the label.* `○ MIC MUTED · UNMUTE` sits
+  centred on the composer's hairline, the way an event row labels its rule,
+  and the whole label is the button. It is where the eye goes when you mean
+  to talk, it is positioned on the rule so nothing moves when it appears,
+  and it survives every layout: the phone (a 44px target) and the short
+  window where the mark is hidden. An unlit lamp, where `#conn` has a lit
+  one; `#conn` itself is unchanged and no longer shares its styling.
+- *Two quiet cues in support.* The MIC chip's word is struck through, so the
+  chip still reads muted when narrow screens drop its `· MUTED`, and the
+  mark dims to 45% (no fade under reduced motion). The mark engine is
+  untouched.
+- *Said once, and focus handed back.* A flip is announced through the
+  page's live region, and a reconnect's repeated hello is not. Unmuting from
+  the label moves focus to the MIC chip rather than dropping it on the body.
+  The muted placeholder is plain "Type to Ciel" now that the label sits
+  right above it.
+- The direction came from a design pass that weighed three (chip and mark
+  alone; a caption on the mark; the composer's rule) and rejected the first
+  two for being missable on a phone and gone when the mark is hidden.
+
+**Probes.** `probe_web.py` 75, unchanged: no probe pins the Chart's markup,
+and the mute wire is as it was. Checked by eye at 800×600, 375×812, and
+900×500, with the ask bar open, by click and by keyboard.
+
 ## 2026-09-20 — One mark on every page
 
 **Why.** The Chart and yunhan.me's landing page wore the living mark; the

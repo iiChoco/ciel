@@ -167,7 +167,7 @@
   .agent.timer { --kc: var(--st-speaking); }
 
   /* banners: the machine's own condition, a pane that is barely there */
-  #conn, #mutebanner {
+  #conn {
     display: none;
     align-items: center; gap: 12px; flex-wrap: wrap;
     margin-top: 12px; padding: 10px 28px;
@@ -192,11 +192,26 @@
   #tokenbtn { min-height: 32px; padding: 0 12px; border: 1px solid var(--st-thinking); color: var(--st-thinking); font: inherit; letter-spacing: inherit; }
   #tokenbtn:hover { border-color: var(--ink); color: var(--ink); }
 
-  #mutebanner { border-top: 1px solid var(--ink-4); background: color-mix(in srgb, var(--st-idle) 6%, transparent); color: var(--ink-3); }
-  body.muted #mutebanner { display: flex; }
-  #mutebanner .spacer { flex: 1; }
-  #unmute { color: var(--ink); border-bottom: 1px solid var(--ink-4); padding-bottom: 2px; font: inherit; letter-spacing: inherit; text-transform: inherit; }
-  #unmute:hover { border-bottom-color: var(--ink); }
+  /* muted: a choice, not a fault, so no band and nothing moves. The rule over
+     the composer wears a label, the way an event row does, and the whole label
+     is the way back. An unlit lamp, where #conn has a lit one. */
+  #unmute {
+    display: none;
+    position: absolute; left: 50%; top: -22px; transform: translateX(-50%);
+    height: 32px; align-items: flex-end;
+    font: 500 10px/1 var(--mono); letter-spacing: .26em; text-transform: uppercase;
+    color: var(--ink-3); white-space: nowrap;
+  }
+  body.muted #unmute { display: flex; }
+  #unmute .tag { display: flex; align-items: center; gap: 10px; padding: 6px 14px; background: var(--void); }
+  #unmute .lamp { width: 7px; height: 7px; border-radius: 50%; border: 1px solid var(--ink-3); flex: none; }
+  #unmute .do { color: var(--ink); padding-bottom: 2px; margin-bottom: -3px; border-bottom: 1px solid var(--ink-4); }
+  #unmute:hover .do { border-bottom-color: var(--ink); }
+  #unmute:focus-visible { outline: none; }
+  #unmute:focus-visible .tag { outline: 2px solid var(--ink); outline-offset: 4px; }
+  body.muted #mute > span:first-child { text-decoration: line-through; }
+  #markbox { transition: opacity 600ms ease; }
+  body.muted #markbox { opacity: .45; }
 
   #log { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 0 24px; scrollbar-width: thin; scrollbar-color: var(--hair) transparent; }
   .inner { max-width: 760px; margin: 0 auto; padding: 0 28px; }
@@ -278,7 +293,7 @@
   #ask button.no { border: 1px solid var(--ink-4); color: var(--ink); }
   #ask button.no:hover { border-color: var(--ink); }
 
-  #composer { display: flex; flex-direction: column; border-top: 1px solid var(--hair); background: #03090dcc; flex: none; }
+  #composer { position: relative; display: flex; flex-direction: column; border-top: 1px solid var(--hair); background: #03090dcc; flex: none; }
   body.dropping #composer { border-top-color: var(--st); box-shadow: 0 -1px 28px -10px var(--st); }
   footer {
     display: flex; align-items: flex-end; gap: 12px;
@@ -372,7 +387,8 @@
     #world .reading .v { font-size: 14px; }
     #agentsbar { width: 100%; max-width: none; gap: 8px; padding-top: 6px; }
     .agent .label { white-space: normal; font-size: 14px; }
-    #conn, #mutebanner { padding: 9px 16px; letter-spacing: .16em; }
+    #conn { padding: 9px 16px; letter-spacing: .16em; }
+    #unmute { top: -34px; height: 44px; letter-spacing: .2em; }
     #taskpanel { width: calc(100% - 32px); }
     #log { padding: 16px 0; }
     .inner { padding: 0 16px; }
@@ -397,6 +413,7 @@
   @media (prefers-reduced-motion: reduce) {
     body { transition: none; }
     #busy .dot, #conn .dot { animation: none; }
+    #markbox { transition: none; }
   }
 </style>
 </head>
@@ -442,12 +459,6 @@
   </form>
 </div>
 
-<div id="mutebanner">
-  <span>mic muted — Ciel can't hear you</span>
-  <span class="spacer"></span>
-  <button id="unmute">unmute</button>
-</div>
-
 <details id="taskpanel" hidden>
   <summary>Tasks · saved responsibilities</summary>
   <p id="taskstatus" role="status" aria-live="polite">Loading tasks…</p>
@@ -479,6 +490,9 @@
 </div></div>
 
 <div id="composer">
+  <button id="unmute" type="button" title="Ciel can't hear you while the mic is muted">
+    <span class="tag"><span class="lamp" aria-hidden="true"></span><span>mic muted</span><span aria-hidden="true">·</span><span class="do">unmute</span></span>
+  </button>
   <div id="attachments" aria-label="Files to send"></div>
   <footer>
     <button id="attach" type="button" hidden title="Attach files to your message">FILE</button>
@@ -1136,10 +1150,17 @@ function setSpeakBack(on) {
 }
 
 function setMuted(m) {
+  const changed = m !== muted;
+  // the label is about to vanish under the hand that pressed it: hand focus
+  // to the same switch in its other form, not to <body>
+  if (!m && document.activeElement === unmuteBtn) muteBtn.focus();
   muted = m;
   document.body.classList.toggle("muted", m);
   muteLabel.textContent = m ? " · MUTED" : " · ON";
-  text.placeholder = m ? "Mic is muted — type instead" : "Type to Ciel — or just speak";
+  muteBtn.setAttribute("aria-label", m ? "Microphone muted — unmute" : "Microphone on — mute");
+  text.placeholder = m ? "Type to Ciel" : "Type to Ciel — or just speak";
+  // a reconnect's hello repeats the state; only a flip is worth saying aloud
+  if (changed) srStatus.textContent = m ? "Microphone muted — Ciel can't hear you" : "Microphone on";
 }
 
 // The active-agent roster: everything working on Ciel's side right now.
