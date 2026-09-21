@@ -232,6 +232,26 @@ class RemoteMac(_Remote):
         return dict(await self.call("project.watch", paths=list(paths)) or {})
 
 
+class RemoteLibrary(_Remote):
+    """The books on the Mac, for the learning module: a bounded search by
+    filename and PDF metadata, and one PDF's facts. The spoke checks the
+    roots and the path against its own home and state directory."""
+
+    async def find_books(self, query: str) -> dict[str, Any]:
+        return dict(await self.call("learning.find_books", query=query) or {})
+
+    async def pdf_info(self, path: str) -> dict[str, Any]:
+        return dict(await self.call("learning.pdf_info", RPC_TIMEOUT_S * 2, path=path) or {})
+
+    async def pdf_pages(self, path: str, first: int, last: int, *, images: bool = False) -> dict[str, Any]:
+        """A window of pages: text each, and a greyscale PNG each when asked; never more than the spoke's window."""
+        return dict(await self.call("learning.pdf_pages", RPC_TIMEOUT_S * 3, path=path, first=int(first), last=int(last), images=bool(images)) or {})
+
+    async def publish(self, path: str, content: str) -> dict[str, Any]:
+        """One new file under the study root, create-only; the spoke refuses an existing one in words."""
+        return dict(await self.call("learning.publish", path=path, content=content) or {})
+
+
 class PresenceView:
     """Presence on the hub: the spoke's signals plus the hub's own.
 
@@ -307,6 +327,7 @@ class RemoteBindings:
         self.watcher = RemoteWorkWatcher(server)
         self.calendar = RemoteCalendar(server)
         self.mac = RemoteMac(server)
+        self.library = RemoteLibrary(server)
         self.presence = PresenceView(config.proactive, config.hub.presence_stale_s)
 
 
@@ -315,6 +336,7 @@ __all__ = [
     "RPC_TIMEOUT_S",
     "RemoteBindings",
     "RemoteCalendar",
+    "RemoteLibrary",
     "RemoteLocator",
     "RemoteMac",
     "RemoteMessagesClient",

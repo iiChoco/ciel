@@ -15,7 +15,23 @@ refused without the hub's word, the workspace guard on the files. Quiet
 Git writes are refused; cancellation, both deadlines, and shutdown stop
 and reap real shell descendants. Mac overwrites keep complete owner-only
 snapshots on the hub, restore through ordinary guards, and record honest
-notes for missing, oversized, or unreachable originals.
+notes for missing, oversized, or unreachable originals. The Mac's books:
+``learning.find_books`` searches under the Mac's own roots and names the
+refused one, ``learning.pdf_info`` answers pages, labels, the outline, and
+the digest and never a page's text, a book outside home, under the state
+directory, or not a PDF is refused in the Mac's words, and a Mac with the
+learning module off refuses both and says which switch;
+``learning.pdf_pages`` answers a window's text page by page and greyscale
+PNGs within the byte bound when asked, and refuses a window past the Mac's
+own bound; ``learning.publish`` writes one new owner-only file under the
+study root, refuses an existing one in words and never replaces it, and
+refuses a path outside the root, under the state directory, not a sheet's
+suffix, or outside home. A result names the hub that asked: a request
+still running on the Mac when the hub restarts answers under the old
+hub's epoch, the new hub's first request under its own runs for real and
+the orphan's result is dropped, not taken for it. A spoke replaced
+mid-call is settled before the newcomer sits: its open RPC fails at once,
+the wait table empties, and the pipeline hears one leave and one arrive.
 """
 
 from __future__ import annotations
@@ -23,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import shlex
 import sys
 import tempfile
@@ -339,6 +356,75 @@ async def probe_edges(config: Config) -> None:
     check("a sense the Mac has off says so", res["ok"] is False and "off on the Mac" in res["error"])
     await pair.close()
 
+    print("\na hub that restarts mid-call")
+    first, second = HubServer(WebConfig(), config.hub), HubServer(WebConfig(), config.hub)
+    old_queue, _ = first._welcome("old-socket", Admission(True, role="spoke"))
+    old_queue.get_nowait()
+    destination: list[Any] = [first, "old-socket"]
+    executor = Executor(config, lambda frame: destination[0]._on_frame(json.dumps(frame), destination[1]) or True)
+    entered, release = asyncio.Event(), asyncio.Event()
+    new_calls = 0
+
+    async def old_handler() -> dict[str, Any]:
+        entered.set()
+        await release.wait()
+        return {"from": "the old hub's request"}
+
+    async def new_handler() -> dict[str, Any]:
+        nonlocal new_calls
+        new_calls += 1
+        return {"from": "the new hub's request"}
+
+    executor._handlers = {"fixture.old": old_handler, "fixture.new": new_handler}
+    old_call = asyncio.create_task(first.rpc("fixture.old", {}, 5))
+    await asyncio.sleep(0)
+    old_request = json.loads(old_queue.get_nowait())
+    executor.handle(old_request)
+    await entered.wait()
+    first._clients.pop("old-socket", None)
+    first._client_left("old-socket")
+    try:
+        await old_call
+        check("the old hub's call fails when its socket goes", False)
+    except RpcUnavailable:
+        check("the old hub's call fails when its socket goes", True)
+    new_queue, _ = second._welcome("new-socket", Admission(True, role="spoke"))
+    new_queue.get_nowait()
+    destination[:] = [second, "new-socket"]
+    new_call = asyncio.create_task(second.rpc("fixture.new", {}, 5))
+    await asyncio.sleep(0)
+    new_request = json.loads(new_queue.get_nowait())
+    check("the two hubs' first requests carry different ids, each under its own epoch",
+          old_request["rpc_id"] != new_request["rpc_id"] and old_request["rpc_id"].endswith(".r1") and new_request["rpc_id"].endswith(".r1"))
+    executor.handle(new_request)
+    release.set()
+    result = await new_call
+    check("the new request runs for real and the orphan's result is dropped, not taken for it",
+          new_calls == 1 and result["ok"] and result["content"] == {"from": "the new hub's request"})
+    await asyncio.sleep(0.01)
+    check("the orphan finished and left the in-flight table", not executor._tasks)
+    await executor.close()
+    await first.close()
+    await second.close()
+
+    print("\na spoke replaced mid-call")
+    pair = Pair(config, answer=False)
+    seat_changes: list[bool] = []
+    pair.server.on_spoke_change = seat_changes.append
+    call = asyncio.create_task(pair.server.rpc("screen.capture", {"max_edge": 100}, 5))
+    await asyncio.sleep(0.02)
+    pair.server._welcome("spoke2", Admission(True, role="spoke", client_id="newcomer"))
+    try:
+        await asyncio.wait_for(call, 0.5)
+        check("the old seat's RPC fails the moment the newcomer takes the seat", False)
+    except RpcUnavailable as exc:
+        check("the old seat's RPC fails the moment the newcomer takes the seat", "disconnected" in str(exc))
+    check("the wait table is empty, the newcomer holds the seat, and the pipeline heard one leave and one arrive",
+          not pair.server._rpc and pair.server._spoke == "spoke2" and seat_changes == [False, True])
+    pair.server._client_left("spoke")
+    check("the old socket's own leave, arriving later, changes nothing", pair.server._spoke == "spoke2" and seat_changes == [False, True])
+    await pair.close()
+
 
 async def probe_snapshots(config: Config) -> None:
     pair = Pair(config)
@@ -570,12 +656,79 @@ async def probe_documents(config: Config) -> None:
         await bare.close()
 
 
+async def probe_books(config: Config) -> None:
+    print("\nthe Mac's books")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from probe_learning import AXLER_LABELS, AXLER_OUTLINE, build_pdf
+
+    from ciel.config import LearningConfig
+
+    home = (Path(tempfile.mkdtemp(prefix="ciel-rpc-books-")) / "home").resolve()
+    shelf = home / "Berkeley" / "Books"
+    shelf.mkdir(parents=True)
+    (shelf / "ladr4.pdf").write_bytes(build_pdf(10, labels=AXLER_LABELS, outline=AXLER_OUTLINE, title="Linear Algebra Done Right", author="Sheldon Axler"))
+    (home / "loose.pdf").write_bytes(build_pdf(1, title="Axler loose"))
+    (shelf / "notes.tex").write_text("axler")
+    study = replace(config, state_dir=home / ".ciel", learning=LearningConfig(enabled=True, search_roots=(str(home / "Berkeley"), "/etc"),
+                                                                             study_root=home / "Berkeley" / "Math", pages_per_call=4, max_image_bytes=20000))
+    (home / ".ciel").mkdir()
+    with patch.object(Path, "home", return_value=home):
+        pair = Pair(study)
+        remote = RemoteBindings(pair.server, study)
+        found = await remote.library.find_books("axler")
+        check("learning.find_books answers over the wire with the Mac's own search under its own roots, the refused root named",
+              [m["name"] for m in found["matches"]] == ["ladr4.pdf"] and found["matches"][0]["author"] == "Sheldon Axler" and "/etc" in found["note"]
+              and not any(m["name"] == "loose.pdf" for m in found["matches"]))
+        info = await remote.library.pdf_info(str(shelf / "ladr4.pdf"))
+        check("learning.pdf_info answers pages, labels, the outline, and the digest over the wire, never a page's text",
+              info["pages"] == 10 and info["labels"][2] == "5" and info["outline"][2] == ["3B Null Spaces and Ranges", 7] and len(info["digest"]) == 64
+              and "text" not in info)
+        for path, why in ((str(shelf / "notes.tex"), "not one of .pdf"), ("/etc/hosts", "home folder"), (str(study.state_dir / "x.pdf"), "state directory")):
+            try:
+                await remote.library.pdf_info(path)
+                check(f"the Mac refuses a book {why} in its own words", False)
+            except Exception as exc:  # noqa: BLE001
+                check(f"the Mac refuses a book {why} in its own words", "refused on the Mac" in str(exc) and why.split()[0] in str(exc))
+        window = await remote.library.pdf_pages(str(shelf / "ladr4.pdf"), 3, 5)
+        check("learning.pdf_pages answers a window's text page by page over the wire, no images unless asked",
+              [p["page"] for p in window["pages"]] == [3, 4, 5] and "Page 4" in window["pages"][1]["text"] and all(p["image"] is None for p in window["pages"]))
+        window = await remote.library.pdf_pages(str(shelf / "ladr4.pdf"), 6, 7, images=True)
+        check("asked for images, each page comes as a greyscale PNG within the byte bound, base64 on the wire",
+              all(base64.b64decode(p["image"]).startswith(b"\x89PNG") and len(base64.b64decode(p["image"])) <= 20000 for p in window["pages"]))
+        window = await remote.library.pdf_pages(str(shelf / "ladr4.pdf"), 1, 9)
+        check("a window past the Mac's own bound is refused in words, never partially read", "at most 4 pages" in window["error"])
+        sheet = home / "Berkeley" / "Math" / "110" / "Reading" / "axler" / "Theorems" / "chapter-03.tex"
+        written = await remote.library.publish(str(sheet), "\\documentclass{article}\n")
+        check("learning.publish writes one new file under the study root, creating its folders, owner-only, and answers its hash",
+              sheet.read_text() == "\\documentclass{article}\n" and len(written["digest"]) == 64 and (sheet.stat().st_mode & 0o777) == 0o600
+              and not any(n.startswith(".") for n in os.listdir(sheet.parent)))
+        again = await remote.library.publish(str(sheet), "something else\n")
+        check("an existing file is refused in words and never replaced", "already exists" in again["error"] and sheet.read_text() == "\\documentclass{article}\n")
+        for path, why in ((str(home / "Berkeley" / "Books" / "sheet.tex"), "study root"), (str(home / ".ciel" / "sheet.tex"), "state directory"),
+                          (str(sheet.parent / "sheet.pdf"), "not one of .tex"), ("/etc/sheet.tex", "home folder")):
+            try:
+                await remote.library.publish(path, "x")
+                check(f"a publication {why} is refused on the Mac", False)
+            except Exception as exc:  # noqa: BLE001
+                check(f"a publication {why} is refused on the Mac", "refused on the Mac" in str(exc) and why.split()[0] in str(exc))
+        await pair.close()
+        bare = Pair(config)
+        for call in (lambda r: r.library.find_books("axler"), lambda r: r.library.pdf_info(str(shelf / "ladr4.pdf"))):
+            try:
+                await call(RemoteBindings(bare.server, config))
+                check("a Mac with learning off refuses the operation and says which switch", False)
+            except Exception as exc:  # noqa: BLE001
+                check("a Mac with learning off refuses the operation and says which switch", "learning is off on the Mac" in str(exc))
+        await bare.close()
+
+
 async def main() -> None:
     tmp = Path(tempfile.mkdtemp())
     config = make_config(tmp)
     await probe_senses(config)
     await probe_mac(config)
     await probe_documents(config)
+    await probe_books(config)
     await probe_edges(config)
     await probe_snapshots(config)
     await probe_process_cleanup(config)

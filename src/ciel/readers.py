@@ -51,6 +51,11 @@ _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _MD_TODO = re.compile(r"(?:\bTODO\b|\bTBD\b|\bFIXME\b|\[ \]|\?\?)", re.IGNORECASE)
 
 QUESTION_ENVS = ("numedquestion", "namedquestion")
+ID_GRAMMAR = re.compile(r"^[a-z]+-[A-Za-z0-9.]+(?:-[a-z0-9]+)*$")
+"""A study item's id as a ``namedquestion`` argument: a lowercase kind, a
+hyphen, a label of letters, digits, and dots, then any hyphenated lowercase
+segments — ``thm-3.21``, ``cor-3.22``, ``def-3B-span``, ``prob-1``. Any
+other argument is title text, as it always was."""
 PARTS_ENVS = ("alphaparts", "arabicparts", "enumerate")
 ANSWER_ENV = "framed"
 
@@ -61,9 +66,21 @@ rule, and the reader reports a gap either way."""
 
 
 @dataclass(frozen=True, slots=True)
+class Segment:
+    """One piece of an answer, exactly where it is: the file, the character
+    offsets into that file's original text, and the text between them."""
+
+    file: str
+    start: int
+    end: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class Item:
     id: str
-    """A question number ("3"), a part ("3a"), or a heading path ("2.1")."""
+    """A question number ("3"), a part ("3a"), a heading path ("2.1"), or a
+    study item's id ("thm-3.21") when a namedquestion's argument has that shape."""
     kind: str  # "question" | "part" | "section"
     title: str
     """The statement's or heading's first words, for the owner to recognise it."""
@@ -72,6 +89,23 @@ class Item:
     """The words the claim rests on, short and quoted from the document."""
     file: str
     line: int
+    answer: tuple[Segment, ...] = ()
+    """The answer, isolated: its exact text with source offsets, in document
+    order across includes; empty when there is no box or the box is the
+    template's empty one. What a caller hashes and reviews."""
+
+
+def answer_text(item: Item) -> str:
+    return "".join(segment.text for segment in item.answer)
+
+
+def answer_hash(item: Item) -> str:
+    """The hash of the isolated answer alone, each segment stripped of its
+    trailing whitespace, so an edit to the statement or a reordering of
+    items leaves it unchanged."""
+    import hashlib
+
+    return hashlib.sha256("\n".join(segment.text.rstrip() for segment in item.answer).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +170,9 @@ def describe(reading: Reading) -> str:
 # ── LaTeX ────────────────────────────────────────────────────────────────────
 
 def _strip_comments(text: str) -> str:
-    """Drop ``%`` comments line by line, keeping line count; ``\\%`` stays."""
+    """Blank ``%`` comments line by line with spaces, keeping every line and
+    every offset where it was, so a position in the cleaned text is the same
+    position in the owner's file; ``\\%`` stays."""
     out = []
     for line in text.split("\n"):
         cut = None
@@ -149,7 +185,7 @@ def _strip_comments(text: str) -> str:
                 cut = i
                 break
             i += 1
-        out.append(line if cut is None else line[:cut])
+        out.append(line if cut is None else line[:cut] + " " * (len(line) - cut))
     return "\n".join(out)
 
 
@@ -167,7 +203,7 @@ class _Node:
     file: str
     line: int
     title_source: list[str] = field(default_factory=list)
-    answers: list[tuple[str, int, str]] = field(default_factory=list)  # (text, line, file)
+    answers: list[tuple[str, int, str, int, int]] = field(default_factory=list)  # (text, line, file, start, end)
     parts: list["_Node"] = field(default_factory=list)
     unclear: str = ""
 
@@ -189,14 +225,17 @@ def read_latex(text: str, path: str, loader: Loader | None = None) -> Reading:
     stack: list[tuple[str, str, int]] = []  # (env, file, line)
     node_stack: list[_Node] = []
     capture: list[str] | None = None
-    capture_at: tuple[str, int] | None = None
+    capture_at: tuple[str, int, int] | None = None  # (file, line, offset just past \begin{framed})
     seen_files: set[str] = {path}
+    sources: dict[str, str] = {}
+    ids: set[str] = set()
 
     def current() -> _Node | None:
         return node_stack[-1] if node_stack else None
 
     def walk(source: str, file: str, depth: int) -> None:
         nonlocal counter, capture, capture_at
+        sources[file] = source
         cleaned = _blank_verbatim(_strip_comments(source))
         pos = 0
         line = 1
@@ -221,7 +260,7 @@ def read_latex(text: str, path: str, loader: Loader | None = None) -> Reading:
                 if capture is not None:
                     capture.append("\\answerbox")
                 elif target is not None:
-                    target.answers.append(("\\answerbox", line, file))
+                    target.answers.append(("\\answerbox", line, file, pos, pos))
                 pos = end
                 continue
             if token.startswith("\\item"):
@@ -280,12 +319,20 @@ def read_latex(text: str, path: str, loader: Loader | None = None) -> Reading:
                     counter += 1
                     node = _Node("question", str(counter), file, line)
                     if env == "namedquestion" and arg:
-                        node.title_source.append(arg)
+                        given = arg.strip()
+                        if ID_GRAMMAR.match(given):
+                            node.id = given
+                            if given in ids:
+                                node.unclear = f"the id {given} is used twice"
+                                gaps.append(f"{file}:{line}: the id {given} is used twice; the second is unclear")
+                            ids.add(given)
+                        else:
+                            node.title_source.append(arg)
                     questions.append(node)
                     node_stack.append(node)
                 elif env == ANSWER_ENV:
                     capture = []
-                    capture_at = (file, line)
+                    capture_at = (file, line, m.end())
                 continue
             if token.startswith("\\end"):
                 m = _END.match(cleaned, pos)
@@ -293,6 +340,7 @@ def read_latex(text: str, path: str, loader: Loader | None = None) -> Reading:
                     pos = match.end()
                     continue
                 env = m.group(1)
+                close_at = m.start()
                 pos = m.end()
                 if not stack or stack[-1][0] != env:
                     # A close that does not match its open: what the parser
@@ -309,7 +357,8 @@ def read_latex(text: str, path: str, loader: Loader | None = None) -> Reading:
                     if env == ANSWER_ENV and not any(s[0] == ANSWER_ENV for s in stack):
                         target = current()
                         if target is not None:
-                            target.answers.append(("".join(capture), capture_at[1] if capture_at else line, capture_at[0] if capture_at else file))
+                            target.answers.append(("".join(capture), capture_at[1] if capture_at else line, capture_at[0] if capture_at else file,
+                                                   capture_at[2] if capture_at and capture_at[0] == file else close_at, close_at))
                         capture = None
                     else:
                         capture.append(m.group(0))
@@ -335,10 +384,17 @@ def read_latex(text: str, path: str, loader: Loader | None = None) -> Reading:
         if env in QUESTION_ENVS or env in PARTS_ENVS:
             gaps.append(f"{file}:{line}: \\begin{{{env}}} is never closed")
 
+    def segments(answers: list[tuple[str, int, str, int, int]]) -> tuple[Segment, ...]:
+        found = []
+        for _, _, file, start, end in answers:
+            if end > start and file in sources:
+                found.append(Segment(file, start, end, sources[file][start:end]))
+        return tuple(found)
+
     items: list[Item] = []
     for q in questions:
         q_claim, q_evidence, q_line, q_file = _judge(q.answers, q.title(), q.unclear)
-        items.append(Item(q.id, "question", q.title(), q_claim, q_evidence, q_file or q.file, q_line or q.line))
+        items.append(Item(q.id, "question", q.title(), q_claim, q_evidence, q_file or q.file, q_line or q.line, segments(q.answers)))
         if not q.parts:
             continue
         shared = _split_shared_answer(q.answers, len(q.parts)) if q.answers else None
@@ -349,20 +405,25 @@ def read_latex(text: str, path: str, loader: Loader | None = None) -> Reading:
             elif not answers and q.answers:
                 answers = q.answers  # one answer under the question covers its parts
             claim, evidence, line, file = _judge(answers, part.title(), part.unclear or q.unclear)
-            items.append(Item(part.id, "part", part.title(), claim, evidence, file or part.file, line or part.line))
+            items.append(Item(part.id, "part", part.title(), claim, evidence, file or part.file, line or part.line, segments(answers)))
     return Reading("latex", 1, tuple(items), tuple(files), tuple(gaps), None)
 
 
-def _split_shared_answer(answers: list[tuple[str, int, str]], parts: int) -> list[tuple[str, int, str]] | None:
+def _split_shared_answer(answers: list[tuple[str, int, str, int, int]], parts: int) -> list[tuple[str, int, str, int, int]] | None:
     """One box under a question whose enumerate has one item per part is
-    one answer per part; anything else stays one answer for all."""
+    one answer per part; anything else stays one answer for all. Each
+    piece keeps its own offsets, from after its ``\\item`` to the next."""
     if len(answers) != 1:
         return None
-    text, line, file = answers[0]
-    pieces = _ITEM.split(text)
-    if len(pieces) - 1 != parts:
+    text, line, file, start, end = answers[0]
+    marks = list(_ITEM.finditer(text))
+    if len(marks) != parts:
         return None
-    return [(piece, line, file) for piece in pieces[1:]]
+    pieces = []
+    for index, mark in enumerate(marks):
+        stop = marks[index + 1].start() if index + 1 < len(marks) else len(text)
+        pieces.append((text[mark.end():stop], line, file, start + mark.end(), start + stop))
+    return pieces
 
 
 def _judge(answers: list[tuple[str, int, str]], statement: str, unclear: str) -> tuple[str, str, int, str]:

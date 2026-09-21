@@ -18,7 +18,7 @@ unsupported namespace keeps its task waiting and its records intact; and a
 runtime with no extraction backend refuses rather than falls back. No model,
 mic, network, or runtime state is used.
 
-    uv run --no-sync python scripts/probe_task_runner.py
+    uv run --no-sync python scripts/probe_task_runner.py A background runner serves its own adapters' operations, the ladder's runner is told to leave them alone and sees none of their tasks, and a background step runs while the conversation's lease is held, the owner's interrupt leaving it alone; a runner names the task in flight while its step runs and nothing between steps. Explicit cancellation stops only the named active task, including background work.
 """
 from __future__ import annotations
 
@@ -296,6 +296,56 @@ async def probe_human_input(root: Path) -> None:
     f.adapter.sleep_s = 0.0
     check('start_step claims nothing when nothing is eligible', not f.runner.start_step(time.time()))
     await f.close()
+
+    print('\na background runner beside the conversation')
+    from ciel.task_runner import private_lease
+    g = Fixture(root, 'background', max_model_calls=2)
+    store = await g.open()
+    background = TaskRunner(g.config, lambda: g.store, (g.adapter,), lease=private_lease(), backend=g.backend, background=True)
+    foreground = TaskRunner(g.config, lambda: g.store, (), lease=g.lease, backend=g.backend)
+    foreground.exclude(background.served)
+    check('a background runner serves its adapters\' operations and the ladder\'s runner is told to leave them alone',
+          background.background and background.served == tuple(sorted(g.adapter.operations)) and not foreground.background)
+    task = await g.task('extract-2', EXTRACT)
+    check('the ladder\'s runner sees none of the background\'s tasks; the background runner sees them',
+          (await foreground.step()) is None and not await store.eligible(OWNER, exclude=background.served)
+          and [t.id for t in await store.eligible(OWNER, operations=background.served)] == [task.id])
+    g.backend.delay_s = 0.3
+    background.refresh(time.time())
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if background.ready:
+            break
+    async with g.lock:
+        # The conversation holds its lease the whole time; the background step neither waits for it nor takes it.
+        started = background.start_step(time.time())
+        await asyncio.sleep(0.05)
+        in_flight = background.current
+        background.interrupt()
+        result = await background._step  # type: ignore[arg-type]
+    after = await store.get(OWNER, task.id)
+    check('while its step runs the runner names the task in flight and since when, and nothing between steps',
+          in_flight is not None and in_flight[0].id == task.id and in_flight[1] <= time.time() and background.current is None)
+    check('a background step runs while the conversation holds its lease, the owner\'s voice leaves it alone, and it checkpoints cleanly',
+          started and result is not None and result.result == 'checkpointed' and after.attempts == 0 and after.model_calls == 1
+          and g.backend.calls == 1 and not g.lock.locked())
+    await store.owner_control(OWNER,task.id,'cancel',revision=after.revision)
+    task=await g.task('cancel-background',EXTRACT)
+    g.backend.delay_s = 0.3
+    background.refresh(time.time())
+    for _ in range(50):
+        await asyncio.sleep(.01)
+        if background.ready:
+            break
+    background.start_step(time.time())
+    await asyncio.sleep(.05)
+    check('an explicit cancellation for another task cannot stop this background step',not background.cancel_task('wrong-task') and not background._step.done())
+    check('an explicit cancellation names and stops the running background task',background.cancel_task(task.id))
+    await asyncio.gather(background._step,return_exceptions=True)
+    check('cancelled background extraction releases its private lease and keeps its spent call',background._step.cancelled() and (await store.get(OWNER,task.id)).model_calls==1)
+    g.backend.delay_s = 0.0
+    await background.close()
+    await g.close()
 
 
 async def probe_outcomes(root: Path) -> None:

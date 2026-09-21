@@ -400,7 +400,7 @@ class ProjectStore:
     # ── internals ────────────────────────────────────────────────────────────
 
     def _save(self, project: Project) -> None:
-        self._dir.mkdir(parents=True, exist_ok=True)
+        self._dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         log_lines = "\n".join(f"- {line}" for line in project.log)
         # The description is one frontmatter line; a newline in it would be
         # reparsed as another key and could spoof status/timestamps. Collapse
@@ -431,7 +431,7 @@ class ProjectStore:
             f"{_LOG_DELIM}"
             f"{log_lines}\n"
         )
-        atomic_write(project.path, text)
+        atomic_write(project.path, text, mode=0o600)
 
     def _read(self, path: Path) -> Project | None:
         try:

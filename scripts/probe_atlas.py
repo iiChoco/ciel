@@ -12,8 +12,11 @@ guess when several match; a resource line carries role, source, current,
 opener, and a locator with spaces, round-trips, and a URL is a url source
 by itself; one current per role; binding a known key replaces it; the
 bound limit holds; a line that does not parse is skipped, not misread; the
-index names aliases and counts resources; and the tools open by alias, list
-resources, refuse an ambiguous name, bind, select, unbind, and rename.
+index names aliases and counts resources; the tools open by alias, list
+resources, refuse an ambiguous name, bind, select, unbind, and rename; and
+a book is bound by the book role and its key, current among books until a
+second is selected, with its study folder bound by the folder role and so
+a root a reading may follow includes within.
 
     uv run --no-sync python scripts/probe_atlas.py
 """
@@ -303,11 +306,34 @@ async def document_checks(root: Path) -> None:
           said.startswith("opened hw 03.tex in vim in your terminal") and open_target(str(doc), "TeXShop", home=home, state_dir=state, runner=lambda a, **k: Ran()) == "opened hw 03.tex with TeXShop")
 
 
+def study_checks(root: Path) -> None:
+    print("\na book and its study folder")
+    from ciel.project_work import roots_for
+
+    store = ProjectStore(root / "study-projects")
+    store.write("linear algebra", "reading", description="Math 110")
+    book = store.bind("linear algebra", "book", str(root / "home" / "Books" / "axler.pdf"), key="book-axler", current=True)
+    folder = store.bind("linear algebra", "folder", str(root / "home" / "Math" / "110" / "Reading" / "axler-4e"), key="study-axler")
+    project = store.get("linear algebra")
+    assert project is not None
+    check("a book is bound by role and key, current among books, and its study folder by the folder role",
+          book.role == "book" and book.current and folder.role == "folder" and project.resource(key="book-axler") == book
+          and project.resource(role="book") == book)
+    check("the study folder is a root a reading may follow includes within, the way any bound folder is",
+          roots_for(project, book) == (root / "home" / "Math" / "110" / "Reading" / "axler-4e",))
+    second = store.bind("linear algebra", "book", str(root / "home" / "Books" / "hoffman.pdf"), key="book-hoffman")
+    project = store.get("linear algebra")
+    assert project is not None
+    check("a second book is not current until selected, so the current one still answers for the role",
+          not second.current and (project.resource(role="book") or second).key == "book-axler")
+
+
 async def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ciel-atlas-probe-") as tmp:
         store_checks(Path(tmp))
         await tool_checks(Path(tmp))
         await document_checks(Path(tmp))
+        study_checks(Path(tmp))
     print(f"\nall {len(CHECKS)} checks passed")
     return 0
 

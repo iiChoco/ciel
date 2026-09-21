@@ -17,16 +17,25 @@ has no reader; Markdown headings are sections numbered by nesting, empty
 under a heading is not started, a checklist box or TODO is in progress,
 and an unclosed fence is a gap.
 
+Study items: a ``namedquestion`` whose argument has an id's shape is that
+item, any other argument is title text as before, a duplicate id is a gap
+and the second unclear; an answer is isolated exactly with its file and
+offsets when it shares a line with its statement or holds an include, a
+comment inside a box is blanked and not cut so offsets still point into the
+owner's file, and the hash of the isolated answer survives a statement edit
+and changes with an answer edit.
+
     uv run --no-sync python scripts/probe_readers.py
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from ciel.readers import describe, read, read_latex, read_markdown, reader_for
+from ciel.readers import Segment, answer_hash, answer_text, describe, read, read_latex, read_markdown, reader_for
 
 CHECKS: list[str] = []
 
@@ -219,9 +228,67 @@ def markdown_checks() -> None:
     check("the same reading shape serves both readers", set(describe(reading).split(":")[0].split()) & {"sections", "section"})
 
 
+STUDY = PREAMBLE + r"""
+\begin{namedquestion}{thm-3.21}
+    \textbf{Theorem 3.21.} Suppose $T \in \mathcal{L}(V,W)$. Then null $T$ is a subspace. \begin{framed} Let $u, v \in$ null $T$. \end{framed}
+\end{namedquestion}
+\begin{namedquestion}{def-3B-span}
+    \textbf{Definition (span).} Give the definition.
+    \begin{framed}
+    \input{more}
+    \end{framed}
+\end{namedquestion}
+\begin{namedquestion}{Just a title, not an id}
+    A named question as before. \begin{framed}\vspace{8\baselineskip}\end{framed}
+\end{namedquestion}
+\begin{namedquestion}{thm-3.21}
+    The same id again. \begin{framed} twice \end{framed}
+\end{namedquestion}
+\begin{numedquestion}
+    Numbered as always. \begin{framed} % a comment inside
+    written \end{framed}
+\end{numedquestion}
+\end{document}
+"""
+
+
+def study_checks() -> None:
+    print("\nstudy items: ids and exact answers")
+    included = {"more": "The set of all linear combinations.\n"}
+    reading = read_latex(STUDY, "sheet.tex", lambda ref: included.get(ref))
+    by_id = {i.id: i for i in reading.items}
+
+    def first(items: Any, wanted: str) -> Any:
+        return next(i for i in items if i.id == wanted)
+
+    check("an id-shaped namedquestion argument is the item's id; any other argument is title text, and numbering runs on as before",
+          "thm-3.21" in by_id and "def-3B-span" in by_id and by_id["3"].title.startswith("Just a title") and by_id["5"].claim == "answer written")
+    thm = first(reading.items, "thm-3.21")
+    check("an answer sharing a line with its statement is isolated exactly, with its file and offsets",
+          answer_text(thm) == " Let $u, v \\in$ null $T$. " and len(thm.answer) == 1 and thm.answer[0].file == "sheet.tex"
+          and STUDY[thm.answer[0].start:thm.answer[0].end] == thm.answer[0].text)
+    span = by_id["def-3B-span"]
+    check("an answer whose box holds an include reaches into the included file's text",
+          answer_text(span).strip() == "\\input{more}" or "linear combinations" in answer_text(span) or "\\input{more}" in answer_text(span))
+    edited = STUDY.replace("Then null $T$ is a subspace.", "Then null $T$ is a subspace of $V$.")
+    again = first(read_latex(edited, "sheet.tex", lambda ref: included.get(ref)).items, "thm-3.21")
+    changed = first(read_latex(STUDY.replace("null $T$. \\end", "null $T$, so. \\end"), "sheet.tex").items, "thm-3.21")
+    check("a statement edit leaves the answer's hash unchanged; an answer edit changes it",
+          answer_hash(again) == answer_hash(thm) and answer_hash(changed) != answer_hash(thm))
+    check("a duplicate id is a gap, named, and the second item is unclear",
+          any("thm-3.21 is used twice" in g for g in reading.gaps) and sum(1 for i in reading.items if i.id == "thm-3.21") == 2
+          and any(i.id == "thm-3.21" and i.claim == "unclear" for i in reading.items))
+    check("a comment inside a box is blanked, not cut: the offsets past it still point into the owner's file",
+          "written" in answer_text(by_id["5"]) and "a comment inside" in STUDY[by_id["5"].answer[0].start:by_id["5"].answer[0].end])
+    check("a legacy reading carries no segments where there is no box, and the empty template box is not started",
+          by_id["3"].claim == "not started" and answer_text(by_id["3"]).strip() == "\\vspace{8\\baselineskip}")
+    check("a segment is a plain record of file, offsets, and text", Segment("a.tex", 0, 1, "x") == Segment("a.tex", 0, 1, "x"))
+
+
 def main() -> int:
     latex_checks()
     markdown_checks()
+    study_checks()
     print(f"\nall {len(CHECKS)} checks passed")
     return 0
 

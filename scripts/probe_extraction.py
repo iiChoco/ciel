@@ -10,8 +10,13 @@ array item, and a boolean posing as an integer; and the SDK extractor builds
 its client with no tools, no MCP servers, no settings, one turn, a private
 empty working directory that is removed afterwards, and the schema as its
 output format, reads the structured result, treats an error result as an
-error, and disconnects even when the query fails. No model, network, or
-runtime state is used.
+error, and disconnects even when the query fails. Page images: a text call
+reaches a backend that knows nothing of images exactly as before; images
+past their count or byte bounds, bytes that are not a PNG, and an entry that
+is not a label and bytes are refused before any call; within the bounds the
+images reach the backend, and the SDK client is sent one user message of
+content blocks — the text, the page label, the PNG as base64 — with the
+call's own budget. No model, network, or runtime state is used.
 
     uv run --no-sync python scripts/probe_extraction.py
 """
@@ -167,10 +172,14 @@ class FakeClient:
         self.connected = True
         self.cwd_existed = Path(self.options.cwd).is_dir() and (os.stat(self.options.cwd).st_mode & 0o777) == 0o700
 
-    async def query(self, text: str) -> None:
+    async def query(self, text: Any) -> None:
         if FakeClient.fail_query:
             raise RuntimeError('the subprocess died')
-        self.queries.append(text)
+        if isinstance(text, str):
+            self.queries.append(text)
+        else:
+            async for message in text:
+                self.queries.append(message)
 
     async def receive_response(self) -> AsyncIterator[Any]:
         for message in FakeClient.script:
@@ -203,6 +212,45 @@ def install_fake_sdk() -> None:
     sys.modules['claude_agent_sdk'] = module
 
 
+class ImageBackend(FakeBackend):
+    """A backend that takes page images: what it was handed is recorded."""
+
+    async def extract(self, system_prompt: str, payload: str, schema: dict[str, Any], *, limits: ExtractionLimits,
+                      images: tuple[tuple[str, bytes], ...] = ()) -> Any:
+        self.images = images
+        return await super().extract(system_prompt, payload, schema, limits=limits)
+
+
+PNG = b'\x89PNG\r\n\x1a\n' + b'0' * 40
+
+
+async def probe_images() -> None:
+    print('\npage images ride the call, bounded')
+    lease = Lease()
+    text_only = FakeBackend({'when': '2026-09-15', 'kind': 'appointment'})
+    result = await extract_json(text_only, lease, 'prompt', 'payload', SCHEMA, LIMITS)
+    check('a text call reaches a backend that knows nothing of images exactly as before', result['kind'] == 'appointment' and text_only.calls == 1)
+    sighted = ImageBackend({'when': '2026-09-15', 'kind': 'appointment'})
+    wide = ExtractionLimits(max_chars=64, timeout_s=0.2, max_images=2, max_image_bytes=100)
+    await refused('images are refused before any call while the limits allow none',
+                  extract_json(sighted, lease, 'prompt', 'payload', SCHEMA, LIMITS, (('page 1', PNG),)), 'more page images')
+    await refused('more images than the bound are refused before any call',
+                  extract_json(sighted, lease, 'prompt', 'payload', SCHEMA, wide, (('a', PNG), ('b', PNG), ('c', PNG))), 'more page images')
+    await refused('an image past its byte bound is refused before any call',
+                  extract_json(sighted, lease, 'prompt', 'payload', SCHEMA, wide, (('a', PNG + b'0' * 200),)), 'within the extraction bound')
+    await refused('bytes that are neither PNG nor JPEG are refused before any call',
+                  extract_json(sighted, lease, 'prompt', 'payload', SCHEMA, wide, (('a', b'GIF89a' + b'0' * 20),)), 'not a PNG')
+    await refused('an image that is not a label and bytes is refused before any call',
+                  extract_json(sighted, lease, 'prompt', 'payload', SCHEMA, wide, (('a', 'not bytes'),)), 'label and PNG or JPEG bytes')  # type: ignore[arg-type]
+    check('nothing reached the backend', sighted.calls == 0)
+    jpeg = b"\xff\xd8\xff\xe0" + b"fixture" + b"\xff\xd9"
+    result = await extract_json(sighted, lease, 'prompt', 'payload', SCHEMA, wide, (('photo', jpeg),))
+    check('a bounded JPEG reaches the same isolated image backend', sighted.images == (('photo',jpeg),))
+    await refused('a truncated JPEG is refused before extraction',extract_json(sighted,lease,'prompt','payload',SCHEMA,wide,(('photo',jpeg[:-2]),)),'not a PNG or JPEG')
+    result = await extract_json(sighted, lease, 'prompt', 'payload', SCHEMA, wide, (('page 7', PNG),))
+    check('within the bounds the images are handed to the backend with the call', result['kind'] == 'appointment' and sighted.images == (('page 7', PNG),))
+
+
 async def probe_sdk() -> None:
     print('\nthe client with nothing attached')
     install_fake_sdk()
@@ -220,6 +268,20 @@ async def probe_sdk() -> None:
     check('the working directory was private, empty, and its own, and is gone afterwards',
           client.cwd_existed and 'ciel-extract-' in str(o.cwd) and not Path(o.cwd).exists())
     check('the client is disconnected after the call', client.connected and client.disconnected)
+    FakeClient.script = [FakeResult({'when': '2026-09-15', 'kind': 'appointment'})]
+    wide = ExtractionLimits(max_chars=64, timeout_s=0.2, max_budget_usd=0.75, max_images=2, max_image_bytes=100)
+    result = await extractor.extract('prompt', 'payload', SCHEMA, limits=wide, images=(('page 7', PNG),))
+    client = FakeClient.instances[-1]
+    sent = client.queries[-1]
+    blocks = sent['message']['content'] if isinstance(sent, dict) else []
+    check('with images the one user message is content blocks: the text, the page label, the PNG as base64, and its own budget',
+          result['kind'] == 'appointment' and isinstance(sent, dict) and sent['type'] == 'user' and blocks[0] == {'type': 'text', 'text': 'payload'}
+          and blocks[1] == {'type': 'text', 'text': '[page 7]'} and blocks[2]['type'] == 'image' and blocks[2]['source']['media_type'] == 'image/png'
+          and blocks[2]['source']['data'] == __import__('base64').b64encode(PNG).decode('ascii') and client.options.max_budget_usd == 0.75)
+    jpeg = b"\xff\xd8\xff\xe0" + b"fixture" + b"\xff\xd9"
+    await extractor.extract('prompt','payload',SCHEMA,limits=wide,images=(('photo',jpeg),))
+    blocks=FakeClient.instances[-1].queries[-1]['message']['content']
+    check('JPEG content blocks declare JPEG MIME and retain the exact bytes',blocks[2]['source']['media_type']=='image/jpeg' and blocks[2]['source']['data']==__import__('base64').b64encode(jpeg).decode('ascii'))
     module = sys.modules['claude_agent_sdk']
     FakeClient.script = [module.AssistantMessage([module.TextBlock('```json\n{"when": "x", "kind": "promotion"}\n```')]),  # type: ignore[attr-defined]
                          FakeResult(None)]
@@ -245,6 +307,7 @@ async def probe_sdk() -> None:
 
 async def main() -> None:
     await probe_call()
+    await probe_images()
     probe_schema()
     await probe_sdk()
     print(f'\nall {len(CHECKS)} checks passed')

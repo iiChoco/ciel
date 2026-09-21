@@ -52,13 +52,16 @@ log = logging.getLogger(__name__)
 
 class TaskController:
     def __init__(self, config: TasksConfig, journal: ActionJournal | None = None,
-                 namespaces: tuple[Namespace, ...] = (), setups: tuple[GrantSetup, ...] = ()) -> None:
+                 namespaces: tuple[Namespace, ...] = (), setups: tuple[GrantSetup, ...] | Callable[[], tuple[GrantSetup, ...]] = ()) -> None:
         self.config = config
         self.journal = journal
         self.namespaces = namespaces
         """The adapters' record namespaces, registered before the store opens."""
-        self.setups = setups
-        """What the adapters offer the owner to approve; the Chart form's fields."""
+        self._setups = setups
+        """What the adapters offer the owner to approve; the Chart form's
+        fields. A callable is asked each time, so an adapter whose targets
+        are the owner's own bindings (a project, a book) offers the ones
+        bound now, not the ones bound at startup."""
         self._asker: Asker | None = None
         self._requests: dict[str, Callable[[dict[str, Any]], Any]] = {}
         """Finite tasks a feature lets an owner turn ask for, by operation name;
@@ -78,6 +81,10 @@ class TaskController:
         """Whether a runner exists here: a resumed or answered task is then queued, not parked."""
         self.store: TaskStore | None = None
         self.unavailable = 'Tasks are disabled.' if not config.enabled else 'Task storage is starting.'
+
+    @property
+    def setups(self) -> tuple[GrantSetup, ...]:
+        return tuple(self._setups()) if callable(self._setups) else tuple(self._setups)
 
     async def start(self) -> None:
         if not self.config.enabled or self.store is not None:
@@ -118,6 +125,12 @@ class TaskController:
         if self.store is None:
             raise TaskStoreError(self.unavailable)
         return self.store
+
+    def store_for(self, binding: TaskBinding | None) -> TaskStore:
+        """The store, for a feature's own read under the same owner admission
+        every control passes; a read that journals nothing still needs the
+        live private owner turn."""
+        return self._store(binding)
 
     def bind_approval(self, asker: Asker | None) -> None:
         """The pipeline lends its broker; without one, approval says so."""
@@ -167,7 +180,7 @@ class TaskController:
                 if not store.namespace_supported(namespace):
                     continue
                 try:
-                    rows = listing(await store.records(binding.origin.owner, namespace))
+                    rows = listing(await store.all_records(binding.origin.owner, namespace))
                 except Exception:  # noqa: BLE001 - a feature's rows are optional; the record is not
                     log.warning('a feature could not list its records', exc_info=True)
                     continue
@@ -178,7 +191,7 @@ class TaskController:
             for namespace, (operations, summarize) in self._summaries.items():
                 if task.next_step.operation in operations and store.namespace_supported(namespace):
                     try:
-                        view['feature'] = summarize(task, await store.records(binding.origin.owner, namespace))
+                        view['feature'] = summarize(task, await store.all_records(binding.origin.owner, namespace))
                     except Exception:  # noqa: BLE001 - a feature's words are optional; the record is not
                         log.warning('a feature could not describe its task', exc_info=True)
         return view

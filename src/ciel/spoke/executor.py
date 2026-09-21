@@ -24,6 +24,16 @@ its own process group, stopped and reaped on cancellation or either
 deadline. Shutdown waits for that cleanup. **Undo reads the Mac first:**
 the recorder's private snapshot request applies the write boundary and
 returns bounded bytes for the hub to save before the write is allowed on.
+
+**A request outlives its hub, under the id that hub gave it.** The link
+dropping does not cancel what is running here: a command half-done is
+not made safer by killing it, and its outcome is already "unknown" on
+the hub's side (its wait failed when the socket did). The result goes
+out under the id the request carried, which the hub minted under an
+epoch of its own; a hub that has restarted since matches it against
+nothing and drops it, and never mistakes it for an answer to a request
+of its own. The in-flight table is keyed by that full id, so a new hub's
+first request is never a duplicate of the old hub's orphan.
 """
 
 from __future__ import annotations
@@ -100,6 +110,10 @@ class Executor:
             "project.read": self._project_read,
             "project.open": self._project_open,
             "project.watch": self._project_watch,
+            "learning.find_books": self._learning_find_books,
+            "learning.pdf_info": self._learning_pdf_info,
+            "learning.pdf_pages": self._learning_pdf_pages,
+            "learning.publish": self._learning_publish,
         }
 
     # ── the wire's side ──────────────────────────────────────────────────────
@@ -362,6 +376,28 @@ class Executor:
             (accepted if resolved is not None else refused).append(str(resolved) if resolved is not None else str(raw))
         watching = self._resources.set_paths(accepted)
         return {"watching": watching, "refused": refused}
+
+    def _library(self) -> Any:
+        """The books on this Mac, for the hub's learning module: the same
+        PDFKit functions the single process uses, behind this side's own
+        root and path checks. Off unless ``[learning]`` is on here too."""
+        from ciel.learning import LocalLibrary
+
+        if not self._config.learning.enabled:
+            raise RuntimeError("learning is off on the Mac ([learning].enabled)")
+        return LocalLibrary(self._config.learning, state_dir=self._config.state_dir, forbidden=forbidden_names(self._config))
+
+    async def _learning_find_books(self, query: str) -> dict[str, Any]:
+        return await self._library().find_books(str(query or ""))
+
+    async def _learning_pdf_info(self, path: str) -> dict[str, Any]:
+        return await self._library().pdf_info(str(path or ""))
+
+    async def _learning_pdf_pages(self, path: str, first: int, last: int, images: bool = False) -> dict[str, Any]:
+        return await self._library().pdf_pages(str(path or ""), int(first), int(last), images=bool(images))
+
+    async def _learning_publish(self, path: str, content: str) -> dict[str, Any]:
+        return await self._library().publish(str(path or ""), str(content or ""))
 
     async def _files_list(self, path: str = ".") -> list[str]:
         target = self._path(path, write=False)

@@ -17,12 +17,12 @@ context the caller declares (a timezone, say) and nothing else. The
 interview room's structured call is the construction pattern; nothing of
 the room's state is shared.
 
-**The call holds the model turn, not the conversation.** It runs under
-the Brain's lease — the same lock every conversational turn takes — so
-two model turns never overlap, and a user who speaks mid-extraction waits
-exactly as they would behind reflection. The runner cancels the
-extraction on human input; the cancelled client is closed under a bounded
-cleanup and its late result, if any, is dropped.
+**The caller owns the lease.** Foreground work takes the Brain's lease and
+is interrupted by human input. Learning and nutrition photos share one
+background runner and its private lease, so their isolated calls take turns
+without holding up speech. Cancellation closes the client under a bounded
+cleanup and the runner fences any late result. PNG and JPEG inputs retain
+their real media type and must fit the caller's image allowance.
 
 **The schema is checked twice.** The SDK asks the model for the shape,
 and runtime code checks the answer against it again before anyone acts
@@ -69,9 +69,21 @@ class ExtractionLimits:
     max_chars: int
     timeout_s: float
     max_budget_usd: float = 0.25
+    max_images: int = 0
+    """Page images one call may carry; zero refuses any, which is the text-only default."""
+    max_image_bytes: int = 0
+    """The largest one image may be, after the caller rendered it."""
+
+
+Image = tuple[str, bytes]
+"""An image for the model: a label ("page 7") and bounded PNG or JPEG bytes."""
 
 
 class ExtractionBackend(Protocol):
+    """A backend takes the text call as it always has; one that can also
+    take page images accepts ``images`` as a keyword, and is only ever
+    handed it when there are some."""
+
     async def extract(self, system_prompt: str, payload: str, schema: dict[str, Any], *,
                       limits: ExtractionLimits) -> dict[str, Any]: ...
 
@@ -103,7 +115,7 @@ class AgentSdkExtractor:
         self._model = model
 
     async def extract(self, system_prompt: str, payload: str, schema: dict[str, Any], *,
-                      limits: ExtractionLimits) -> dict[str, Any]:
+                      limits: ExtractionLimits, images: tuple[Image, ...] = ()) -> dict[str, Any]:
         from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ResultMessage, TextBlock
 
         # mkdtemp is 0700: the subprocess sees an empty directory of its own
@@ -133,7 +145,10 @@ class AgentSdkExtractor:
             except Exception as exc:  # noqa: BLE001 - surfaced as one error type
                 raise ExtractionError(f"could not reach the model: {exc}") from exc
             try:
-                await client.query(payload)
+                # With images the one user message is content blocks — the
+                # text, then each page — sent the streamed way the SDK takes
+                # them; without, the string call is byte-for-byte what it was.
+                await client.query(_with_images(payload, images) if images else payload)
                 async for message in client.receive_response():
                     if isinstance(message, AssistantMessage):
                         for block in message.content:
@@ -158,6 +173,25 @@ class AgentSdkExtractor:
         if parsed is not None:
             return parsed
         raise ExtractionError(error or "the model did not return the expected structure")
+
+
+def image_mime(data: bytes) -> str:
+    """The bytes select the MIME type; a caller's label supplies no authority."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff") and data.endswith(b"\xff\xd9"):
+        return "image/jpeg"
+    raise ExtractionError("an image is not a PNG or JPEG")
+
+
+async def _with_images(payload: str, images: tuple[Image, ...]) -> Any:
+    import base64
+
+    content: list[dict[str, Any]] = [{"type": "text", "text": payload}]
+    for label, data in images:
+        content.append({"type": "text", "text": f"[{label}]"})
+        content.append({"type": "image", "source": {"type": "base64", "media_type": image_mime(data), "data": base64.b64encode(data).decode("ascii")}})
+    yield {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
 
 
 _TYPES: dict[str, type | tuple[type, ...]] = {
@@ -200,18 +234,32 @@ def conforms(schema: dict[str, Any], data: Any, path: str = "$") -> None:
 
 
 async def extract_json(backend: ExtractionBackend, lease: Lease, system_prompt: str, payload: str,
-                       schema: dict[str, Any], limits: ExtractionLimits) -> dict[str, Any]:
+                       schema: dict[str, Any], limits: ExtractionLimits, images: tuple[Image, ...] = ()) -> dict[str, Any]:
     """One bounded, leased, schema-checked call. Raises ExtractionError;
-    a cancellation passes through after the backend has cleaned up."""
+    a cancellation passes through after the backend has cleaned up. Page
+    images, when there are any, are counted and sized against the limits
+    before the call and handed to the backend only then; a text-only call
+    reaches the backend exactly as it did before images existed."""
     if not isinstance(payload, str) or len(payload) > limits.max_chars:
         raise ExtractionError("payload exceeds the extraction bound")
     if not isinstance(schema, dict) or schema.get("type") != "object":
         raise ExtractionError("an extraction schema describes an object")
     if not isinstance(system_prompt, str) or not system_prompt.strip():
         raise ExtractionError("an extraction needs its fixed system prompt")
+    if images:
+        if not isinstance(images, tuple) or len(images) > limits.max_images:
+            raise ExtractionError("more page images than the extraction bound allows")
+        for entry in images:
+            if not (isinstance(entry, tuple) and len(entry) == 2 and isinstance(entry[0], str) and isinstance(entry[1], bytes)):
+                raise ExtractionError("an image is a label and PNG or JPEG bytes")
+            if len(entry[1]) > limits.max_image_bytes:
+                raise ExtractionError("an image is not within the extraction bound")
+            image_mime(entry[1])
     async with lease():
         try:
-            data = await asyncio.wait_for(backend.extract(system_prompt, payload, schema, limits=limits), limits.timeout_s)
+            call = backend.extract(system_prompt, payload, schema, limits=limits, images=images) if images \
+                else backend.extract(system_prompt, payload, schema, limits=limits)
+            data = await asyncio.wait_for(call, limits.timeout_s)
         except asyncio.TimeoutError as exc:
             raise ExtractionError("extraction timed out") from exc
     if not isinstance(data, dict):
@@ -220,4 +268,4 @@ async def extract_json(backend: ExtractionBackend, lease: Lease, system_prompt: 
     return data
 
 
-__all__ = ["AgentSdkExtractor", "ExtractionBackend", "ExtractionError", "ExtractionLimits", "Lease", "conforms", "extract_json"]
+__all__ = ["AgentSdkExtractor", "ExtractionBackend", "ExtractionError", "ExtractionLimits", "Image", "Lease", "conforms", "extract_json"]

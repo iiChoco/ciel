@@ -84,10 +84,13 @@ class Workbench(Protocol):
         """Open a path or URL where the owner is; the sentence to tell them."""
 
 
-def check_document_path(raw: str, *, home: Path, state_dir: Path, forbidden: frozenset[str]) -> tuple[Path | None, str]:
+def check_document_path(raw: str, *, home: Path, state_dir: Path, forbidden: frozenset[str],
+                        suffixes: tuple[str, ...] = DOCUMENT_SUFFIXES) -> tuple[Path | None, str]:
     """The spoke's own opinion of a document path, whatever the hub said:
     under home, not under the state directory, not a credential's name, a
-    document suffix. Returns the resolved path or the refusal."""
+    document suffix. Returns the resolved path or the refusal. The suffixes
+    are the reader's unless the caller has its own narrower set (a book is
+    a PDF, which no reader takes)."""
     try:
         path = Path(raw).expanduser()
         if not path.is_absolute():
@@ -106,8 +109,10 @@ def check_document_path(raw: str, *, home: Path, state_dir: Path, forbidden: fro
         pass
     if resolved.name in forbidden or any(part in forbidden for part in resolved.parts):
         return None, "that name is off limits"
-    if resolved.suffix.lower() not in DOCUMENT_SUFFIXES:
-        return None, f"{resolved.suffix or 'no suffix'} is not a document type the reader takes"
+    if resolved.suffix.lower() not in suffixes:
+        if suffixes == DOCUMENT_SUFFIXES:
+            return None, f"{resolved.suffix or 'no suffix'} is not a document type the reader takes"
+        return None, f"{resolved.suffix or 'no suffix'} is not one of {', '.join(suffixes)}"
     return resolved, ""
 
 
@@ -256,13 +261,21 @@ class RemoteWorkbench:
             return _mac_words(exc)
 
 
-def _mac_words(exc: Exception) -> str:
+def mac_words(exc: Exception) -> str:
     """What the Mac's failure means: the spoke's own refusal in its words,
     or, when nothing answered, that it could not be reached."""
     text = str(exc)
     if "not connected" in text or "did not answer" in text or "left" in text or not text:
         return f"the Mac could not be reached: {text or exc.__class__.__name__}"
     return f"the Mac answered: {text}"
+
+
+_mac_words = mac_words
+
+
+def references(text: str) -> list[str]:
+    """The ``\\input`` and ``\\include`` references a LaTeX file makes, as written."""
+    return _references(text)
 
 
 def roots_for(project: Project, resource: Resource) -> tuple[Path, ...]:
@@ -498,7 +511,7 @@ class ProjectAdapter:
         under an active mandate, and every file their kept readings covered."""
         try:
             mandates = await store.mandates(owner)
-            records = await store.records(owner, NAMESPACE_NAME)
+            records = await store.all_records(owner, NAMESPACE_NAME)
         except Exception:  # noqa: BLE001 - no store, nothing watched
             return []
         active = {m.id for m in mandates if m.namespace == NAMESPACE_NAME and m.status == "active"}
@@ -556,7 +569,7 @@ class ProjectAdapter:
         if found is not None:
             project_id, key = found[0].id, found[1].key
         else:
-            for record in await self._store.records(self._owner, NAMESPACE_NAME):
+            for record in await self._store.all_records(self._owner, NAMESPACE_NAME):
                 if record.payload.get("kind") == "reading" and path in record.payload.get("revisions", {}):
                     project_id, key = str(record.payload["project"]), str(record.payload["key"])
                     break

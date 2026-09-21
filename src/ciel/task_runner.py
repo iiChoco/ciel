@@ -11,10 +11,17 @@ hands the slot back.
 set of operations and, if it keeps records, one feature namespace. Its
 ``prepare`` looks at the task and its own records and says proceed or wait;
 its ``read`` observes the target and returns evidence and what should
-happen next. A mutation step is not dispatched by this runner at all: it
-waits, visibly, for the authorized dispatch phase that arrives with the
-foundation's third milestone. A task whose operation no adapter serves, or
-whose namespace this runtime cannot read, waits the same way.
+happen next. A mutation step goes through the dispatch below, and only
+through an adapter that can plan, send, and reconcile; one whose adapter
+cannot waits, visibly. A task whose operation no adapter serves, or whose
+namespace this runtime cannot read, waits the same way.
+
+**A step sees every record of its namespace, not a page of them.** The
+store reads records a page at a time; the runner walks the pages before
+a step and hands the adapter the whole set. An adapter that finished a
+preview because no queued message was on the first page had finished
+nothing — the message stayed queued behind page one, unread — and that is
+exactly the mistake a partial view invites.
 
 **The store fences every late result.** Every write the runner makes names
 the attempt it holds; the store refuses one for an attempt that is no
@@ -37,6 +44,17 @@ timeout, an exception, or the owner's voice after the send is an outcome
 nobody knows: the task waits for reconciliation, where the adapter is asked
 what happened, and after enough reads that cannot tell, the owner is.
 
+**A background runner takes its own steps beside the conversation.** A
+second runner on the same store, built with ``background=True``, serves a
+set of features whose work should not wait for a quiet room: learning reads
+chapters and nutrition reads photo drafts. It takes only the steps
+of its own adapters, under a lease of its own with an extraction client of
+its own, so it never holds the conversation's turn and the owner's voice
+never interrupts it; the ladder's runner leaves those operations out. One
+step at a time on each runner; the store's fencing is the same. An explicit
+owner cancellation can stop the named active background task without
+interrupting another task.
+
 **Giving up is recorded, never retried blindly.** A timeout, an adapter's
 exception, a cancellation: each abandons the attempt through the store,
 which charges the allowance and requeues, waits for reconciliation, or
@@ -51,10 +69,11 @@ import hashlib
 import json
 import logging
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Iterable, Literal, Protocol
 
-from ciel.brain.extract import ExtractionBackend, ExtractionError, ExtractionLimits, Lease, extract_json
+from ciel.brain.extract import ExtractionBackend, ExtractionError, ExtractionLimits, Image, Lease, extract_json
 from ciel.config import TasksConfig
 from ciel.proactive.events import EventQueue, ProactiveEvent
 from ciel.tasks import (Attempt, Notice, Specification, DerivedOrigin, Evidence, FeatureRecord, GrantSetup, Intent, Namespace, NoAuthority, RecordSet, RecordWrite, Step,
@@ -64,6 +83,19 @@ if TYPE_CHECKING:
     from ciel.journal import ActionJournal
 
 log = logging.getLogger(__name__)
+
+def private_lease() -> Lease:
+    """A lease of its own for a background runner: a lock nobody else holds,
+    so its calls never wait behind the conversation nor make it wait."""
+    lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def lease() -> AsyncIterator[None]:
+        async with lock:
+            yield
+
+    return lease
+
 
 _REFRESH_S = 1.0
 """How often the runner asks the store whether anything is eligible when
@@ -118,10 +150,15 @@ class StepContext:
     attempt: Attempt
     records: tuple[FeatureRecord, ...]
     now: float
-    extract: Callable[[str, str, dict[str, Any]], Awaitable[dict[str, Any]]]
-    """One isolated model call: system prompt, payload, schema. Spends a
-    model call before it is made; raises ExtractionError or TaskLimit."""
+    extract: Callable[..., Awaitable[dict[str, Any]]]
+    """One isolated model call: system prompt, payload, schema, and, as
+    keywords, ``images`` (page images for the model, none by default) and
+    ``limits`` (an ExtractionLimits in place of the runtime's, for a call
+    that carries images and needs their bounds and its own budget). Spends
+    a model call before it is made; raises ExtractionError or TaskLimit."""
     extraction_available: bool
+    limits: ExtractionLimits | None = None
+    """The runtime's limits for one call, for an adapter to derive an image call's from."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,7 +226,7 @@ class StepReport:
 class TaskRunner:
     def __init__(self, config: TasksConfig, store: Callable[[], TaskStore | None], adapters: Iterable[TaskAdapter] = (), *,
                  lease: Lease | None = None, backend: ExtractionBackend | None = None,
-                 clock: Callable[[], float] = time.time, journal: "ActionJournal | None" = None) -> None:
+                 clock: Callable[[], float] = time.time, journal: "ActionJournal | None" = None, background: bool = False) -> None:
         self._config = config
         self._store = store
         self._lease = lease
@@ -197,11 +234,17 @@ class TaskRunner:
         self._clock = clock
         self._journal = journal
         """Inverse; a mutation whose intent cannot be journaled is not sent."""
+        self._background = background
+        """Takes only its own adapters' steps, and human input never interrupts it."""
+        self._excluded: tuple[str, ...] = ()
+        """Operations another runner serves; this one never claims them."""
         self._by_operation: dict[str, TaskAdapter] = {}
         self._adapters: list[TaskAdapter] = []
         for adapter in adapters:
             self.add(adapter)
         self._step: asyncio.Task[StepReport | None] | None = None
+        self._current: tuple[Task, float] | None = None
+        """The task whose step is in flight and when it started, for the roster of work in progress."""
         self._leased = False
         self._ready = False
         self._oldest: float | None = None
@@ -217,6 +260,26 @@ class TaskRunner:
         for operation in adapter.operations:
             self._by_operation[operation] = adapter
         self._adapters.append(adapter)
+
+    @property
+    def served(self) -> tuple[str, ...]:
+        """Every operation an adapter here serves, in a fixed order."""
+        return tuple(sorted(self._by_operation))
+
+    def exclude(self, operations: tuple[str, ...]) -> None:
+        """Leave these operations to another runner on the same store."""
+        self._excluded = tuple(operations)
+
+    @property
+    def background(self) -> bool:
+        return self._background
+
+    @property
+    def current(self) -> tuple[Task, float] | None:
+        """The task a step is running for right now, and since when; None between steps."""
+        if self._step is None or self._step.done():
+            return None
+        return self._current
 
     @property
     def namespaces(self) -> tuple[Namespace, ...]:
@@ -256,8 +319,8 @@ class TaskRunner:
             self._ready, self._oldest = False, None
             return
         try:
-            tasks = await store.eligible(self._config.owner, now=now, limit=1)
-            uncertain = await store.reconcilable(self._config.owner, limit=1)
+            tasks = await store.eligible(self._config.owner, now=now, limit=1, **self._narrowing())
+            uncertain = await store.reconcilable(self._config.owner, limit=1, **self._narrowing())
         except (TaskStoreError, TaskConflict, ValueError):
             log.debug('task eligibility could not be read', exc_info=True)
             self._ready, self._oldest = False, None
@@ -277,10 +340,26 @@ class TaskRunner:
         self._step = asyncio.create_task(self.step(now))
         return True
 
+    def _narrowing(self) -> dict[str, Any]:
+        """How this runner's reads of the store are narrowed: to its own
+        operations when it runs in the background, and away from another
+        runner's otherwise."""
+        return {'operations': self.served} if self._background else {'exclude': self._excluded}
+
     def interrupt(self) -> None:
-        """Human input arrived: a step holding the model turn yields it."""
+        """Human input arrived: a step holding the model turn yields it. A
+        background runner holds no such turn and is left alone."""
+        if self._background:
+            return
         if self._step is not None and not self._step.done() and self._leased:
             self._step.cancel()
+
+    def cancel_task(self, task_id: str) -> bool:
+        """An explicit owner cancellation can stop only this runner's named step."""
+        if self._current is None or self._current[0].id != task_id or self._step is None or self._step.done():
+            return False
+        self._step.cancel()
+        return True
 
     async def close(self) -> None:
         for task in (self._step, self._refresh):
@@ -298,19 +377,24 @@ class TaskRunner:
             return None
         stamp = self._clock() if now is None else now
         try:
-            uncertain = await store.reconcilable(self._config.owner, limit=1)
-            tasks = () if uncertain else await store.eligible(self._config.owner, now=stamp, limit=1)
+            uncertain = await store.reconcilable(self._config.owner, limit=1, **self._narrowing())
+            tasks = () if uncertain else await store.eligible(self._config.owner, now=stamp, limit=1, **self._narrowing())
         except TaskStoreError:
             log.warning('task store unavailable; no step taken', exc_info=True)
             return None
-        if uncertain:
-            # An outcome nobody knows comes before any new step: the world may
-            # already hold an effect the runner must not add to.
-            report = await self._reconcile(store, *uncertain[0], stamp)
-        elif tasks:
-            report = await self._run(store, tasks[0], stamp)
-        else:
-            return None
+        try:
+            if uncertain:
+                # An outcome nobody knows comes before any new step: the world may
+                # already hold an effect the runner must not add to.
+                self._current = (uncertain[0][0], self._clock())
+                report = await self._reconcile(store, *uncertain[0], stamp)
+            elif tasks:
+                self._current = (tasks[0], self._clock())
+                report = await self._run(store, tasks[0], stamp)
+            else:
+                return None
+        finally:
+            self._current = None
         self.reports.append(report)
         del self.reports[:-32]
         self._next_refresh = 0.0
@@ -336,7 +420,7 @@ class TaskRunner:
         if namespace is not None and not store.namespace_supported(namespace.name):
             return await self._wait(store, task, 'resource', f'records for {namespace.name} are unsupported by this runtime', now)
         try:
-            records = await store.records(owner, namespace.name) if namespace is not None else ()
+            records = await store.all_records(owner, namespace.name) if namespace is not None else ()
             preparation = adapter.prepare(task, records)
         except Exception:  # noqa: BLE001 - the adapter's failure is logged without its payload
             log.warning('adapter could not prepare task %s', task.id, exc_info=True)
@@ -350,7 +434,8 @@ class TaskRunner:
             attempt = await store.mark_dispatched(owner, attempt, now=now)
         except (TaskConflict, TaskLimit) as exc:
             return StepReport(task.id, 'stale', str(exc))
-        context = StepContext(task, attempt, records, now, self._extractor(store, attempt), self._backend is not None and self._lease is not None)
+        context = StepContext(task, attempt, records, now, self._extractor(store, attempt), self._backend is not None and self._lease is not None,
+                              limits=self._limits())
         try:
             outcome = await asyncio.wait_for(adapter.read(context), self._config.step_timeout_s)
         except asyncio.CancelledError:
@@ -390,7 +475,8 @@ class TaskRunner:
             attempt = await store.claim(owner, task.id, task.revision, now=now)
         except (TaskConflict, TaskLimit) as exc:
             return StepReport(task.id, 'stale', str(exc))
-        context = StepContext(task, attempt, records, now, self._extractor(store, attempt), self._backend is not None and self._lease is not None)
+        context = StepContext(task, attempt, records, now, self._extractor(store, attempt), self._backend is not None and self._lease is not None,
+                              limits=self._limits())
         try:
             plan = await asyncio.wait_for(adapter.plan(context), self._config.step_timeout_s)
             payload_digest, precondition_digest = _digest(plan.payload), _digest(plan.preconditions)
@@ -465,10 +551,10 @@ class TaskRunner:
             return StepReport(task.id, 'waiting', f'no adapter can reconcile {intent.operation}')
         namespace = adapter.namespace
         try:
-            records = await store.records(owner, namespace.name) if namespace is not None and store.namespace_supported(namespace.name) else ()
+            records = await store.all_records(owner, namespace.name) if namespace is not None and store.namespace_supported(namespace.name) else ()
         except TaskStoreError:
             records = ()
-        context = StepContext(task, attempt, records, now, self._extractor(store, attempt), False)
+        context = StepContext(task, attempt, records, now, self._extractor(store, attempt), False, limits=self._limits())
         try:
             outcome = await asyncio.wait_for(adapter.reconcile(context, intent), self._config.step_timeout_s)  # type: ignore[attr-defined]
         except asyncio.CancelledError:
@@ -543,16 +629,18 @@ class TaskRunner:
             log.warning('adapter outcome refused for task %s: %s', task.id, exc)
             return await self._abandon(store, task, attempt, 'the read returned an outcome the store refused', now)
 
-    def _extractor(self, store: TaskStore, attempt: Attempt) -> Callable[[str, str, dict[str, Any]], Awaitable[dict[str, Any]]]:
-        async def extract(system_prompt: str, payload: str, schema: dict[str, Any]) -> dict[str, Any]:
+    def _limits(self) -> ExtractionLimits:
+        return ExtractionLimits(self._config.extraction_max_chars, self._config.extraction_timeout_s, self._config.extraction_max_budget_usd)
+
+    def _extractor(self, store: TaskStore, attempt: Attempt) -> Callable[..., Awaitable[dict[str, Any]]]:
+        async def extract(system_prompt: str, payload: str, schema: dict[str, Any], *, images: tuple[Image, ...] = (),
+                          limits: ExtractionLimits | None = None) -> dict[str, Any]:
             if self._backend is None or self._lease is None:
                 raise ExtractionError('extraction is not configured on this runtime')
             await store.note_model_call(self._config.owner, attempt)
-            limits = ExtractionLimits(self._config.extraction_max_chars, self._config.extraction_timeout_s,
-                                      self._config.extraction_max_budget_usd)
             self._leased = True
             try:
-                return await extract_json(self._backend, self._lease, system_prompt, payload, schema, limits)
+                return await extract_json(self._backend, self._lease, system_prompt, payload, schema, limits or self._limits(), images)
             finally:
                 self._leased = False
         return extract
@@ -696,4 +784,4 @@ def _notice_summary(notice: Notice) -> str:
 
 
 __all__ = ['TaskNotifier', 'MutationResult', 'Outcome', 'Plan', 'PreconditionFailed', 'Preparation', 'Reconciliation', 'StepContext', 'StepReport',
-           'TaskAdapter', 'TaskRunner', 'WritingAdapter']
+           'TaskAdapter', 'TaskRunner', 'WritingAdapter', 'private_lease']
