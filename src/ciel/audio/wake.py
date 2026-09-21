@@ -14,8 +14,10 @@ even though only one of them cares about the audio.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import sys
+import types
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol, runtime_checkable
 
@@ -120,6 +122,46 @@ class AlwaysAwake:
         return None
 
 
+def _tail_melspectrogram(features, n_samples: int) -> None:  # noqa: ANN001 - openwakeword.utils.AudioFeatures
+    """openWakeWord's ``_streaming_melspectrogram`` without the copy.
+
+    The library's version is ``list(self.raw_data_buffer)[-n_samples-480:]``
+    over a deque holding ten seconds of samples: 160,000 elements
+    materialized to keep 1,760, about a millisecond every 80 ms and a third
+    of what the wake word costs. Walking the deque from its tail costs
+    28 µs. Same buffer, same window, same melspectrogram, same trimming; the
+    refusal for a buffer shorter than a melspectrogram frame keeps the
+    library's words.
+    """
+    import numpy as np
+
+    buffer = features.raw_data_buffer
+    if len(buffer) < 400:
+        raise ValueError("The number of input frames must be at least 400 samples @ 16khz (25 ms)!")
+    take = min(n_samples + 160 * 3, len(buffer))
+    tail = np.fromiter(itertools.islice(reversed(buffer), take), dtype=np.int16, count=take)[::-1]
+    features.melspectrogram_buffer = np.vstack(
+        (features.melspectrogram_buffer, features._get_melspectrogram(tail))
+    )
+    if features.melspectrogram_buffer.shape[0] > features.melspectrogram_max_len:
+        features.melspectrogram_buffer = features.melspectrogram_buffer[-features.melspectrogram_max_len:, :]
+
+
+def _read_tail_in_place(features) -> bool:  # noqa: ANN001 - openwakeword.utils.AudioFeatures
+    """Bind ``_tail_melspectrogram`` to one preprocessor instance.
+
+    The instance, not the class: the speech gate carries its own copy of
+    the library and is left as it is. A preprocessor of another shape (a
+    future openWakeWord) is left alone too, and says so once, rather than
+    fail on the first frame."""
+    needed = ("raw_data_buffer", "melspectrogram_buffer", "melspectrogram_max_len", "_get_melspectrogram", "_streaming_melspectrogram")
+    if not all(hasattr(features, name) for name in needed):
+        log.warning("wake word: openWakeWord's preprocessor has changed shape; the buffer copy is left in place")
+        return False
+    features._streaming_melspectrogram = types.MethodType(_tail_melspectrogram, features)
+    return True
+
+
 class OpenWakeWord:
     """Hands-free wake via openWakeWord.
 
@@ -132,6 +174,20 @@ class OpenWakeWord:
     skipped, ``scripts/probe_wake_model.py`` qualifies the model before it
     goes live, and the spoken ready line takes the wake phrase from the
     path's stem.
+
+    This is the one model that runs whether or not anyone is speaking, so
+    its cost is the frame loop's idle cost. Measured 2026-09-12 on the
+    spoke's Mac with synthetic room noise: 38 ms of CPU per second, a third
+    of it not inference but a copy — openWakeWord keeps ten seconds of audio
+    in a deque of Python ints and, every 80 ms, turned the whole deque into a
+    list to take its last 1,760 samples. ``start`` replaces that one method
+    on this detector's preprocessor with ``_tail_melspectrogram``, which
+    walks the deque from its tail instead (28 µs against a millisecond),
+    and openWakeWord's own Silero gate is off unless ``vad_threshold`` asks
+    for it: the library runs it *after* the wake model, so it saved no
+    inference and cost another fifth. Feeding 80 ms chunks instead of 30 ms
+    frames was measured too and changed nothing — the library already
+    accumulates frames before its expensive path.
     """
 
     source = "spoken"
@@ -140,7 +196,7 @@ class OpenWakeWord:
         self,
         model: str = "hey_jarvis",
         threshold: float = 0.5,
-        vad_threshold: float = 0.3,
+        vad_threshold: float = 0.0,
     ) -> None:
         self._model_name = model
         self._threshold = threshold
@@ -173,6 +229,7 @@ class OpenWakeWord:
             inference_framework="onnx",
             vad_threshold=self._vad_threshold,
         )
+        _read_tail_in_place(self._model.preprocessor)
         # A custom model arrives as a path; its stem is the phrase — same
         # rule as the spoken ready line, because the log tells the truth in
         # the same words.

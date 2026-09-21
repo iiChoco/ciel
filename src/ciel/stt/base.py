@@ -7,9 +7,30 @@ without the pipeline knowing which one it's talking to.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+import asyncio
+from typing import Callable, Protocol, runtime_checkable
 
 import numpy as np
+
+
+async def owned_decode(lock: asyncio.Lock, decode: Callable[..., str], *args: object) -> str:
+    """Run one synchronous decode in a worker thread, one at a time.
+
+    The engines serialize inference behind a lock because two decodes on
+    the same GPU (or the same CPU threads) are slower than two in a row.
+    ``async with lock: await to_thread(...)`` does not keep that promise:
+    cancelling the coroutine — a dismissed dictation, a barge-in — releases
+    the lock while the thread it started is still decoding, and the next
+    caller enters beside it. So the lock is owned by the *worker*, not the
+    awaiting coroutine: it is released when the thread returns, whoever is
+    still listening. The caller's cancellation stays prompt (the wait is
+    shielded, the ``CancelledError`` re-raised at once) and its result is
+    simply dropped; the caller after it waits its turn.
+    """
+    await lock.acquire()
+    worker = asyncio.ensure_future(asyncio.to_thread(decode, *args))
+    worker.add_done_callback(lambda _: lock.release())
+    return await asyncio.shield(worker)
 
 
 @runtime_checkable
@@ -36,3 +57,6 @@ class SpeechToText(Protocol):
 
     async def close(self) -> None:
         ...
+
+
+__all__ = ["SpeechToText", "owned_decode"]

@@ -15,6 +15,7 @@ import time
 import numpy as np
 
 from ciel.config import SAMPLE_RATE, STTConfig
+from ciel.stt.base import owned_decode
 from ciel.stt.hallucinations import collapse_repetition, looks_hallucinated, normalize
 
 log = logging.getLogger(__name__)
@@ -69,10 +70,11 @@ class WhisperSTT:
             await self.warm_up()
 
         # One decode at a time. Two concurrent calls would contend for the same
-        # CPU threads and make both slower than running them back to back.
-        async with self._lock:
-            started = time.monotonic()
-            text = await asyncio.to_thread(self._transcribe_sync, pcm)
+        # CPU threads and make both slower than running them back to back. The
+        # lock belongs to the worker thread, not to this coroutine, so a
+        # caller cancelled mid-decode cannot let the next one in beside it.
+        started = time.monotonic()
+        text = await owned_decode(self._lock, self._transcribe_sync, pcm)
 
         elapsed = time.monotonic() - started
         audio_s = len(pcm) / SAMPLE_RATE

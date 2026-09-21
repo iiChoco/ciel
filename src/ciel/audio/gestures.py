@@ -22,6 +22,12 @@ boundaries live on :class:`ciel.config.GestureConfig` and were read off
 one room on 2026-09-06; ``scripts/listen_gestures.py`` re-reads them in
 another.
 
+The quiet room is the common case. The high-pass recurrence keeps its
+sample order, while envelope roots and peak eligibility run a frame at a
+time. Only possible impulses enter the stateful scan; the rules and their
+timing remain the same. This avoids scalar NumPy dispatch for every sample
+and a Python branch for every point in the envelope.
+
 Invariants:
 
 - **Frames in, observations out.** :meth:`GestureDetector.push` takes one
@@ -193,13 +199,22 @@ class GestureDetector:
 
     def _filter(self, samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         hp, env = np.empty(len(samples)), np.empty(len(samples))
-        for i, x in enumerate(samples):
-            y = self._alpha * (self._prev_y + x - self._prev_x)
-            self._prev_x, self._prev_y = x, y
+        alpha = float(self._alpha)
+        prev_x, prev_y, total = self._prev_x, self._prev_y, self._sum
+        squares = self._squares
+        # The recurrence still crosses every sample in order. Python floats
+        # avoid NumPy's scalar dispatch; the independent roots run together.
+        for i, x in enumerate(samples.tolist()):
+            y = alpha * (prev_y + x - prev_x)
+            prev_x, prev_y = x, y
             square = y * y
-            self._sum += square - self._squares[0]
-            self._squares.append(square)
-            hp[i], env[i] = y, np.sqrt(max(self._sum, 0) / _ENV)
+            total += square - squares[0]
+            squares.append(square)
+            hp[i], env[i] = y, total
+        self._prev_x, self._prev_y, self._sum = prev_x, prev_y, total
+        np.maximum(env, 0, out=env)
+        env /= _ENV
+        np.sqrt(env, out=env)
         return hp, env
 
     def push(self, frame: bytes) -> list[Observation]:
@@ -223,14 +238,21 @@ class GestureDetector:
         c = self.config
         floor = float(np.median(self._ambient)) if self._ambient else 0.001
         rows: list[Observation] = []
-        for p in range(low, high):
+        peaks = self._env[low:high]
+        candidates = np.flatnonzero(
+            (peaks > self._env[low - 1:high - 1])
+            & (peaks >= self._env[low + 1:high + 1])
+            & (peaks >= max(c.min_peak, c.noise_ratio * floor))
+        )
+        # Only possible impulses need the stateful scan. Keep their order so
+        # the refractory period and exclusive pairs see the same history.
+        for offset in candidates:
+            p = low + int(offset)
             sample = base + p
             if sample * 1000 / SAMPLE_RATE < c.warmup_ms:
                 continue
             peak = float(self._env[p])
-            if not (peak > self._env[p - 1] and peak >= self._env[p + 1]):
-                continue
-            if peak < max(c.min_peak, c.noise_ratio * floor, c.rise_ratio * self._env[p - _RISE]):
+            if peak < c.rise_ratio * self._env[p - _RISE]:
                 continue
             # A small leading ripple must not consume the refractory period
             # before the actual impulse reaches its peak a millisecond later.

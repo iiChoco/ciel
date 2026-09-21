@@ -18,6 +18,12 @@ weights openWakeWord ships, that a second and a half of silence and two
 seconds of room noise never reach the threshold. Real speech is not
 synthesized here; the calibration behind the threshold is in
 ``reports/2026-09-08-sentences-nobody-said.md``.
+
+The engines' own promise — one decode at a time — holds across
+cancellation: with a fake worker in place of inference, a caller
+cancelled mid-decode returns at once, the worker it started keeps the
+engine until it finishes, and the next caller waits its turn rather than
+decoding beside it. Pinned for both engines, no model loaded.
 """
 
 import asyncio
@@ -185,8 +191,59 @@ async def _gate_checks() -> None:
     check("nor in two seconds of room noise", hiss is not None and hiss < 0.5)
 
 
+async def _cancellation_checks() -> None:
+    print("one decode at a time, across cancellation:")
+    import threading
+    import time
+    from ciel.stt.local_mlx import MlxWhisperSTT
+    from ciel.stt.local_whisper import WhisperSTT
+
+    for engine_type in (MlxWhisperSTT, WhisperSTT):
+        engine = engine_type(STTConfig())
+        engine._warmed = True
+        engine._model = object()
+        gate, first_entered, second_entered = threading.Event(), threading.Event(), threading.Event()
+        mutex = threading.Lock()
+        counts = {"active": 0, "peak": 0, "total": 0}
+
+        def decode(pcm: np.ndarray) -> str:
+            with mutex:
+                counts["active"] += 1
+                counts["total"] += 1
+                counts["peak"] = max(counts["peak"], counts["active"])
+                (first_entered if counts["total"] == 1 else second_entered).set()
+            try:
+                gate.wait(2)
+                return "fixture transcript"
+            finally:
+                with mutex:
+                    counts["active"] -= 1
+
+        engine._transcribe_sync = decode
+        first = asyncio.create_task(engine.transcribe(np.zeros(160, dtype=np.float32)))
+        assert await asyncio.to_thread(first_entered.wait, 1)
+        started = time.monotonic()
+        first.cancel()
+        try:
+            await first
+        except asyncio.CancelledError:
+            pass
+        returned_in = time.monotonic() - started
+        second = asyncio.create_task(engine.transcribe(np.zeros(160, dtype=np.float32)))
+        entered_early = await asyncio.to_thread(second_entered.wait, 0.2)
+        held = engine._lock.locked()
+        gate.set()
+        text = await second
+        check(f"{engine_type.__name__}: a cancelled caller returns at once while its decode still runs",
+              returned_in < 0.5 and counts["total"] >= 1)
+        check(f"{engine_type.__name__}: the next caller waits for that decode instead of running beside it",
+              not entered_early and held and counts["peak"] == 1 and text == "fixture transcript" and counts["total"] == 2)
+        check(f"{engine_type.__name__}: the engine is free again once both are done", not engine._lock.locked())
+
+
 def main() -> int:
     asyncio.run(_gate_checks())
+    asyncio.run(_cancellation_checks())
     hallucination_checks()
     loop_checks()
     print(f"\nall {len(CHECKS)} checks passed")

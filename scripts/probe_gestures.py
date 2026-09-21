@@ -8,6 +8,10 @@ reset and EOF, and CLI output. Feature records separately pin the boundaries
 reported in the supplied comparison script. Real hand-sound accuracy remains
 unmeasured; neither tone fixtures nor threshold checks establish it.
 
+The filter also matches its analytical high-pass response and sixteen-sample
+RMS envelope across cutoff settings. Uneven chunks and an empty chunk preserve
+sample history, clear retains it, and reset restores a fresh ear.
+
 The wake half pins how the ear sits beside the wake word: a snap or a double
 clap wakes only when its switch is on, a lone clap never wakes, a turn's reset
 forgets a half-made pair without going deaf, the wake-word model still sees
@@ -66,7 +70,10 @@ from ciel.audio.audioset import AudioSetVeto, VETO_CLASSES, WINDOW_SAMPLES, YAMN
 from ciel.audio.gestures import GestureDetector, Measurement, Observation, classify, first_of
 from ciel.audio.keys import KeyboardVeto
 from ciel import music
-from ciel.audio.wake import AnyWake, GestureWake, HotkeyWake, build_wake_detector, wake_phrases
+from ciel.audio.wake import (
+    AnyWake, GestureWake, HotkeyWake, OpenWakeWord, _read_tail_in_place, _tail_melspectrogram,
+    build_wake_detector, wake_phrases,
+)
 from ciel.config import FRAME_BYTES, SAMPLE_RATE, AudioConfig, Config, GestureConfig, WakeConfig, load_config
 
 CHECKS: list[str] = []
@@ -114,7 +121,44 @@ def kinds(sounds: list[tuple[float, str]]) -> list[str]:
     return gestures(feed(recording(sounds)))
 
 
+def probe_filter() -> None:
+    rng = np.random.default_rng(227)
+    samples = np.concatenate((np.zeros(37), rng.integers(-32768, 32768, 2048) / 32768, np.zeros(511)))
+    response_ok = envelope_ok = chunks_ok = True
+    for cutoff in (1.0, GestureConfig().highpass_hz, 7999.0):
+        config = replace(GestureConfig(), highpass_hz=cutoff)
+        whole = GestureDetector(config)
+        hp, env = whole._filter(samples)
+        alpha = 1 / (1 + 2 * np.pi * cutoff / SAMPLE_RATE)
+        expected = np.convolve(np.diff(samples, prepend=0), alpha ** np.arange(1, len(samples) + 1))[:len(samples)]
+        response_ok &= np.allclose(hp, expected, rtol=1e-12, atol=1e-13)
+        envelope = np.sqrt(np.convolve(hp ** 2, np.ones(16) / 16)[:len(samples)])
+        envelope_ok &= np.isfinite(env).all() and np.allclose(env, envelope, rtol=1e-11, atol=2e-8)
+        split = GestureDetector(config)
+        parts = [split._filter(part) for part in np.split(samples, [0, 1, 16, 31, 479, 480, 1023])]
+        chunks_ok &= np.array_equal(hp, np.concatenate([part[0] for part in parts]))
+        chunks_ok &= np.array_equal(env, np.concatenate([part[1] for part in parts]))
+    check('the high-pass follows its analytical response across cutoff settings', bool(response_ok))
+    check('the envelope measures sixteen samples of power through sound and silence', bool(envelope_ok))
+    check('uneven filter chunks preserve every sample and envelope value', bool(chunks_ok))
+    expected = GestureDetector()._filter(samples)
+    detector = GestureDetector()
+    first = detector._filter(samples[:480]); detector.clear()
+    second = detector._filter(samples[480:])
+    check('clearing a pending gesture leaves filter history continuous', all(
+        np.array_equal(expected[i], np.concatenate((first[i], second[i]))) for i in (0, 1)))
+    detector.reset()
+    reset = detector._filter(samples)
+    check('resetting after loud audio restores a fresh filter', all(np.array_equal(a, b) for a, b in zip(expected, reset)))
+    detector = GestureDetector()
+    empty = detector._filter(np.empty(0))
+    after_empty = detector._filter(samples)
+    check('an empty filter chunk consumes no history', all(len(a) == 0 for a in empty)
+          and all(np.array_equal(a, b) for a, b in zip(expected, after_empty)))
+
+
 def main() -> None:
+    probe_filter()
     c = GestureConfig()
     snap = Measurement(1, .1, 2, 2.5, 20)
     clap = Measurement(1, .6, 2, 1, 5)
@@ -649,6 +693,59 @@ def main() -> None:
         else:
             check('a custom path that does not exist says so', False)
     check('the pretrained model is pinned by hash', len(YAMNET_SHA256) == 64)
+
+    # ── what the wake word costs ─────────────────────────────────────────────
+    from collections import deque
+    from types import SimpleNamespace
+    from openwakeword.utils import AudioFeatures
+
+    def preprocessor(samples: int, ceiling: int = 10 ** 6) -> SimpleNamespace:
+        fake = SimpleNamespace(
+            raw_data_buffer=deque(((i * 7919) % 60000) - 30000 for i in range(samples)),
+            melspectrogram_buffer=np.zeros((0, 32), dtype=np.float32),
+            melspectrogram_max_len=ceiling,
+            seen=[],
+        )
+
+        def melspec(x):
+            rows = np.asarray(x, dtype=np.float32)
+            fake.seen.append(rows.astype(int).tolist())
+            return np.repeat(rows[:8, None], 32, axis=1)
+
+        fake._get_melspectrogram = melspec
+        return fake
+
+    ours, theirs = preprocessor(160_000), preprocessor(160_000)
+    _tail_melspectrogram(ours, 1280)
+    AudioFeatures._streaming_melspectrogram(theirs, 1280)
+    check('the tail read hands the melspectrogram the last 1,760 samples, in order',
+          ours.seen == [list(ours.raw_data_buffer)[-1760:]])
+    check("the tail read matches openWakeWord's own copy sample for sample",
+          ours.seen == theirs.seen and np.array_equal(ours.melspectrogram_buffer, theirs.melspectrogram_buffer))
+    try:
+        _tail_melspectrogram(preprocessor(399), 1280)
+    except ValueError as exc:
+        check("a buffer under 400 samples is refused in the library's words", 'at least 400 samples' in str(exc))
+    else:
+        check("a buffer under 400 samples is refused in the library's words", False)
+    short = preprocessor(1000)
+    _tail_melspectrogram(short, 1280)
+    check('a short buffer is read whole, never past its start', short.seen == [list(short.raw_data_buffer)])
+    ours, theirs = preprocessor(160_000, ceiling=5), preprocessor(160_000, ceiling=5)
+    for n in (1280, 1280):
+        _tail_melspectrogram(ours, n)
+        AudioFeatures._streaming_melspectrogram(theirs, n)
+    check('the melspectrogram buffer is still trimmed to its ceiling',
+          ours.melspectrogram_buffer.shape == (5, 32) and np.array_equal(ours.melspectrogram_buffer, theirs.melspectrogram_buffer))
+    library = AudioFeatures._streaming_melspectrogram
+    bound = preprocessor(2000)
+    bound._streaming_melspectrogram = None
+    check("the tail read binds to one preprocessor and leaves the library's class alone",
+          _read_tail_in_place(bound) and bound._streaming_melspectrogram.__func__ is _tail_melspectrogram
+          and AudioFeatures._streaming_melspectrogram is library)
+    check('a preprocessor of another shape is left as it was', _read_tail_in_place(SimpleNamespace()) is False)
+    check("openWakeWord's own gate is off unless asked for",
+          WakeConfig().vad_threshold == 0.0 and OpenWakeWord()._vad_threshold == 0.0)
     print(f'\nall {len(CHECKS)} checks passed')
 
 
