@@ -6,19 +6,32 @@ identity belongs to the draft: retries after a lost receipt cannot create a
 second memory, and two ideas with the same opening cannot overwrite each other.
 
 **A draft is not a receipt.** The Mac keeps an owner-only scratchpad across
-Escape and process restarts. Only the memory writer's positive receipt clears
-it. Split mode writes on the hub; local mode uses the same writer directly.
+unexpected process restarts. Explicit dismissal discards it; a positive memory
+receipt clears it after saving. Split mode writes on the hub; local mode uses the same writer directly.
 No note contents enter logs, conversation history, or a public broadcast.
 
 **AppKit owns a separate process.** JSON lines carry show, save, and receipt
 messages. A broken window cannot take the microphone down with it. The native
 view lives in ``ui/notes.py``; this module can be probed without a display.
+
+**Recent means confirmed.** The Mac's bounded history records only positive
+memory receipts. Manual dictation borrows idle microphone frames and returns
+text to the editor, never a voice turn. Capture is bounded, cancellation drops
+its bytes, and an old transcript cannot enter a newly opened draft.
+
+**A receipt reports the write, not the index.** A note's file is looked up
+by the exact path its id names — never by a scan of every memory for a
+name that could only be there — and once it is written the receipt is
+positive; the human index is rebuilt after, and a failure there is a
+warning, not a lost note. On the hub this runs inside the socket callback,
+so every memory read here is a read the room waits for.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import math
 import re
 import sys
 import time
@@ -44,7 +57,7 @@ def save_note(store: MemoryStore | None, config: NotesConfig, note_id: str, text
     path = store.directory / f"note-{note_id}.md"
     try:
         with exclusive_lock(path):
-            existing = store.get(path.stem)
+            existing = store._read(path) if path.exists() else None
             if existing is not None:
                 if existing.context != "note" or existing.content != text.strip():
                     return {**result, "error": "This note already has a different saved version; reopen and edit to save a new note."}
@@ -53,7 +66,10 @@ def save_note(store: MemoryStore | None, config: NotesConfig, note_id: str, text
                 memory = Memory(path.stem, f"Note: {first}", "reference", text,
                                 time.time(), path, context="note")
                 atomic_write(path, memory.to_markdown(), mode=0o600)
-            store._write_human_index()
+            try:
+                store._write_human_index()
+            except OSError:
+                log.warning("the note was saved but the human index could not be rewritten", exc_info=True)
         return {**result, "ok": True}
     except OSError:
         log.warning("note storage failed; the draft remains on the Mac")
@@ -85,9 +101,12 @@ class Draft:
     def receipt(self, result: dict[str, Any]) -> bool:
         if result.get("note_id") != self.note_id or result.get("ok") is not True:
             return False
+        self.discard()
+        return True
+
+    def discard(self) -> None:
         self.path.unlink(missing_ok=True)
         self.text, self.note_id = "", ""
-        return True
 
 
 class NoteRelay:
@@ -120,23 +139,140 @@ class NoteRelay:
             future.set_result(frame)
 
 
+@dataclass
+class NoteHistory:
+    """A bounded local receipt history; unacknowledged drafts never enter it."""
+
+    path: Path
+    limit: int = 100
+    max_chars: int = 16000
+
+    def recent(self) -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        rows = json.loads(self.path.read_text(encoding='utf-8'))
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) or not _ID.fullmatch(str(row.get('note_id', ''))) or
+            not isinstance(row.get('text'), str) or len(row['text']) > self.max_chars or
+            not isinstance(row.get('saved_at'), (int, float)) or not math.isfinite(row['saved_at']) or
+            not 0 <= row['saved_at'] <= 253402214400 for row in rows
+        ):
+            raise ValueError('Invalid recent-note history')
+        return rows[:max(0, min(self.limit, 1000))]
+
+    def remember(self, note_id: str, text: str) -> None:
+        if not _ID.fullmatch(note_id) or not text.strip() or len(text) > self.max_chars:
+            raise ValueError('Invalid confirmed note')
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with exclusive_lock(self.path):
+            rows = self.recent()
+            if any(row['note_id'] == note_id for row in rows):
+                return
+            rows.insert(0, {'note_id': note_id, 'text': text, 'saved_at': time.time()})
+            atomic_write(self.path, json.dumps(rows[:max(0, min(self.limit, 1000))], ensure_ascii=False), mode=0o600)
+
+
+class NoteDictation:
+    """Manual capture borrows idle microphone frames and never starts a turn."""
+
+    def __init__(self, transcribe: Callable[[Any], Awaitable[str]] | None,
+                 available: Callable[[], bool], send: Callable[[dict[str, Any]], None], max_s: float) -> None:
+        self.transcribe, self.available, self.send = transcribe, available, send
+        self.max_s = min(300.0, max(1.0, max_s))
+        self.session = ''
+        self.pcm: bytearray | None = None
+        self.deadline: asyncio.TimerHandle | None = None
+        self.task: asyncio.Task[None] | None = None
+
+    def control(self, frame: dict[str, Any]) -> None:
+        session = str(frame.get('session', ''))
+        action = frame.get('action')
+        if action == 'start':
+            if not _ID.fullmatch(session):
+                return
+            if self.session or self.transcribe is None or not self.available():
+                self.send({'type': 'note.dictation.result', 'session': session, 'error': 'Dictation needs Ciel idle and unmuted.'})
+                return
+            self.session, self.pcm = session, bytearray()
+            self.deadline = asyncio.get_running_loop().call_later(self.max_s, self.stop)
+            self.send({'type': 'note.dictation.state', 'session': session, 'state': 'listening'})
+        elif session == self.session:
+            if action == 'stop':
+                self.stop()
+            elif action == 'cancel':
+                self.cancel()
+
+    def feed(self, frame: bytes) -> bool:
+        if not self.session:
+            return False
+        if not self.available():
+            session = self.session
+            self.cancel()
+            self.send({'type': 'note.dictation.result', 'session': session, 'error': 'Dictation stopped because Ciel is busy or muted.'})
+            return False
+        if self.pcm is not None:
+            remaining = max(0, int(self.max_s * 16000) * 2 - len(self.pcm))
+            self.pcm.extend(frame[:remaining])
+            if len(frame) >= remaining:
+                self.stop()
+        return True
+
+    def stop(self) -> None:
+        if not self.session or self.pcm is None:
+            return
+        if self.deadline is not None:
+            self.deadline.cancel()
+            self.deadline = None
+        pcm, self.pcm = bytes(self.pcm), None
+        self.send({'type': 'note.dictation.state', 'session': self.session, 'state': 'transcribing'})
+        self.task = asyncio.create_task(self.finish(self.session, pcm))
+
+    async def finish(self, session: str, pcm: bytes) -> None:
+        import numpy as np
+        try:
+            text = await self.transcribe(np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0) if pcm else ''
+            result = {'type': 'note.dictation.result', 'session': session, 'text': text}
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            result = {'type': 'note.dictation.result', 'session': session, 'error': 'Dictation failed. Your typed draft is still here.'}
+        if self.session == session:
+            self.session, self.task = '', None
+            self.send(result)
+
+    def cancel(self) -> None:
+        self.session, self.pcm = '', None
+        if self.deadline is not None:
+            self.deadline.cancel()
+            self.deadline = None
+        if self.task is not None:
+            self.task.cancel()
+            self.task = None
+
+
 class NoteWindow:
-    def __init__(self, config: NotesConfig, save: Callable[[str, str], Awaitable[dict[str, Any]]]) -> None:
+    def __init__(self, config: NotesConfig, save: Callable[[str, str], Awaitable[dict[str, Any]]],
+                 transcribe: Callable[[Any], Awaitable[str]] | None = None,
+                 can_dictate: Callable[[], bool] = lambda: False) -> None:
         self._config = config
         self._save = save
         self._proc: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task[None] | None = None
+        self.history = NoteHistory(config.dir / 'history.json', config.history_limit, config.max_chars)
+        self.dictation = NoteDictation(transcribe, lambda: self._proc is not None and self._proc.returncode is None and can_dictate(), self._write, config.dictation_max_s)
 
     async def show(self) -> None:
         if not self._config.enabled or sys.platform != "darwin":
             return
         if self._proc is None or self._proc.returncode is not None:
+            self.dictation.cancel()
             if self._reader is not None:
                 self._reader.cancel()
                 await asyncio.gather(self._reader, return_exceptions=True)
             self._proc = await asyncio.create_subprocess_exec(
                 sys.executable, "-m", "ciel.ui.notes",
-                json.dumps({"dir": str(self._config.dir), "max_chars": self._config.max_chars}),
+                json.dumps({"dir": str(self._config.dir), "max_chars": self._config.max_chars,
+                            "undo_discard_s": self._config.undo_discard_s}),
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL, limit=max(65536, self._config.max_chars * 12),
             )
@@ -156,17 +292,34 @@ class NoteWindow:
         while line := await proc.stdout.readline():
             try:
                 frame = json.loads(line)
+                if frame.get("type") == "note.history":
+                    try:
+                        items = await asyncio.to_thread(self.history.recent)
+                        self._write({"type": "note.history.result", "items": items})
+                    except (OSError, ValueError):
+                        self._write({"type": "note.history.result", "items": [], "error": "Recent notes could not be read."})
+                    continue
+                if frame.get("type") == "note.dictation":
+                    self.dictation.control(frame)
+                    continue
                 if frame.get("type") != "note.save":
                     continue
                 result = await self._save(frame["note_id"], frame["text"])
+                if result.get('ok') is True:
+                    try:
+                        await asyncio.to_thread(self.history.remember, frame['note_id'], frame['text'])
+                    except (OSError, ValueError):
+                        result = {**result, 'history_error': 'Saved, but recent notes could not be updated.'}
                 self._write(result)
             except (ValueError, KeyError):
                 log.warning("invalid note window message")
             except Exception:
                 self._write({"type": "note.result", "note_id": frame.get("note_id", ""), "ok": False,
                              "error": "Saving failed. Your draft is still here; try again."})
+        self.dictation.cancel()
 
     async def close(self) -> None:
+        self.dictation.cancel()
         self._write({"type": "quit"})
         proc, self._proc = self._proc, None
         if self._reader is not None:
