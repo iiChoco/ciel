@@ -49,6 +49,11 @@ PREFIX = "/interview"
 _REMOTE = Path(__file__).resolve().parents[1] / "remote"
 _PAGE = _REMOTE / "interview.html"
 _SCRIPT = _REMOTE / "interview.js"
+# The living mark has one source: the engine inlined in the Chart. The room
+# serves that block as a script of its own instead of keeping a second copy.
+_CHART = _REMOTE / "chart.html"
+_MARK_OPEN = "/* Ciel symbol engine v2"
+_MARK_CLOSE = "})(typeof window !== 'undefined' ? window : this);"
 
 _LOGIN_WINDOW_S = 900.0
 _LOGIN_LIMIT = 5
@@ -147,6 +152,7 @@ class InterviewApp:
         router.add_get(PREFIX, self._serve_page)
         router.add_get(f"{PREFIX}/", self._serve_page)
         router.add_get(f"{PREFIX}/app.js", self._serve_script)
+        router.add_get(f"{PREFIX}/mark.js", self._serve_mark)
         router.add_post(f"{api}/login", self._login)
         router.add_post(f"{api}/logout", self._logout)
         router.add_get(f"{api}/me", self._me)
@@ -288,6 +294,25 @@ class InterviewApp:
 
     async def _serve_script(self, request: Any) -> Any:
         return await self._serve_file(_SCRIPT, "application/javascript")
+
+    async def _serve_mark(self, request: Any) -> Any:
+        from aiohttp import web
+
+        try:
+            chart = await asyncio.to_thread(_CHART.read_text, "utf-8")
+        except OSError:
+            log.exception("could not read %s", _CHART.name)
+            raise web.HTTPNotFound
+        start, end = chart.find(_MARK_OPEN), chart.find(_MARK_CLOSE)
+        if start < 0 or end < start:
+            # The page keeps its still marks; a Chart without the engine is
+            # worth a line in the log, not a broken room.
+            log.error("the mark engine is not where %s should hold it", _CHART.name)
+            raise web.HTTPNotFound
+        return web.Response(
+            text=chart[start:end + len(_MARK_CLOSE)] + "\n", content_type="application/javascript",
+            headers={"Cache-Control": "no-store"},
+        )
 
     # ── auth ─────────────────────────────────────────────────────────────────
 

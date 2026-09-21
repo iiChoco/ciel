@@ -8,7 +8,9 @@
      mono captions, serif for what Ciel says, scanlines, corner brackets.
      Two rules the room adds: red is only ever REC, and the still-listening
      ring is the listening green filling a plain circle — a timer, not a
-     control. Ciel's aperture breathes while she speaks.
+     control. The marks are Ciel's living mark, drawn by the Chart's engine
+     (served here as /interview/mark.js): small ones are what lives inside
+     the iris and follow her state, the closing one is the whole instrument.
 
      Design: the owner's Claude Design project "Ciel Interview" (the 'a'
      variants), translated from fixed artboards into a responsive page. -->
@@ -17,7 +19,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ciel · Interview</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Ccircle cx='64' cy='64' r='58' fill='none' stroke='%23e8c98a' stroke-opacity='.5' stroke-width='7' stroke-dasharray='4 12'/%3E%3Ccircle cx='64' cy='64' r='34' fill='none' stroke='%23a0f0ff' stroke-opacity='.7' stroke-width='7'/%3E%3Ccircle cx='64' cy='64' r='12' fill='%23e8c98a'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128' fill='none'%3E%3Ccircle cx='64' cy='64' r='62' fill='%23030608'/%3E%3Cg stroke='%23b6c6cd' stroke-width='6'%3E%3Cellipse cx='64' cy='64' rx='50' ry='19' transform='rotate(-38 64 64)'/%3E%3Cellipse cx='64' cy='64' rx='43' ry='15' transform='rotate(38 64 64)'/%3E%3Cellipse cx='64' cy='64' rx='36' ry='12' transform='rotate(90 64 64)'/%3E%3C/g%3E%3Ccircle cx='64' cy='64' r='6' fill='%23fff'/%3E%3C/svg%3E">
 <style>
   :root {
     --line: rgba(140, 240, 255, .14);
@@ -70,9 +72,6 @@
   [hidden] { display: none !important; }
 
   @keyframes br { 0%, 100% { opacity: .45; transform: scale(.88); } 50% { opacity: 1; transform: scale(1.08); } }
-  @keyframes ap1 { 0%, 100% { transform: scale(1); opacity: .55; } 50% { transform: scale(1.18); opacity: .95; } }
-  @keyframes ap2 { 0%, 100% { transform: scale(1); opacity: .5; } 40% { transform: scale(1.32); opacity: .9; } }
-  @keyframes ap3 { 0%, 100% { transform: scale(1); opacity: .35; } 60% { transform: scale(1.5); opacity: .7; } }
   @keyframes rec { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
   @keyframes cursor { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 
@@ -141,14 +140,14 @@
   .brand { display: flex; align-items: center; gap: 12px; }
   .brand .wordmark { font: 400 18px/1 var(--serif); letter-spacing: .24em; color: #f3efe6; }
   .brand .sub { font: 500 9.5px/1 var(--mono); letter-spacing: .26em; color: rgba(160, 214, 235, .5); }
-  .aperture { overflow: visible; }
-  .aperture circle { transform-box: fill-box; transform-origin: center; }
-  .aperture .c-outer { stroke: rgba(232, 201, 138, .35); }
-  .aperture .c-mid { stroke: rgba(160, 240, 255, .5); }
-  .aperture .c-core { fill: rgba(232, 201, 138, .85); }
-  body[data-state="speaking"] .aperture .c-outer { animation: ap3 2.2s ease-in-out infinite; }
-  body[data-state="speaking"] .aperture .c-mid { animation: ap2 1.7s ease-in-out infinite; }
-  body[data-state="speaking"] .aperture .c-core { animation: ap1 1.1s ease-in-out infinite; }
+  /* The mark is drawn twice in one box: a still SVG that needs no script,
+     and the living canvas that takes its place once the engine has started. */
+  .brand-mark { position: relative; display: block; width: 26px; height: 26px; flex: none; }
+  .brand-mark > * { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+  .brand-mark.login-mark { width: 44px; height: 44px; }
+  .mark-live { visibility: hidden; }
+  .mark-on .mark-live { visibility: visible; }
+  .mark-on .mark-still { visibility: hidden; }
   .spacer { flex: 1; }
   #rec { display: none; align-items: center; gap: 8px; font: 600 10px/1 var(--mono); letter-spacing: .22em; color: rgba(232, 138, 138, .9); }
   #rec .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--rec); box-shadow: 0 0 8px rgba(232, 138, 138, .7); animation: rec 1.6s ease-in-out infinite; }
@@ -163,12 +162,10 @@
   /* ── closing: the held breath ────────────────────────────────────────── */
   .cl-stage { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 48px; min-height: 0; }
   .cl-inner { width: 100%; max-width: 620px; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 32px; }
-  .cl-mark { width: 88px; height: 88px; }
-  .cl-breathe .c-outer { animation: ap3 6.6s ease-in-out infinite; }
-  .cl-breathe .c-mid { animation: ap2 5.1s ease-in-out infinite; }
-  .cl-breathe .c-core { animation: ap1 3.3s ease-in-out infinite; }
-  section[data-view="closing"][data-failed="1"] .cl-breathe circle { animation: none; }
-  section[data-view="closing"][data-failed="1"] .cl-breathe .c-core { fill: rgba(232, 201, 138, .35); }
+  /* The whole instrument letters its own ring at no less than 8px, so it needs
+     more room than the glyph it replaced or the readouts crowd the disc. */
+  .brand-mark.cl-mark { width: 200px; height: 200px; transition: opacity .6s ease; }
+  section[data-view="closing"][data-failed="1"] .cl-mark { opacity: .45; }
   .cl-quote { margin: 0; font: 400 24px/1.45 var(--serif); color: rgba(247, 242, 231, .78); text-wrap: pretty; max-width: 560px; }
   .cl-quote::before { content: "\201C"; color: var(--gold-dim); }
   .cl-quote::after { content: "\201D"; color: var(--gold-dim); }
@@ -187,7 +184,7 @@
   .cl-fail .msg { font: 400 15px/1.5 var(--serif); color: var(--gold-soft); text-wrap: pretty; max-width: 460px; }
   .cl-fail .row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
   body:not([data-view="live"]):not([data-view="closing"]) #state-chip { display: none; }
-  @media (max-width: 640px) { .cl-stage { padding: 28px 16px; } .cl-quote { font-size: 20px; } .cl-mark { width: 64px; height: 64px; } }
+  @media (max-width: 640px) { .cl-stage { padding: 28px 16px; } .cl-quote { font-size: 20px; } .brand-mark.cl-mark { width: 160px; height: 160px; } }
   body[data-view="login"] #whoami, body[data-view="login"] #nav-logout { display: none; }
   #password-dialog { position: fixed; inset: 0; z-index: 60; display: none; align-items: center; justify-content: center; background: rgba(3, 6, 8, .75); }
   #password-dialog[data-show="1"] { display: flex; }
@@ -546,11 +543,7 @@
 
 <header>
   <div class="brand">
-    <svg class="aperture" width="26" height="26" viewBox="0 0 128 128" aria-hidden="true">
-      <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
-      <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
-      <circle class="c-core" cx="64" cy="64" r="10"/>
-    </svg>
+    <span class="brand-mark"><svg class="mark-still" viewBox="0 0 128 128" fill="none" aria-hidden="true"><g stroke="#b6c6cd" stroke-opacity=".75" stroke-width="4"><ellipse cx="64" cy="64" rx="46" ry="17" transform="rotate(-38 64 64)"/><ellipse cx="64" cy="64" rx="40" ry="14" transform="rotate(38 64 64)"/><ellipse cx="64" cy="64" rx="33" ry="11" transform="rotate(90 64 64)"/></g><circle cx="64" cy="64" r="4" fill="#fff"/></svg><canvas class="mark-live" aria-hidden="true"></canvas></span>
     <span class="wordmark">Ciel</span>
     <span class="sub" id="brand-sub">INTERVIEW</span>
   </div>
@@ -576,11 +569,7 @@
 <section data-view="login">
   <form id="login-form" autocomplete="on">
     <div class="mark">
-      <svg width="44" height="44" viewBox="0 0 128 128" aria-hidden="true">
-        <circle cx="64" cy="64" r="58" fill="none" stroke="rgba(232,201,138,.35)" stroke-width="5" stroke-dasharray="4 12"/>
-        <circle cx="64" cy="64" r="34" fill="none" stroke="rgba(160,240,255,.5)" stroke-width="5"/>
-        <circle cx="64" cy="64" r="10" fill="rgba(232,201,138,.85)"/>
-      </svg>
+      <span class="brand-mark login-mark"><svg class="mark-still" viewBox="0 0 128 128" fill="none" aria-hidden="true"><g stroke="#b6c6cd" stroke-opacity=".75" stroke-width="4"><ellipse cx="64" cy="64" rx="46" ry="17" transform="rotate(-38 64 64)"/><ellipse cx="64" cy="64" rx="40" ry="14" transform="rotate(38 64 64)"/><ellipse cx="64" cy="64" rx="33" ry="11" transform="rotate(90 64 64)"/></g><circle cx="64" cy="64" r="4" fill="#fff"/></svg><canvas class="mark-live" aria-hidden="true"></canvas></span>
       <div class="brand" style="align-items:baseline;gap:10px"><span class="wordmark">Ciel</span><span class="sub">INTERVIEW</span></div>
     </div>
     <div class="fields">
@@ -825,11 +814,7 @@
 <section data-view="closing" id="closing" data-failed="0">
   <div class="cl-stage">
     <div class="cl-inner">
-      <svg class="aperture cl-mark cl-breathe" viewBox="0 0 128 128" aria-hidden="true">
-        <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="3" stroke-dasharray="4 12"/>
-        <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="3"/>
-        <circle class="c-core" cx="64" cy="64" r="10"/>
-      </svg>
+      <span class="brand-mark cl-mark" data-mark="whole"><svg class="mark-still" viewBox="0 0 520 520" fill="none" aria-hidden="true"><defs><radialGradient id="cl-corona" gradientUnits="userSpaceOnUse" cx="260" cy="260" r="200"><stop offset=".38" stop-color="#8fa8b3" stop-opacity=".3"/><stop offset=".55" stop-color="#8fa8b3" stop-opacity=".07"/><stop offset="1" stop-color="#8fa8b3" stop-opacity="0"/></radialGradient></defs><circle cx="260" cy="260" r="200" fill="url(#cl-corona)"/><g stroke="#8fa8b3"><circle cx="260" cy="260" r="208" stroke-opacity=".18"/><circle cx="260" cy="260" r="150" stroke-opacity=".1"/><circle cx="260" cy="260" r="217" stroke-opacity=".35" stroke-width="9" stroke-dasharray="1 13.2"/><path d="M260 40v18M480 260h-18M260 480v-18M40 260h18" stroke-opacity=".5"/><path d="M108 118A208 208 0 0 1 300 56M464 300A208 208 0 0 1 380 430" stroke-opacity=".55" stroke-width="2.4" transform="rotate(8 260 260) scale(.93) translate(19.6 19.6)"/></g><circle cx="260" cy="260" r="78" fill="#030608"/><circle cx="260" cy="260" r="79" stroke="#b6c6cd" stroke-opacity=".45" stroke-width="2.2"/><path d="M336.0 260.0L226.0 328.0M325.8 298.0L196.6 301.8M298.0 325.8L184.1 264.5M260.0 336.0L192.0 226.0M222.0 325.8L218.2 196.6M194.2 298.0L255.5 184.1M184.0 260.0L294.0 192.0M194.2 222.0L323.4 218.2M222.0 194.2L335.9 255.5M260.0 184.0L328.0 294.0M298.0 194.2L301.8 323.4M325.8 222.0L264.5 335.9" stroke="#8fa8b3" stroke-opacity=".28"/><circle cx="260" cy="260" r="40" stroke="#b6c6cd" stroke-opacity=".5" fill="#8fa8b3" fill-opacity=".06"/><g stroke="#b6c6cd" stroke-opacity=".6"><ellipse cx="260" cy="260" rx="36" ry="13" transform="rotate(-38 260 260)"/><ellipse cx="260" cy="260" rx="31" ry="11" transform="rotate(38 260 260)"/><ellipse cx="260" cy="260" rx="26" ry="9" transform="rotate(90 260 260)"/></g><circle cx="260" cy="260" r="2" fill="#fff"/></svg><canvas class="mark-live" aria-hidden="true"></canvas></span>
       <blockquote class="cl-quote"><span id="closing-last"></span><cite class="cl-by" id="closing-who"></cite></blockquote>
       <div class="cap" id="closing-cap"><span id="closing-status">the interview is over · writing your debrief</span></div>
       <div class="progress" id="closing-progress" data-show="0">
@@ -929,6 +914,7 @@
   </form>
 </div>
 
+<script src="/interview/mark.js"></script>
 <script src="/interview/app.js"></script>
 </body>
 </html>

@@ -2,6 +2,42 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-20 — One mark on every page
+
+**Why.** The Chart and yunhan.me's landing page wore the living mark; the
+interview room, the tab icons, and every other page of the website still
+wore the three-circle aperture from before Iris. Two marks for one
+instrument, and the older one on the pages friends actually see.
+
+**What.**
+
+- *Small marks are what lives inside the iris; large ones are the whole
+  instrument.* The interview room's header glyph and sign-in mark are the
+  engine's core and mirror the interviewer's state, where the aperture only
+  pulsed while she spoke. The closing screen holds the whole instrument:
+  thinking while the debrief is written, at rest and dimmed if it fails. It
+  grew from 88px to 200px (160px on a phone), because the engine letters its
+  ring at no less than 8px and the readouts crowded a smaller disc.
+- *The engine keeps one source.* The room serves the block inlined in
+  `chart.html` as `/interview/mark.js`, cut between the engine's opening
+  comment and its closing line, rather than carrying a second copy. If the
+  block is not found the script is a 404 with a line in the log, and the
+  page keeps the still drawing each mark has beside its canvas.
+- *The tab icon is the core.* The Chart and the room carry a still of the
+  core on the eclipse disc; the disc keeps pale strokes legible on a light
+  tab strip.
+- *The website follows.* In `~/Projects/yunhan.me`, Toolbox, Teaching, the
+  utilities, Door's login and admin, and Zetamac take the same core through
+  the Instrument's new `.brand-mark` box and `brand-mark.js`; the aperture
+  glyph is retired there and the Instrument stylesheet is v2.
+
+**Probes.** `probe_interview.py auth` 85 → 88: the mark script is served
+from the Chart's own engine, it is script with no markup around it, and
+every mark on the page keeps a still beside its canvas. Seen in a browser:
+sign-in and closing views at desktop width and at 375px, no horizontal
+overflow, no console errors beyond the expected 401. Not exercised: a live
+interview driving the marks through real states, and reduced motion.
+
 ## 2026-09-20 — Muted, the ear is shut
 
 **Why.** Mute meant "captured, and ignored". The microphone stayed open,

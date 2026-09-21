@@ -1260,6 +1260,40 @@
     refreshAccounts();
   });
 
+  // ── the living mark ────────────────────────────────────────────────────
+  // The engine is the Chart's, served as /interview/mark.js. Without it the
+  // still drawings in each .brand-mark stay where they are. Small marks are
+  // only what lives inside the iris and mirror the interviewer's state; the
+  // closing mark is the whole instrument, thinking while the debrief is
+  // written and at rest once it has failed.
+
+  (() => {
+    if (!window.CielSymbol2) return;
+    const marks = $$(".brand-mark canvas").map((canvas) => {
+      const inst = new CielSymbol2(canvas, { concept: "final" });
+      const whole = canvas.parentElement.dataset.mark === "whole";
+      inst.coreOnly = !whole;
+      return { inst, canvas, whole };
+    });
+    if (!marks.length) return;
+    document.documentElement.classList.add("mark-on");
+    // A mark in a hidden view has no size until its view is shown.
+    const sized = new ResizeObserver(() => { for (const m of marks) m.inst.resize(); });
+    for (const m of marks) sized.observe(m.canvas);
+    let last = performance.now();
+    const frame = (now) => {
+      const dt = Math.min(.05, (now - last) / 1000); last = now;
+      const closing = $("#closing").dataset.failed === "1" ? "idle" : "thinking";
+      for (const m of marks) {
+        if (!m.canvas.clientWidth) continue;
+        m.inst.setState(m.whole ? closing : (body.dataset.state || "idle"));
+        m.inst.tick(dt);
+      }
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  })();
+
   // ── boot ───────────────────────────────────────────────────────────────
 
   (async () => {

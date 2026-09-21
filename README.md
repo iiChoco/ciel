@@ -941,6 +941,17 @@ answering, the interviewer stops, says "Sorry, go on", and hears the
 whole answer. Every session is recorded (microphone and interviewer
 mixed) and replayable from the page with a click-to-seek transcript.
 
+The room wears the Chart's living mark, by the rule every page follows: a
+small mark is only what lives inside the iris, a large one is the whole
+instrument. The header glyph and the sign-in mark are the core and mirror
+the interviewer's state; the closing screen holds the whole instrument,
+thinking while the debrief is written and at rest, dimmed, if it fails. The
+engine has one source, the block inlined in `chart.html`, which the room
+serves as `/interview/mark.js` rather than keeping a copy; each mark keeps a
+still drawing beside its canvas, so a page without the script still has its
+marks. The Chart's and the room's tab icons are a still of the core on the
+eclipse disc, the same one yunhan.me's pages carry.
+
 `ciel interview serve --dev` runs the room alone on loopback with a
 scripted interviewer and a `dev`/`dev` account, for working on the page;
 `scripts/probe_interview.py` covers each layer.
