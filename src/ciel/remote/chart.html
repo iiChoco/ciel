@@ -1315,6 +1315,8 @@ function fmtClock(s) {
   return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 }
 
+const agentsBeside = matchMedia("(min-width: 761px)");
+
 function setAgents(list) {
   agents = Array.isArray(list) ? list : [];
   renderAgents();
@@ -1332,7 +1334,7 @@ function renderAgents() {
   // Beside the mark there is a column waiting for the roster, so it opens
   // on its own; stacked under the mark on a phone it would push the
   // transcript away. Once the chip has been pressed, the choice stands.
-  if (!agentsTouched) document.body.classList.toggle("agentsopen", matchMedia("(min-width: 761px)").matches);
+  if (!agentsTouched) document.body.classList.toggle("agentsopen", agentsBeside.matches);
   agentsCount.textContent = agents.length + (agents.length === 1 ? " AGENT" : " AGENTS");
   agentsArr.textContent =
     document.body.classList.contains("agentsopen") ? "▴" : "▾";
@@ -1382,6 +1384,12 @@ function renderAgents() {
     agentRows.appendChild(row);
   }
 }
+
+// The roster only redraws when it changes, and a page that met it while
+// narrow (a window still sizing, a phone turned on its side) would keep the
+// column shut beside a mark with room for it. Until the chip is pressed,
+// the width decides each time it crosses the line, not once.
+agentsBeside.addEventListener("change", renderAgents);
 
 agentsBtn.addEventListener("click", () => {
   agentsTouched = true;

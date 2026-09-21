@@ -2,6 +2,29 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-21 — The roster opens when there is room for it
+
+**Why.** The agents working on your behalf belong to the right of the mark,
+and sometimes the column stayed empty: the chip counted `2 AGENTS ▾` and
+nothing stood beside the mark. The Chart decided open-or-shut from the
+window's width only when a roster frame arrived, and the hub sends one only
+when the roster changes. A page that met its roster while narrow — a window
+still sizing, a phone on its side, a pane dragged wider afterwards — kept
+the column shut until some timer or watch happened to change.
+
+**What.**
+
+- *The width decides each time it crosses the line.* The Chart listens to
+  the `min-width: 761px` query itself and redraws the roster on the change,
+  so the column opens beside the mark when there is room and folds back to
+  the chip when there is not. Once the chip has been pressed, the choice
+  still stands, in both directions.
+
+**Probes.** `probe_web.py` 75, unchanged: the wire is as it was and no probe
+pins the Chart's script. Reproduced and checked in the browser: loaded at
+375px and widened (opens), closed by hand and resized across the line twice
+(stays closed).
+
 ## 2026-09-21 — Muted is a label on the rule, not a band
 
 **Why.** The Chart said "muted" with a full-width grey strip borrowed from
