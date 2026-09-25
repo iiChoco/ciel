@@ -2,6 +2,22 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-21 — Mute leaves the mark alone
+
+**Why.** The new mute label came with a supporting cue: the mark dimmed to
+45% while muted. By eye it was wrong. The mark is Ciel's state, and a muted
+Ciel still thinks and answers typed turns; greying it said "off" about
+something that was not.
+
+**What.**
+
+- *The mark keeps its light.* The opacity rule and its transition are gone.
+  Muted is said by the label on the composer's rule and the struck-through
+  MIC chip, and by nothing else.
+
+**Probes.** None pin the Chart's styling; checked in the browser that the
+mark's opacity is 1 while muted.
+
 ## 2026-09-21 — An agent stays in the turn that spawned it
 
 **Why.** Asked from the Chart to assign an agent to the Riemann hypothesis,
