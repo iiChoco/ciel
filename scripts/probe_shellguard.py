@@ -6,7 +6,9 @@ No audio hardware and no model: the broker takes an injectable endpointer and
 everything else it touches is duck-typed, so the entire confirmation
 choreography — prompt, drain, listen, timeout, cancel — runs on scripted
 fakes, the same way the pipeline itself is verified. Mutating Git options
-never inherit a quiet prefix, and the signup cookie is always refused.
+never inherit a quiet prefix, and the signup cookie is always refused. An
+agent the brain spawns stays in the turn that spawned it: the background
+flag on Agent/Task is refused, the foreground spawn passes.
 Run it directly:
 
     uv run python scripts/probe_shellguard.py
@@ -32,6 +34,7 @@ from ciel.audio.speaker import (
     load_threshold,
     save_profile,
 )
+from ciel.brain.agent import foreground_agents_only
 from ciel.brain.recorder import ActionRecorder
 from ciel.brain.shellguard import ShellGuard, classify
 from ciel.brain.toolguard import ConfirmToolGuard, describe_call
@@ -391,6 +394,13 @@ async def main() -> None:
     check("background is refused",
           denied(await guard(payload("ls", run_in_background=True), None, None))
           and not calls)
+    spawn = {"description": "think", "prompt": "a hard question", "subagent_type": "deep-thought"}
+    check("an agent spawned into the background is refused: nothing reads the stream between turns",
+          all([denied(await foreground_agents_only({"tool_name": name, "tool_input": {**spawn, "run_in_background": True}}, None, None))
+               for name in ("Agent", "Task")]))
+    check("the same agent in the foreground passes, and other tools are not this hook's business",
+          await foreground_agents_only({"tool_name": "Agent", "tool_input": spawn}, None, None) == {}
+          and await foreground_agents_only({"tool_name": "Bash", "tool_input": {"command": "ls", "run_in_background": True}}, None, None) == {})
     check("confirm tier, approved",
           await guard(payload("touch a.txt"), None, None) == {}
           and calls == ["Run: touch a.txt — okay?"])

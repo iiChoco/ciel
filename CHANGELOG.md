@@ -2,6 +2,42 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-21 — An agent stays in the turn that spawned it
+
+**Why.** Asked from the Chart to assign an agent to the Riemann hypothesis,
+Ciel spawned its deep-thought agent *in the background*, said "I'll let you
+know when it's back", and ended the turn. The roster beside the mark showed
+the agent for about five seconds: the deep-thought stamp is cleared by the
+next spoken word and again when the turn ends, so the agent vanished from
+the page while it was still working. Worse sat underneath. Nothing reads the
+brain's stream between turns, so the promise could not be kept, and the
+finished report would wait in the stream to be taken for the answer to
+whatever was said next — the off-by-one the drain exists to prevent. The
+brain's turn model has always assumed the pass holds the turn open; the
+model had simply found the flag that breaks the assumption.
+
+**What.**
+
+- *The background flag is refused.* `foreground_agents_only` in
+  `brain/agent.py` is a PreToolUse hook on `Agent`/`Task`: a spawn with
+  `run_in_background` is denied with a reason that tells the model to run it
+  in the foreground and relay the answer in this turn, the way the shell
+  guard already refuses a backgrounded command. A hook, not a request in the
+  prompt, for the reason every guard is one.
+- *The prompt says so too.* The deep-thought section now says the agent runs
+  inside the turn and that Ciel must not promise to report back later, so
+  the refusal is rarely needed.
+- The result is what the roster was built to show: the agent stands at the
+  mark's right hand for the whole pass and leaves when its answer is spoken.
+  Agents that truly outlive a turn — tracked from the SDK's task messages,
+  read between turns, their reports delivered — are a feature of their own,
+  not attempted here.
+
+**Probes.** `probe_shellguard.py 165 → 167`: a background spawn is refused
+under both tool names; a foreground spawn passes and a backgrounded Bash is
+not this hook's business. `probe_turns.py` 100 and `probe_vigil.py` 173
+unchanged.
+
 ## 2026-09-21 — The roster opens when there is room for it
 
 **Why.** The agents working on your behalf belong to the right of the mark,

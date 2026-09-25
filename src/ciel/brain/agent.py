@@ -37,6 +37,8 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     CLIConnectionError,
+    HookContext,
+    HookMatcher,
     ProcessError,
     ResultMessage,
     StreamEvent,
@@ -48,7 +50,7 @@ from ciel.brain.prompt import build_system_prompt, sections_watch_line
 from ciel.brain.sentences import flush_point, split_sentences
 from ciel.brain.session import SessionStore
 from ciel.brain.recorder import ActionRecorder
-from ciel.brain.shellguard import ShellGuard
+from ciel.brain.shellguard import ShellGuard, deny_decision
 from ciel.brain.toolguard import ConfirmToolGuard
 from ciel.brain.witness import UnattendedMode, WitnessGuard, witness_allowed
 from ciel.config import BrainConfig, Config
@@ -82,6 +84,27 @@ screenshots in a tool result overflow (2026-09-05: 'JSON message exceeded
 maximum buffer size', and the brain never heard another word). Sixty-four
 is a bound on memory per line, not a target; the screen tool keeps its own
 payload far under it."""
+
+_SPAWN_TOOLS = ("Agent", "Task")
+
+
+async def foreground_agents_only(payload: dict[str, Any], tool_use_id: str | None, context: HookContext) -> dict[str, Any]:
+    """PreToolUse hook: an agent Ciel spawns runs inside the turn that spawned it.
+
+    A backgrounded agent outlives its turn, and nothing reads the brain's
+    stream between turns: the roster drops it the moment the turn ends, the
+    promise to "let you know when it's back" cannot be kept, and its report
+    waits in the stream to be mistaken for the next turn's answer. Refused
+    here rather than asked for in the prompt, for the reason every guard is
+    a hook: the model complies with a prompt most of the time.
+    """
+    if payload.get("tool_name") in _SPAWN_TOOLS and (payload.get("tool_input") or {}).get("run_in_background"):
+        return deny_decision(
+            "Background agents are not available: nothing would hear the result. "
+            "Spawn it in the foreground and relay what it concludes in this turn."
+        )
+    return {}
+
 
 async def user_message(text: str, images: tuple[tuple[str, str], ...]) -> AsyncIterator[dict[str, Any]]:
     """One user turn with pictures in it, in the SDK's streaming shape.
@@ -525,6 +548,8 @@ class Brain:
         hooks: dict[str, list] = {}
         pre = hooks.setdefault("PreToolUse", [])
         pre.extend(self._witness_guard.as_hooks()["PreToolUse"])
+        if self._brain_config.deep_effort:
+            pre.append(HookMatcher(matcher="|".join(_SPAWN_TOOLS), hooks=[foreground_agents_only]))
         if self._guard is not None:
             pre.extend(self._guard.as_hooks()["PreToolUse"])
         if self._shell_guard is not None:

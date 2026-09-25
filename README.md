@@ -585,7 +585,10 @@ opened — confirm-tier questions become Yes/No buttons, and the mute switch
 lives in the header. In the header, an agents chip counts everything working
 on your behalf right now — a deep-thought pass mid-flight, background
 watches, running timers — and opens a list with live countdowns at the
-mark's right hand; it disappears when nothing is running. At the mark's left
+mark's right hand; it disappears when nothing is running. An agent Ciel
+spawns always runs inside the turn that spawned it — a background spawn is
+refused by a hook — so it stands in that list until its answer is relayed,
+rather than vanishing when the turn ends. At the mark's left
 hand, the readings mirror the world table (Phase Space, below): whether the
 Mac holds the seat and whether you're at it, the place, the timers and
 watches, what's next on the calendar, the ring — each a label, a white
