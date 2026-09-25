@@ -30,7 +30,12 @@ if TYPE_CHECKING:
 class Decision:
     """What the policy chose, and the reason a log line can print."""
 
-    action: Literal["speak", "message", "note", "hold", "drop"]
+    action: Literal["speak", "message", "note", "reply", "hold", "drop"]
+    """"reply" is not the policy's to choose: an auto-reply answers a
+    correspondent, not the user, so presence, quiet hours, and the
+    interruption budgets have no bearing on it. The pipeline decides it
+    before asking here, and the telling that follows comes back through
+    the policy as its own event."""
     reason: str
 
 

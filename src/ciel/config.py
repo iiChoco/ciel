@@ -1341,6 +1341,12 @@ class MailConfig:
     sent here. Its domain must be onboarded for Email Sending on the
     account the token belongs to, or the relay answers 550."""
 
+    name: str = "Ciel"
+    """The display name on the From header, so a mail client shows
+    "Ciel" rather than the bare address: ``Ciel <ciel@example.com>``.
+    Anything sent from the address wears it — the tool and the section
+    alarm alike. Empty sends the bare address."""
+
     owner: str = ""
     """Where "email me" goes: the user's own inbox, which must be a
     verified destination address on the Cloudflare account (relaying to
@@ -1353,6 +1359,52 @@ class MailConfig:
     user has a record of what Ciel said in their own inbox without the
     recipient seeing it. On Cloudflare's free tier this too must be a
     verified destination address. Empty keeps no copy."""
+
+    replies: bool = False
+    """Read what comes back. Mail to the address arrives wherever the
+    domain's Email Routing forwards it — the owner's Gmail — and with this
+    on, Ciel reads that inbox for mail addressed to itself through the
+    Gmail connector's login (``[sections].gmail_oauth_keys`` and
+    ``gmail_token_file`` on the brain's host), takes as a reply any
+    message whose thread names something it sent — by the ledger, or by
+    an id on the address's own domain, since the relay rewrites the ids
+    — and raises a Vigil event for each (``proactive/mail.py``); the
+    brain gets ``read_ciel_mail`` and a
+    ``reply_to`` on ``send_as_ciel`` that answers in the thread. The
+    nudge needs ``[proactive]`` on; the tool works without it. Only mail
+    ``to:`` the address is ever listed; nothing is marked read."""
+
+    reply_poll_s: float = 120.0
+    """How often the inbox is asked for new mail to the address. Two
+    minutes: a reply is a conversation, not a race, and each poll is one
+    search against Gmail plus a fetch per new message."""
+
+    reply_max_chars: int = 4000
+    """How much of one message's text is kept for the brain. Enough for
+    any reply a person writes; a longer one is cut, not refused."""
+
+    auto_reply: bool = False
+    """Answer a reply without being asked. Off by default, and the one
+    switch here that lets mail leave in Ciel's name with nobody consulted,
+    so it is opted into deliberately. Only a message the watcher already
+    recognised as a reply to Ciel's own mail is eligible: Ciel answers
+    inside conversations it started and never writes to a stranger. Mail a
+    machine wrote (``Auto-Submitted``, an out-of-office, a no-reply
+    address) and bulk mail are never answered. The send is pipeline-owned,
+    like the away text: the model writes the words, deterministic code
+    decided that a reply happens and to whom, and the brain is never given
+    a send it could reach in an unattended turn. Every auto-reply is
+    journaled and read back to the user afterwards."""
+
+    auto_reply_max_per_day: int = 10
+    """Auto-replies allowed in a rolling day, counted from the ledger so a
+    re-exec cannot reset it. The backstop against two machines answering
+    each other; reaching it holds the event for the user instead."""
+
+    auto_reply_max_per_person_per_day: int = 3
+    """The same bound per correspondent, which catches a loop long before
+    the day's total does. Three is a conversation; the fourth in a day is
+    a machine."""
 
     smtp_host: str = "smtp.mx.cloudflare.net"
     """The relay. Cloudflare's speaks implicit TLS only."""

@@ -439,6 +439,14 @@ async def smtp_checks(tmp: Path) -> None:
         check("copy_to rides along as a Bcc", FakeRelay.sent[-1]["Bcc"] == "me@berkeley.edu")
         copied.send("Me@Berkeley.edu", "Hi", "b", "ciel@example.com")
         check("no Bcc when the copy address is the recipient", FakeRelay.sent[-1]["Bcc"] is None)
+        named = SmtpSender("h", 465, "api_token", "tok", name="Ciel")
+        named.send("me@gmail.com", "Hi", "b", "ciel@example.com")
+        check("a name goes in front of the From address, so a client shows Ciel",
+              FakeRelay.sent[-1]["From"] == "Ciel <ciel@example.com>")
+        SmtpSender("h", 465, "api_token", "tok", name="Ciel, the assistant").send(
+            "me@gmail.com", "Hi", "b", "ciel@example.com")
+        check("punctuation in the name is quoted, never spliced into the address",
+              FakeRelay.sent[-1]["From"] == '"Ciel, the assistant" <ciel@example.com>')
         try:
             sender.send("me@gmail.com", "Hi", "b", "")
             check("no From is refused before the wire", False)
@@ -488,6 +496,7 @@ async def smtp_checks(tmp: Path) -> None:
               isinstance(shared._mailer, SmtpSender) and shared._mailer._token == "mt"
               and shared._mailer._copy_to == "me@berkeley.edu"
               and shared._alarm_from == "ciel@example.com" and shared._alarm_to == "me@gmail.com")
+        check("the borrowed relay wears [mail]'s name too", shared._mailer._name == "Ciel")
         pinned = SectionsWatcher(replace(base, email_to="other@x.edu"), q("s6"), mail=mail)
         check("email_to still overrides the owner", pinned._alarm_to == "other@x.edu")
         own = SectionsWatcher(replace(base, smtp_token="tok", email_from="a@b.c", email_to="d@e.f"),

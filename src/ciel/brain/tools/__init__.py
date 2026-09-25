@@ -35,7 +35,7 @@ from ciel.brain.tools.grants import GRANT_TOOLS
 from ciel.brain.tools.grants import bind_config as bind_grants
 from ciel.brain.tools.location import LOCATION_TOOLS, bind_locator
 from ciel.brain.tools.mac import MAC_TOOLS, bind_mac
-from ciel.brain.tools.mail import MAIL_TOOLS, bind_mail
+from ciel.brain.tools.mail import INBOX_TOOLS, MAIL_TOOLS, bind_mail
 from ciel.brain.tools.memory import MEMORY_TOOLS, bind_store
 from ciel.brain.tools.messages import MESSAGE_TOOLS, SEND_TOOLS
 from ciel.brain.tools.messages import bind_client as bind_messages
@@ -50,7 +50,7 @@ from ciel.brain.tools.watch import WATCH_TOOLS, bind_watcher
 from ciel.brain.tools.world import WORLD_TOOLS, bind_world
 from ciel.config import Config, MCPServerConfig
 from ciel.journal import ActionJournal
-from ciel.mail import SmtpSender
+from ciel.mail import SentLedger, SmtpSender
 from ciel.memory.store import MemoryStore
 from ciel.messages import MessagesClient
 from ciel.oura import OuraClient, build_auth
@@ -258,13 +258,38 @@ def build_tool_server(
 
     if config.mail.armed:
         # Ciel's own address. The gate for the tool lives in agent.py's
-        # confirm set; here it only needs its relay.
+        # confirm set; here it needs its relay, the ledger every send is
+        # recorded in, and — with replies on — the inbox the address
+        # forwards to, read through the Gmail connector's login on this
+        # host (a login on another machine authorizes nothing here). The
+        # pipeline's reply watcher takes the same inbox from current_inbox().
+        ledger = SentLedger(config.state_dir / "mail-sent.json")
+        inbox = None
+        if config.mail.replies:
+            from ciel.gmail import GmailReader
+            from ciel.proactive.mail import Inbox
+
+            inbox = Inbox(
+                GmailReader(config.sections.gmail_oauth_keys, config.sections.gmail_token_file),
+                config.mail, ledger, config.state_dir / "mail-inbox.json",
+            )
+            if not inbox.available():
+                log.warning(
+                    "[mail] replies is on but the Gmail connector is not "
+                    "authorized on this host — read_ciel_mail will answer "
+                    "from what was already read"
+                )
+        else:
+            tools = [t for t in tools if t not in INBOX_TOOLS]
         bind_mail(
             SmtpSender(
                 config.mail.smtp_host, config.mail.smtp_port,
                 config.mail.smtp_user, config.mail.token, config.mail.copy_to,
+                config.mail.name,
             ),
             config.mail,
+            ledger=ledger,
+            inbox=inbox,
         )
     else:
         if config.mail.enabled:

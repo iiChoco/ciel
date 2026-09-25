@@ -167,18 +167,29 @@ class GmailClient:
 class GmailSender(GmailClient):
     """Sends as whoever authorized the Gmail connector."""
 
-    def send(self, to: str, subject: str, body: str, sender: str = "") -> str:
+    def send(
+        self, to: str, subject: str, body: str, sender: str = "",
+        *, in_reply_to: str = "", references: str = "", auto: bool = False,
+    ) -> str:
         """Send one plain-text message; returns Gmail's message id.
 
         ``sender`` sets the From header — a "send mail as" alias the account
         has verified (an unverified one is silently rewritten by Gmail to
         the account's own address, so a typo degrades, never fails).
-        Empty leaves Gmail to stamp the primary address."""
+        Empty leaves Gmail to stamp the primary address. The threading
+        headers are taken for the shared ``Mailer`` shape; Gmail threads
+        by them like any client."""
         message = EmailMessage()
         message["To"] = to or self.own_address()
         if sender:
             message["From"] = sender
         message["Subject"] = subject
+        if in_reply_to:
+            message["In-Reply-To"] = in_reply_to
+        if references:
+            message["References"] = references
+        if auto:
+            message["Auto-Submitted"] = "auto-replied"
         message.set_content(body)
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
         sent = self._request("POST", f"{_API}/messages/send", {"raw": raw})

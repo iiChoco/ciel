@@ -85,7 +85,9 @@ def _describe_grant(args: dict[str, Any]) -> str:
 def _describe_send_as_ciel(args: dict[str, Any]) -> str:
     to = args.get("to")
     subject = args.get("subject")
-    parts = ["Send an email from my own address"]
+    # A reply is still a send; the question says which it is, so the
+    # user hears "reply" when the thread is theirs to picture.
+    parts = ["Reply from my own address" if args.get("reply_to") else "Send an email from my own address"]
     if to:
         parts.append(f"to {_shorten(to)}")
     if subject:

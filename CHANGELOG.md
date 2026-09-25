@@ -2,6 +2,148 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-24 — A reply goes every time
+
+**Why.** The first real auto-reply sent nothing. Owen asked Ciel to do
+something for him, the reply turn was told to answer `HOLD` when a message
+asks a favour, and it obeyed: the event became a held note and no mail left.
+That was the design working, and the design was wrong — the point of the
+switch is that Ciel answers. Worse, the log line for a deliberate `HOLD` was
+the same one used for an empty reply, which the code itself calls a
+malfunction, so from outside the two were indistinguishable and the failure
+took a search through the queue and the ledger to explain.
+
+**What.**
+
+- *No way out of answering.* The reply outlet no longer offers `SKIP` or
+  `HOLD`, and names them so a model reaching for them by habit is told they
+  are unavailable here. Declining what a sender wants now happens inside the
+  reply — it says plainly that it will not, and that the user will see what
+  was asked — rather than by writing nothing. A message Ciel cannot help with
+  gets a short courteous answer. Every other unattended outlet keeps both
+  de-escalations untouched.
+- *The two holds are now distinguishable.* `HOLD` and a reply that came back
+  empty log separate lines before holding the event. They were one line, and
+  an outlet that silently sent nothing is exactly the case that needed them
+  apart.
+
+**Probes.** `probe_mail.py 107 → 108: the reply outlet offers neither
+de-escalation and says so, declining happens inside the reply, and the
+speak, note, and message outlets still offer both.`
+
+## 2026-09-23 — Ciel can answer for itself
+
+**Why.** The reply watcher told you someone had written back and then stopped
+there, because answering needed your spoken yes. That is the right default and
+the wrong one for mail you never wanted to be in the middle of. Asked for a
+Ciel that simply answers, the question became how to grant that without
+handing an unsupervised model a send it can reach.
+
+**What.**
+
+- *The pipeline sends, not the brain.* `[mail].auto_reply` turns it on. The
+  unattended turn composes and nothing else; the send is pipeline-owned, like
+  the away text, so the Witness rule is untouched and `send_as_ciel` stays
+  behind the voice gate exactly as before. Deterministic code decides that a
+  reply happens and to whom.
+- *The bound is the shape, not a list of people.* Only a message already
+  recognised as a reply to Ciel's own mail is eligible, so Ciel answers inside
+  conversations it started and cannot write to a stranger.
+- *Two machines must not talk to each other.* Mail carrying `Auto-Submitted`,
+  `Precedence: auto_reply`, or `X-Autoreply`, and mail from a no-reply
+  address, is never answered; Ciel's own automatic sends carry
+  `Auto-Submitted: auto-replied`. Behind that, the ledger bounds ten automatic
+  sends a rolling day and three per correspondent, counted from the file
+  because the autoreloader re-execs the process constantly. The report of a
+  reply already sent is itself a mail event, and is excluded by name — without
+  that it would have been answered again until the per-person bound caught it.
+- *What the turn is told.* The correspondent's whole message is given quoted
+  and attributed, as words it read and never as instructions: a request to
+  relay, fetch, or act is declined and not promised, and nothing about the
+  user's calendar, location, health, or files may enter a reply. `SKIP` sends
+  nothing; `HOLD` sends nothing and hands the message to the user.
+- *Nothing leaves unseen.* Every automatic send is journaled and recorded as
+  automatic, then reported back as its own event through the ordinary
+  interruption policy, quoting both sides.
+
+**Probes.** `probe_mail.py 82 → 107: the Auto-Submitted header on Ciel's own
+automatic mail and not on the rest, the ledger's marker and its two counts
+across a day boundary, every shape of machine-written mail refused, the
+report of a reply refused as a candidate, each bound's reason in the user's
+words, and the reply outlet's prompt — an email body, the message as data,
+the user's life left out, and both de-escalations.`
+
+## 2026-09-21 — Ciel hears back
+
+**Why.** Ciel's address could send and never listen. A reply went where the
+domain forwards it — your inbox — and sat there: you found out by reading
+your own mail, and Ciel, asked "did Sam answer?", could not know. An address
+that only speaks is half an address.
+
+**What.**
+
+- *Every send is remembered.* The SMTPS sender stamps a Message-ID of its
+  own on each message (the relay no longer chooses one) and the send tool
+  records it, with the recipient and the subject, in an owner-only ledger at
+  `~/.ciel/mail-sent.json`. That record is what makes a reply recognisable.
+- *A watcher for the way back.* With `[mail].replies = true`, a Vigil watcher
+  (`proactive/mail.py`) reads the inbox Ciel's mail is forwarded to, through
+  the Gmail connector's login on the brain's host, for mail addressed `to:`
+  Ciel's address and nothing else. Each message is matched against the
+  ledger by `In-Reply-To` and `References`; failing that, any thread id on
+  Ciel's own domain is proof (the first live reply, 2026-09-22, showed
+  Cloudflare's relay rewriting the Message-ID on the way out, so the domain
+  is what survives of the stamp, and the ledger names the message by
+  subject); failing that, subject and sender, where the user's own
+  addresses count as the recipient because the silent copy is answered from
+  whichever inbox they read it in. A match is an event of importance 2 that quotes the
+  correspondent's new words and names which email they answered. Fresh mail
+  to the address is kept but never announced; bulk mail and Ciel's own
+  copies are skipped; nothing is marked read; the first scan's moment is the
+  floor of every later window, so arming it on a full inbox is quiet. The
+  last fifty messages live in `~/.ciel/mail-inbox.json`, owner-only, with
+  the quoted original stripped.
+- *Reading and answering.* `read_ciel_mail` lists what arrived, newest
+  first, each with an id and its words labelled as the sender's, never as
+  instructions; `send_as_ciel` takes `reply_to`, sends to that message's
+  sender only, threads the answer under it, and the gate asks "Reply from my
+  own address to … — okay?". Neither tool runs unattended: the event says
+  someone replied, answering waits for the user. The prompt teaches both
+  only when replies are watched, and the registry withholds the read tool
+  otherwise.
+- *Config.* `[mail]` gains `replies`, `reply_poll_s` (120), and
+  `reply_max_chars` (4000). The reader borrows `[sections].gmail_oauth_keys`
+  and `gmail_token_file` as Events from email does.
+
+**Probes.** `probe_mail.py 13 → 82: the Message-ID and the threading
+headers on the wire, the ledger's matches and misses, a relay-renamed id
+on Ciel's domain seen through, the owner answering the copy, quoted text stripped,
+the inbox scan's floor, dedupe, cache, and restart, the events one scan is
+worth, the watcher's lifecycle and failure streak, the read tool's listing,
+a reply refused to the wrong recipient or an unknown id and threaded when
+right, the gate's wording, the prompt, and the registry.`
+
+## 2026-09-21 — Ciel's mail is signed with its name
+
+**Why.** Mail from Ciel's own address arrived as the bare address. A mail
+client shows the display name when there is one and the address when there
+is not, so every note Ciel sent read as `ciel@example.com` in the inbox
+rather than as Ciel — an address where a name belongs.
+
+**What.**
+
+- *A name on the From header.* `[mail]` gains `name`, default `"Ciel"`, and
+  the SMTPS sender formats the From as `Ciel <ciel@example.com>`. It goes
+  through `formataddr`, so a name with punctuation is quoted rather than
+  spliced into the address. Empty sends the bare address as before. The
+  `send_as_ciel` tool and the section watcher's borrowed relay both wear
+  it; the watcher's own `smtp_token` path, which has no name field of its
+  own, is unchanged.
+
+**Probes.** `probe_mail.py 12 → 13: the default name. probe_sections.py
+78 → 81: the From wears the name, punctuation is quoted, the borrowed relay
+carries [mail]'s name.`
+
 ## 2026-09-21 — The config file has a second door
 
 **Why.** Ciel has four hundred settings across forty sections, and the only

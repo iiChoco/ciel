@@ -174,7 +174,7 @@ def _pick_mailer(
             )
             return None, "", ""
         return (
-            SmtpSender(mail.smtp_host, mail.smtp_port, mail.smtp_user, mail.token, mail.copy_to),
+            SmtpSender(mail.smtp_host, mail.smtp_port, mail.smtp_user, mail.token, mail.copy_to, mail.name),
             sender, to,
         )
     gmail = GmailSender(config.gmail_oauth_keys, config.gmail_token_file)

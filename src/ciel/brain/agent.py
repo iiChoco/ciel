@@ -436,6 +436,8 @@ class Brain:
                 ),
                 mail_owner=self._config.mail.owner,
                 mail_copy_to=self._config.mail.copy_to,
+                # The read tool exists exactly when replies are watched.
+                mail_replies=self._config.mail.armed and self._config.mail.replies,
                 mac=self._mac_tools,
                 # The opening block exists whenever the table does and
                 # is sent; the prompt must not describe a block that

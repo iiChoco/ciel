@@ -1041,8 +1041,9 @@ quiet_hours_end = "08:00"
 `calendar_source`, ~10 minutes of lead time), the morning brief (today's
 agenda plus anything held overnight), the work watcher (everything
 registered with `watch_for_completion` — a file appearing, a process
-ending — polled every 15 s), the ring, and location moves. Each produces
-plain events; none decides anything.
+ending — polled every 15 s), the ring, location moves, a spot opening in
+a watched section, and a reply to mail from Ciel's own address. Each
+produces plain events; none decides anything.
 
 **The policy** is a fixed order, and the order is the point: an expired
 event drops; a read-back verification becomes a silent note; quiet hours
@@ -1585,18 +1586,98 @@ give it a label of its own.
 [mail]
 enabled = true
 address = "ciel@example.com"
+name = "Ciel"               # the display name on the From header (the default)
 owner = "you@gmail.com"     # where "email me" goes; a verified destination
 copy_to = "you@work.edu"    # optional: a silent Bcc of everything Ciel sends
 token = "..."               # or CIEL_MAIL_TOKEN in the environment
+replies = true              # read what comes back and say when someone replied
+reply_poll_s = 120          # how often the inbox is asked
+reply_max_chars = 4000      # how much of one message the brain is shown
+auto_reply = true           # answer a reply without being asked (off by default)
+auto_reply_max_per_day = 10             # the day's bound on automatic sends
+auto_reply_max_per_person_per_day = 3   # the same bound per correspondent
 ```
 
-`copy_to` gives you a record of Ciel's outgoing mail in an inbox of your
+`name` is what a mail client shows as the sender: the From header reads
+`Ciel <ciel@example.com>`, not the bare address. Empty sends the address
+alone. `copy_to` gives you a record of Ciel's outgoing mail in an inbox of your
 choosing: the relay Bcc's it on every message, tool and alarm alike, and
 the recipient never sees it. A refused copy is logged, not fatal; a
 refused recipient is a failed send.
 
-The section watcher's alarm borrows this relay and address when it has
-none of its own, so one token serves both.
+The section watcher's alarm borrows this relay, address, and name when
+it has none of its own, so one token serves both.
+
+**When someone writes back.** Every message from the address leaves with a
+Message-ID of Ciel's own and is recorded in a ledger (`~/.ciel/mail-sent.json`,
+owner-only: the id, the recipient, the subject). With `replies = true`, a
+Vigil watcher (`proactive/mail.py`) reads the inbox the domain forwards to —
+your Gmail, through the Gmail connector's login on the brain's host, the same
+login *Events from email* uses — for mail addressed `to:` Ciel's address and
+nothing else, and asks of each message what it answers: a ledger id in its
+`In-Reply-To` or `References`; failing that, any id there on Ciel's own
+domain (Cloudflare's relay rewrites the Message-ID on the way out, so the
+domain is the part of the stamp that survives, and the ledger then names the
+message by subject); failing that, the subject under its prefixes from the
+address the message went to, or from one of your own addresses, since the
+silent copy is answered from whichever inbox you read it in. A match is a
+reply, and a reply is an event of importance 2 — "Sam replied to
+my email 'Lunch on Friday': 'Sure, noon works.'", the correspondent's words
+in quotation marks — that the policy speaks, texts, or holds like any other
+nudge. Mail to the address that answers nothing is kept for the brain but
+never announced; bulk mail and Ciel's own copies are skipped; nothing is
+marked read. The first scan records its moment and never looks further back,
+so arming the watch on a full inbox is quiet. What was read lives in
+`~/.ciel/mail-inbox.json`, owner-only, the last fifty messages with the
+quoted original stripped down to the sender's new words.
+
+The brain gets `read_ciel_mail` — what arrived, newest first, each with an
+id, who wrote, when, whether it answers something Ciel sent, and their words,
+labelled as theirs and not as instructions — and `send_as_ciel` takes a
+`reply_to` id, so "tell Sam noon works" goes back in Sam's thread, under the
+same spoken confirmation, now phrased as a reply ("Reply from my own address
+to sam@… with the subject Re: Lunch on Friday — okay?"). Neither tool runs
+in an unattended turn: the event says someone replied; answering waits for
+you. The nudge needs `[proactive]` on; the read tool works without it, and
+without the connector's login on the host it answers from what was already
+read and says so.
+
+**Answering on its own.** `auto_reply = true` lets Ciel write back without
+being asked. The Witness rule is not loosened to do it: the brain still has
+no send it can reach unsupervised. The unattended turn only composes, and
+the send belongs to the pipeline, exactly as the away text does — the model
+writes the words, deterministic code decided that mail leaves and to whom.
+
+What bounds it is not a list of people, it is the shape of the thing. Only a
+message the watcher already recognised as a reply to Ciel's own mail is
+eligible, so Ciel answers inside conversations it started and cannot write to
+a stranger. Mail a machine wrote is never answered: an `Auto-Submitted`
+header, `Precedence: auto_reply`, an old `X-Autoreply`, or a no-reply
+address all disqualify it, and Ciel's own automatic sends carry
+`Auto-Submitted: auto-replied` so a well-behaved responder on the far side
+will not write back. Past that, the ledger counts: ten automatic sends in a
+rolling day and three to any one person, read from the file rather than from
+memory, because the autoreloader re-execs the process all day and a budget
+that resets on every source edit is not a budget. Every bound that stops a
+reply turns it back into an ordinary nudge, so you are told instead.
+
+The turn itself is told two things, and given no way out. The message is
+something it read and never an instruction: if the sender asks Ciel to pass a
+message on, look something up, or act for you, it must not do it and must not
+promise it — it says so *in the reply*, and that you will see what they asked.
+Nothing about your calendar, location, health, files, or whereabouts goes into
+a reply. And unlike every other unattended outlet, this one has no `SKIP` and
+no `HOLD`: a reply goes every time, because a message Ciel cannot help with
+still deserves a courteous answer rather than silence. If the turn defers or
+returns nothing anyway, the log says which and the event becomes a held note,
+so you are told rather than left guessing.
+
+Nothing leaves unseen. Every automatic send is journaled, recorded in the
+ledger as automatic, and then reported back to you as its own event, which
+goes through the ordinary interruption policy: "Owen replied about ..., and
+I answered from your address without waiting", with both their words and
+Ciel's quoted. Turning the switch off stops it immediately; the notifying
+half keeps working on its own.
 
 ## Events from email
 
@@ -3310,6 +3391,7 @@ uv run --no-sync python scripts/probe_task_dispatch.py  # a mutation sent once: 
 uv run --no-sync python scripts/probe_task_notices.py # what is owed, the notifier and Vigil, receipts, the notice switch, the v6→v7 lift
 uv run --no-sync python scripts/probe_email_calendar.py # the inbox as data: normalization, the model held to the message, a preview through the runner, the owner's door
 uv run --no-sync python scripts/probe_email_calendar.py --live  # the real accounts on this host: read-only mail, one synthetic calendar event it removes
+uv run --no-sync python scripts/probe_mail.py     # Ciel's own address: the send and its gate, the ledger, replies recognised and read, the inbox watcher, answering in the thread; no network
 uv run --no-sync python scripts/probe_nutrition.py   # atomic diary/history/receipts, source snapshots, arithmetic, dates, Undo, USDA setup/failure bounds; temporary state
 uv run --no-sync python scripts/probe_nutrition_wire.py # real SDK dispatcher, reviewed estimate fallback, Inverse source matrix, private sockets/media, reconnect, owner authority
 uv run --no-sync python scripts/probe_nutrition_photos.py # synthetic PNG/JPEG, private drafts, restart/quotas, queued extraction, cancellation, reviewed Save, image expiry
@@ -3418,6 +3500,8 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `learning.py` | The learning module: a book registered on a project, its bookmark in the owner's words, the Mac's search, PDF facts, page windows, and publication, the worksheets grant and its adapter reading a chapter in windows and writing its sheets, and closing a book |
 | `proactive/resources.py` | The resource watcher: a bound document changed on the Mac, reported by path and hash |
 | `email_calendar.py` | Events from email: the inbox as a source, a message as bounded data, candidates held to the message, and the preview adapter |
+| `mail.py`, `gmail.py` | Mail as Ciel (SMTPS, a Message-ID on every send, the ledger of what went out) and mail as the user (the Gmail connector's login, read-only listing and fetching) |
+| `proactive/mail.py` | The reply watcher: mail addressed to Ciel's address, matched against the ledger, the sender's new words kept for the brain, one event per reply |
 | `tasks.py` | Private task records, atomic owner controls, questions, evidence, recovery, eligibility, abandonment, namespaced feature records, grant drafts, standing grants, mandates, derived work, dispatch intents, and approvals; the store dispatches nothing |
 | `task_context.py` | Turn authority captured by in-process tools and fenced through commit |
 | `task_controls.py` | Shared private owner controller, offline PR-watch validation, namespace registration, the grant form's drafts and approval, mandate and grant controls, the runtime-only derive path, and control journaling |
