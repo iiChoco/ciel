@@ -162,6 +162,7 @@ from ciel.turn import Attachment, Ingress, TurnBatch, owner_origin, pop_turn_bat
 from ciel.task_controls import TaskController
 from ciel.task_context import TaskBinding
 from ciel.nutrition import NutritionController, OwnerContext
+from ciel.settings import SettingsDesk, SettingsError
 
 log = logging.getLogger(__name__)
 
@@ -363,6 +364,9 @@ class WebLink:
         self._nutrition_requests: set[asyncio.Task[None]] = set()
         self._task_controller: TaskController | None = None
         self._task_requests: set[asyncio.Task[None]] = set()
+        self._settings: SettingsDesk | None = None
+        self._settings_requests: set[asyncio.Task[None]] = set()
+        self._settings_lock = asyncio.Lock()
         self._uploads: Path | None = None
         """Where the Chart's files land, inside the brain's workspace; None
         until the pipeline binds it, and then the hello says files are taken."""
@@ -679,6 +683,37 @@ class WebLink:
             response.update(ok=False, error="Nutrition request failed; inspect the diary before retrying.", uncertain=True)
         self._send_to(ws, response)
 
+    def bind_settings(self, desk: SettingsDesk) -> None:
+        self._settings = desk
+
+    def _settings_request(self, frame: dict[str, Any], ws: Any) -> None:
+        if ws not in self._peers or ws not in self._clients:
+            return
+        desk = self._settings
+        # The spoke's seat is a machine, not the owner at a page; and one
+        # write at a time, so two tabs cannot interleave their edits.
+        if desk is None or ws is getattr(self, "_spoke", None) or len(self._settings_requests) >= 2:
+            self._send_to(ws, {"type": "settings.result", "request_id": frame["request_id"], "ok": False, "data": {}, "error": "Settings are unavailable or busy here; retry in a moment."})
+            return
+        task = asyncio.create_task(self._run_settings_request(desk, frame, ws))
+        self._settings_requests.add(task)
+        task.add_done_callback(self._settings_requests.discard)
+
+    async def _run_settings_request(self, desk: SettingsDesk, frame: dict[str, Any], ws: Any) -> None:
+        response = {"type": "settings.result", "request_id": frame["request_id"], "ok": True, "data": {}}
+        try:
+            async with self._settings_lock:
+                if frame["operation"] == "write":
+                    response["data"] = await asyncio.to_thread(desk.write, frame["changes"], frame["revision"])
+                else:
+                    response["data"] = await asyncio.to_thread(desk.snapshot)
+        except SettingsError as exc:
+            response.update(ok=False, error=str(exc), data={"errors": exc.errors, "stale": exc.stale})
+        except Exception:
+            log.exception("settings request failed")
+            response.update(ok=False, error="Settings failed; the file was left as it was.")
+        self._send_to(ws, response)
+
     def bind_tasks(self, controller: TaskController) -> None:
         self._task_controller = controller
         self.task_owner = controller.config.owner
@@ -925,6 +960,7 @@ class WebLink:
         app = web.Application()
         app.router.add_get("/", self._serve_page)
         app.router.add_get("/nutrition", self._serve_nutrition_page)
+        app.router.add_get("/settings", self._serve_settings_page)
         app.router.add_get("/ws", self._serve_ws)
         if self._config.state_feed:
             app.router.add_get("/state", self._serve_state)
@@ -959,6 +995,9 @@ class WebLink:
         self._nutrition_bindings.clear()
         self._nutrition_sessions.clear()
         self._nutrition_ingress.clear()
+        for task in tuple(self._settings_requests):
+            task.cancel()
+        self._settings_requests.clear()
         for task in tuple(self._task_requests):
             task.cancel()
         if self._task_requests:
@@ -984,6 +1023,12 @@ class WebLink:
             self._site = None
 
     # ── handlers ─────────────────────────────────────────────────────────────
+
+    async def _serve_settings_page(self, request: Any) -> Any:
+        # The page alone says nothing: every value rides the gated socket.
+        from aiohttp import web
+        return web.Response(text=_PAGE.with_name("settings.html").read_text(), content_type="text/html",
+                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
     async def _serve_nutrition_page(self, request: Any) -> Any:
         from aiohttp import web
@@ -1226,6 +1271,9 @@ class WebLink:
                 return
             if kind == "task.request":
                 self._task_request(frame, ws)
+                return
+            if kind == "settings.request":
+                self._settings_request(frame, ws)
                 return
             if kind == "say":
                 seq = frame.get("seq")

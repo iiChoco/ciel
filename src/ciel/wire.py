@@ -121,6 +121,8 @@ CATALOG: dict[str, FrameSpec] = {
                                         "mandate_id": "str", "grant_id": "str"}),
     "task.result": FrameSpec("h2c", required={"request_id": "str", "ok": "bool", "data": "dict"}, optional={"error": "str"}),
     "task.changed": FrameSpec("h2c"),
+    "settings.request": FrameSpec("c2h", required={"request_id": "str", "operation": "str"}, optional={"revision": "str", "changes": "dict"}),
+    "settings.result": FrameSpec("h2c", required={"request_id": "str", "ok": "bool", "data": "dict"}, optional={"error": "str"}),
     "nutrition.request": FrameSpec("c2h", required={"request_id": "str", "operation": "str", "data": "dict"}),
     "nutrition.upload": FrameSpec("c2h", required={"request_id": "str", "capture": "dict", "data": "str"}),
     "nutrition.result": FrameSpec("h2c", required={"request_id": "str", "ok": "bool", "data": "dict"}, optional={"error": "str", "uncertain": "bool"}),
@@ -300,6 +302,13 @@ def validate(frame: Any, direction: Direction) -> dict[str, Any]:
             raise WireError("nutrition request is too large or has no bounded identity")
         if frame["operation"] not in ("dashboard", "weight_save", "weight_delete", "day", "search", "history", "save", "repeat", "delete", "complete", "settings", "undo", "drafts", "media", "draft_edit", "draft_discard", "photo_analyze", "photo_cancel", "photo_resume", "catalog", "portion", "preview", "plans", "bulk_preview", "catalog_save", "catalog_delete", "batch_create", "catalog_log", "plan_save", "plan_delete", "plan_log", "bulk_apply"):
             raise WireError("unknown nutrition operation")
+    if kind == 'settings.request':
+        if len(json.dumps(frame)) > 65536 or not 0 < len(frame['request_id']) <= 256:
+            raise WireError('settings request is too large or has no bounded identity')
+        if frame['operation'] not in ('read', 'write'):
+            raise WireError('unknown settings operation')
+        if frame['operation'] == 'write' and not (frame.get('changes') and frame.get('revision')):
+            raise WireError('a settings write names its changes and the revision it was drawn from')
     if kind.startswith('task.'):
         if len(json.dumps(frame)) > 65536:
             raise WireError('task frame exceeds its size bound')

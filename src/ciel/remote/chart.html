@@ -92,6 +92,7 @@
     white-space: nowrap;
   }
   a.chip:hover, button.chip:hover { border-color: var(--ink); color: var(--ink); }
+  .short { display: none; } /* a chip's narrow-screen name, where .long is dropped */
 
   header {
     display: flex; align-items: center; justify-content: space-between; gap: 8px 24px; flex-wrap: wrap;
@@ -376,6 +377,7 @@
     header { padding: 13px 16px 0; gap: 8px 12px; letter-spacing: .24em; } /* five chips beat 375px — wrap, never clip */
     .chip { min-height: 28px; padding: 0 9px; font-size: 9.5px; letter-spacing: .16em; gap: 6px; }
     .long { display: none; }
+    .short { display: inline; }
     #restart.arming .long { display: inline; } /* SURE? must be readable to mean anything */
     #now { display: none; } /* a phone already wears a clock */
     #roomgrid { grid-template-columns: 1fr; grid-template-areas: "mark" "place" "ring"; justify-items: center; padding: 0 16px; gap: 6px; }
@@ -423,6 +425,7 @@
   </div>
   <div class="controls">
     <a class="chip" href="/nutrition" title="Open the private food diary">FOOD</a>
+    <a class="chip" href="/settings" title="Every setting in this machine's config file"><span class="long">SETTINGS</span><span class="short" aria-hidden="true">SET</span></a>
     <button class="chip" id="agentsbtn" hidden title="Everything working on your behalf right now">
       <span id="agentscount"></span><span class="arr" id="agentsarr">▾</span>
     </button>

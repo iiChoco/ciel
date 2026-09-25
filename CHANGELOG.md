@@ -2,6 +2,66 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-21 — The config file has a second door
+
+**Why.** Ciel has four hundred settings across forty sections, and the only
+way to change one was to open `~/.ciel/config.toml`, remember the field's
+name, and restart. Fine for whoever wrote the field that week; poor for the
+same person a month later, on a phone, wanting the wake threshold a little
+lower or to see what they had actually set. The docstrings that explain each
+field lived in `config.py`, where only a reader of the source met them.
+
+**What.**
+
+- *A settings page, on the Chart's socket.* `/settings` (a SETTINGS chip in
+  the Chart's header) draws every section and field from `config.py` with
+  its real name, its docstring, its value, and whether that came from the
+  file, the environment, or the default. Search runs over names and prose; a
+  SET filter shows only what differs from default; every key is a deep link.
+  Edits are staged on a labelled rule — N CHANGES · REVIEW · DISCARD · SAVE —
+  reviewed as `key: old → new`, saved together, and followed by the Chart's
+  two-press restart, since settings take effect on restart as they always
+  have. The page was designed by a design pass in the Instrument's own
+  language (hairline switches and segments, no borrowed widgets; it turns
+  gold while something waits on you) and vendors the Chart's tokens
+  unchanged. It rides `settings.request` / `settings.result`, so it has
+  exactly the Chart's admission, and the spoke's seat is refused.
+- *The desk behind it.* `settings.py` describes the config as data and
+  writes reviewed changes back. It reads attribute docstrings from the
+  source, since they are invisible at runtime.
+- *The file stays yours.* A save edits the lines it must and no others:
+  comments, ordering, a trailing comment on the edited line, multi-line
+  values, and unknown keys survive; a reset removes the line. The result is
+  parsed and compared with what was asked, key by key, before it is
+  accepted, and a layout the editor cannot follow is refused rather than
+  guessed at.
+- *A page cannot widen what Ciel may do.* `[shell]`, `[files]`, `[confirm]`,
+  `[grants]`, `[journal]`, `[web]`, `[hub]`, `[spoke]`, `[interview]`, and
+  `[dev]` are shown and view-only, as is every path, every owner field, the
+  brain's tools, a command Ciel runs, and anything the environment
+  overrides. Secrets are reported as set or unset and their values are in
+  no frame. `[mcp.*]` tables are not shown.
+- *Nothing unreadable is saved.* The candidate is loaded by the real loader
+  first; the write is atomic and owner-only; the text it replaced is kept as
+  `config.toml.previous`; Inverse records what changed; a save drawn from a
+  file that has moved is a conflict, never an overwrite.
+- *Whose file it is.* The page names the machine and its role. On the hub it
+  edits the hub's file, and sections the room's spoke reads are marked as
+  not reaching the Mac from there. Editing the Mac's file from the hub's
+  page is not attempted.
+
+**Probes.** `probe_settings.py` new, 61: the description, the locked
+posture and withheld secrets, the kinds, in-place TOML edits (comments,
+multi-line values, a string that cannot break out of its line, refused
+layouts), the loader-proven owner-only save with its conflict and journal
+entry, and the wire. `probe_wire.py 84 → 85`: the two frames have samples
+and a snapshot never enters the replay ring. `probe_web.py` 75 unchanged;
+its `--live` mode now binds a scratch config so the page can be driven with
+no `~/.ciel`. Checked in the browser against that server: 414 settings
+drawn, a deep link, search, a secret shown only as set, stage → review →
+save with the file verified on disk (comment kept, 0600, previous kept),
+and the armed restart; at phone width and at 1280.
+
 ## 2026-09-21 — Mute leaves the mark alone
 
 **Why.** The new mute label came with a supporting cue: the mark dimmed to

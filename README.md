@@ -145,6 +145,8 @@ uses its own `[spotify]` section, documented with the account setup below.
 The `[tasks]` storage fields are documented under [Durable tasks](#durable-tasks-and-owner-controls),
 `[learning]` under [Reading a book](#reading-a-book-the-learning-module),
 and `[nutrition]` under [Keeping a food log](#keeping-a-food-log).
+The same file has a second door: the Chart's [settings page](#the-settings-page)
+describes every field and writes reviewed changes back, comments intact.
 A boolean accepts `true`/`false`, `yes`/`no`, `on`/`off`, and `1`/`0` from
 either source; any other spelling is refused at startup with the section
 and field named (`[confirm].ask_first: 'ture' is not a boolean`), never
@@ -733,6 +735,50 @@ slept) picks up where it left off: the page tells the server the last
 frame it saw, and the server replays only what was missed, so the
 screen never blanks and re-fills. `scripts/probe_wire.py` drives the
 codec, the ring, the door, and a real socket on loopback.
+
+### The settings page
+
+`/settings` (the SETTINGS chip in the Chart's header) is `~/.ciel/config.toml`
+as a page: every section and field `config.py` defines, each with its real
+name, its docstring, its value, and where that value came from (the file, an
+environment variable, or the default). Search runs across names and
+docstrings, and "changed" narrows the page to what you have actually set.
+Edits are staged, reviewed as `key: old → new`, and saved together; settings
+take effect on restart, as they always have, and the page offers the same
+two-press restart the Chart does once the file has moved.
+
+The page belongs to the machine that serves it, and says whose it is: on the
+hub it edits the hub's file. Sections the room's spoke reads (`[audio]`,
+`[wake]`, `[gestures]`, `[voice]`, `[stt]`, the shortcuts and the indicator)
+are marked, because changing them on the hub does not reach the Mac; the
+Mac's own file is still edited there.
+
+What the page will not do is part of the design (`settings.py`):
+
+- **It cannot widen what Ciel may do, or whom it answers to.** `[shell]`,
+  `[files]`, `[confirm]`, `[grants]`, `[journal]`, `[web]`, `[hub]`,
+  `[spoke]`, `[interview]`, and `[dev]` are shown, since seeing the posture
+  is useful, and are view-only. So is every path, every owner field, the
+  brain's tool list, a command Ciel runs, and any field an environment
+  variable is overriding. Those are changed in the file, by hand, on purpose.
+  `[mcp.<name>]` connector tables are not shown at all.
+- **Secrets never travel.** A token, cookie, password, or key is reported as
+  set or unset; its value is in no frame and cannot be written from the page.
+- **The file stays yours.** A save edits the lines it must and no others:
+  comments, ordering, a trailing comment on the edited line, and keys this
+  version has never heard of survive, and resetting a field removes its line.
+  The result is parsed and compared with what was asked before it is
+  accepted; a layout the editor cannot follow (a dotted key, an inline table)
+  is refused with the advice to edit by hand.
+- **Nothing unreadable is saved.** The candidate file is loaded by the real
+  loader first, so a refused value is refused by field and the old file is
+  untouched. The write is atomic and owner-only, the text it replaced is kept
+  as `config.toml.previous`, Inverse records what changed, and a save drawn
+  from a file that has since moved is a conflict, never an overwrite.
+
+Everything rides the Chart's gated socket (`settings.request` /
+`settings.result`), so the page has exactly the Chart's admission: the
+Origin gate and, off loopback, the hub token. The spoke's seat is refused.
 
 ## Two processes: hub and spoke
 
@@ -3290,6 +3336,7 @@ uv run scripts/probe_readers.py       # the readers: LaTeX by the template's env
 uv run scripts/probe_project_watch.py # readings kept under a grant: the Mac's resource watcher and the project adapter
 uv run --no-sync python scripts/probe_learning.py # the learning module: places, hand-built PDFs, registering, bookmarks, closing; a fake Mac
 uv run scripts/probe_vigil.py         # Vigil: queue, policy, presence, the Witness guard
+uv run --no-sync python scripts/probe_settings.py # the settings desk: description, locked posture, withheld secrets, in-place TOML edits, loader-proven owner-only saves, the wire
 uv run scripts/probe_web.py           # the GUI lane: queue, origin gate, mute relay, roster, files with a message
 uv run scripts/probe_web.py --live    # serve the real page and echo, no mic or model
 uv run scripts/probe_grants.py        # capability granting: catalog + surgery
@@ -3354,8 +3401,9 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `brain/` | Claude client, system prompt, sessions, guards, tools |
 | `memory/` | The durable file-backed store (Invariant) |
 | `proactive/` | Vigil — watchers, the event queue, the interruption policy |
-| `remote/` | The lane away from the mic — Chart and the private nutrition page (`web.py`, `nutrition.html`), and the lane contract (`lane.py`) |
+| `remote/` | The lane away from the mic — Chart, the settings page, and the private nutrition page (`web.py`, `settings.html`, `nutrition.html`), and the lane contract (`lane.py`) |
 | `messages/` | iMessage — reading the database, sending through Messages |
+| `settings.py` | The config file described for a page and written from one: comment-preserving edits, locked posture, secrets withheld, loader-proven saves |
 | `journal.py` | Inverse — the file/action journal and snapshots, joined with nutrition history by the action reader |
 | `nutrition.py` | One private SQLite food diary: source snapshots, allowance arithmetic, dates, receipts, conditional confirmation, and revision-checked Undo |
 | `nutrition_photos.py` | Private media and persistent photo drafts, finite queued extraction through the shared background runner, revision-fenced import, and image retention |

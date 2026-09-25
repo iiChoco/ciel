@@ -53,6 +53,7 @@ from pathlib import Path
 
 from ciel.config import HubConfig, WebConfig, load_config
 from ciel.remote.web import Admission, WebIndicator, WebLink, origin_allowed
+from ciel.settings import SettingsDesk
 
 CHECKS: list[str] = []
 
@@ -443,6 +444,11 @@ async def live(port: int | None = None, require_token: str | None = None) -> Non
     # Files the page sends land here for the echo to name; the folder is
     # private and temporary, the way the brain's workspace would be.
     link.bind_uploads(Path(tempfile.mkdtemp(prefix="ciel-web-live-")) / "uploads")
+    # The settings page edits a scratch file here, never ~/.ciel: a realistic
+    # one, so the page has overrides, a comment to keep, and a secret to hide.
+    scratch = Path(tempfile.mkdtemp(prefix="ciel-web-live-settings-")) / "config.toml"
+    scratch.write_text('# a scratch config for the live page\ntimezone = "America/Los_Angeles"\n\n[wake]\nthreshold = 0.4  # tuned by ear\n\n[tts]\nengine = "piper"\n\n[hub]\ntoken = "not-a-real-token"\n')
+    link.bind_settings(SettingsDesk(scratch, role="hub"))
     muted = False
 
     def on_mute(value: bool) -> None:

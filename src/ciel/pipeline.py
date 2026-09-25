@@ -83,6 +83,7 @@ from ciel.endpointing import trails_off as _trails_off_words
 from ciel.reload import SourceWatcher, default_roots
 from ciel.schedule import Snapshot, Source, State, pick_next
 from ciel.commands import Command, match as match_command
+from ciel.settings import SettingsDesk
 from ciel.timers import Timer, announcement, spoken_clock, spoken_duration
 from ciel.transcript import Transcript
 from ciel.turn import Attachment, TurnRequest, TurnSink, attachment_prompt, lane_spec, prompt_note, owner_origin
@@ -1157,6 +1158,9 @@ class Pipeline:
             # The Chart's files land inside the brain's workspace, where its
             # own file tools can reach them.
             self._web_link.bind_uploads(config.files.workspace / "uploads")
+            # The settings page edits the file this process was started from,
+            # so on a hub it is the hub's file, and the page says whose it is.
+            self._web_link.bind_settings(SettingsDesk(role="hub" if self._role == "hub" else "standalone", journal=self._journal))
         # Memory writes carry provenance: "proactive" when a Vigil turn with
         # nobody around is writing, "conversation" otherwise — reflection
         # included, since it distills a conversation the user was part of.

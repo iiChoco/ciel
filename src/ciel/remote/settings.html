@@ -1,0 +1,1078 @@
+<!doctype html>
+<!-- Settings: the config file, read and staged through the hub. Wears the
+     Chart's Instrument tokens, copied unchanged 2026-09-21 (chart.html :root
+     owns them; this page is a subset and adds no colour of its own).
+     One self-contained file, no external assets, authenticated /ws.
+
+     The page borrows a state the way the Chart does: idle when the file and
+     the page agree, thinking (gold) while something waits on you — staged
+     changes, a restart owed, a file that moved underneath — error when a
+     save was refused. Lit controls take that colour; nothing else is filled.
+
+     ?fixture (or file://) runs against an inline snapshot with no socket. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings · Ciel</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128' fill='none'%3E%3Ccircle cx='64' cy='64' r='62' fill='%23030608'/%3E%3Cg stroke='%23b6c6cd' stroke-width='6'%3E%3Cellipse cx='64' cy='64' rx='50' ry='19' transform='rotate(-38 64 64)'/%3E%3Cellipse cx='64' cy='64' rx='43' ry='15' transform='rotate(38 64 64)'/%3E%3Cellipse cx='64' cy='64' rx='36' ry='12' transform='rotate(90 64 64)'/%3E%3C/g%3E%3Ccircle cx='64' cy='64' r='6' fill='%23fff'/%3E%3C/svg%3E">
+<style>
+  @property --st { syntax: '<color>'; inherits: true; initial-value: #8fa8b3; }
+  :root {
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --st-idle: #8fa8b3;
+    --st-listening: #7adea8;
+    --st-thinking: #e8c98a;
+    --st-error: #e88a8a;
+    --void: #020507;
+    --room: #08141b;
+    --ink: #ffffff;
+    --ink-2: #c9d6dc;
+    --ink-3: #8fa8b3;
+    --ink-4: #6f8590;
+    --hair: color-mix(in srgb, var(--st) 25%, transparent);
+    --rule: color-mix(in srgb, var(--st) 45%, transparent);
+  }
+  body[data-state="idle"] { --st: #8fa8b3; }
+  body[data-state="thinking"] { --st: #e8c98a; }
+  body[data-state="error"] { --st: #e88a8a; }
+
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    background: radial-gradient(70% 40% at 50% 18%, var(--room) 0%, var(--void) 100%) var(--void);
+    color: var(--ink);
+    font: 400 15px/1.5 var(--mono);
+    display: flex; flex-direction: column;
+    transition: --st 600ms ease;
+  }
+  button { font: inherit; background: none; border: none; color: inherit; cursor: pointer; padding: 0; border-radius: 0; }
+  button:disabled { cursor: default; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+  [hidden] { display: none !important; }
+  code { font: inherit; color: var(--ink); }
+  @keyframes caret { 0%, 100% { opacity: 1; } 50% { opacity: .15; } }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+  /* chips: square, hairline, in the instrument's voice */
+  .chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    min-height: 32px; padding: 0 12px;
+    border: 1px solid var(--ink-4);
+    font: 500 11px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; text-decoration: none;
+    color: var(--ink-3); white-space: nowrap;
+  }
+  a.chip:hover, button.chip:hover:not(:disabled) { border-color: var(--ink); color: var(--ink); }
+  .chip:disabled { opacity: .45; }
+  /* a lit control takes the state's colour; nothing else is ever filled */
+  .chip[aria-pressed="true"], .chip.lit { color: var(--st); border-color: color-mix(in srgb, var(--st) 50%, transparent); }
+  .chip.arming { color: var(--st-thinking); border-color: var(--st-thinking); box-shadow: 0 0 16px -4px var(--st-thinking); }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px 24px; flex-wrap: wrap;
+    padding: 18px 28px 0; flex: none;
+    font: 500 11px/1 var(--mono); letter-spacing: .3em; text-transform: uppercase;
+  }
+  .brand { color: var(--st); }
+  .controls { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; }
+
+  /* whose settings these are: the hub and the room's Mac each keep a file */
+  #machine {
+    display: flex; flex-wrap: wrap; gap: 6px 22px; align-items: baseline;
+    padding: 14px 28px 0; flex: none;
+    font: 500 10px/1.4 var(--mono); letter-spacing: .26em; text-transform: uppercase; color: var(--ink-4);
+  }
+  #machine b { font-weight: 500; color: var(--ink); }
+  #machine .path { text-transform: none; letter-spacing: .04em; font-size: 12px; color: var(--ink-2); }
+  #machine .tally { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+  #conn {
+    display: none; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin-top: 12px; padding: 10px 28px; flex: none;
+    font: 500 10px/1.4 var(--mono); letter-spacing: .26em; text-transform: uppercase;
+    border-top: 1px solid var(--st-thinking); background: color-mix(in srgb, var(--st-thinking) 6%, transparent); color: var(--st-thinking);
+  }
+  body.disconnected #conn, body.needtoken #conn { display: flex; }
+  #conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--st-thinking); box-shadow: 0 0 12px var(--st-thinking); animation: caret 1.1s ease-in-out infinite; flex: none; }
+  body.needtoken #conn .dot { animation: none; }
+  #tokenform { display: none; align-items: center; gap: 8px; margin-left: auto; }
+  body.needtoken #tokenform { display: flex; }
+  #tokenin {
+    font: 400 13px/1.4 var(--mono); letter-spacing: .04em;
+    background: color-mix(in srgb, var(--st-thinking) 4%, transparent); color: var(--ink);
+    border: 1px solid color-mix(in srgb, var(--st-thinking) 45%, transparent); border-radius: 0;
+    padding: 6px 10px; width: 220px; max-width: 45vw; outline: none;
+  }
+  #tokenin:focus { border-color: var(--st-thinking); box-shadow: 0 0 16px -4px var(--st-thinking); }
+  #tokenbtn { min-height: 32px; padding: 0 12px; border: 1px solid var(--st-thinking); color: var(--st-thinking); font: inherit; letter-spacing: inherit; }
+  #tokenbtn:hover { border-color: var(--ink); color: var(--ink); }
+
+  /* the work: an index at the left hand, the settings themselves at the right */
+  #work { flex: 1; min-height: 0; display: grid; grid-template-columns: 248px minmax(0, 1fr); width: 100%; max-width: 1180px; margin: 12px auto 0; }
+  #index, #pane { overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--hair) transparent; }
+  #index { padding: 14px 8px 28px 28px; display: flex; flex-direction: column; gap: 2px; }
+  #index button { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; width: 100%; text-align: left; min-height: 28px; padding: 4px 10px; border-left: 1px solid transparent; }
+  #index .grp { margin-top: 14px; font: 500 10px/1.3 var(--mono); letter-spacing: .3em; text-transform: uppercase; color: var(--ink-4); }
+  #index .grp:first-child { margin-top: 0; }
+  #index .sec { font: 400 13px/1.3 var(--mono); color: var(--ink-3); padding-left: 22px; }
+  #index button:hover { color: var(--ink); }
+  #index button[aria-current="true"] { color: var(--st); border-left-color: var(--st); }
+  #index .n { font: 400 11px/1 var(--mono); letter-spacing: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
+  #index .n.zero { color: transparent; }
+  #index .sec.none { opacity: .4; }
+  #index .sec.dirty .n::before { content: "· "; color: var(--st-thinking); }
+
+  #pane { padding: 0 28px 48px; }
+  #tools { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 -16px; padding: 14px 16px 12px; background: var(--void); border-bottom: 1px solid var(--hair); }
+  #jump { display: none; }
+  #q, #jump, .field input, .field select {
+    font: 400 14px/1.4 var(--mono); color: var(--ink);
+    background: color-mix(in srgb, var(--st) 4%, transparent);
+    border: 1px solid color-mix(in srgb, var(--st) 35%, transparent); border-radius: 0;
+    padding: 7px 10px; min-height: 34px; outline: none; min-width: 0;
+  }
+  #q { flex: 1 1 220px; }
+  #q::placeholder, .field input::placeholder { color: var(--ink-4); }
+  #q:focus, #jump:focus, .field input:focus, .field select:focus { border-color: var(--st); box-shadow: 0 0 16px -4px var(--st); }
+  select { appearance: none; -webkit-appearance: none; padding-right: 28px !important;
+    background-image: linear-gradient(45deg, transparent 50%, var(--ink-3) 50%), linear-gradient(135deg, var(--ink-3) 50%, transparent 50%) !important;
+    background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50% !important; background-size: 5px 5px !important; background-repeat: no-repeat !important; }
+  select option { background: var(--void); color: var(--ink); }
+  #count { font: 500 10px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--ink-4); font-variant-numeric: tabular-nums; }
+
+  #blank { padding: 56px 0; text-align: center; font: 500 10px/1.8 var(--mono); letter-spacing: .26em; text-transform: uppercase; color: var(--ink-4); }
+  #blank .why { display: block; margin: 8px auto 16px; max-width: 520px; text-transform: none; letter-spacing: 0; font: 400 13px/1.6 var(--mono); color: var(--ink-3); overflow-wrap: anywhere; }
+  #blank.error .why { color: var(--st-error); }
+
+  /* a section: a labelled hairline, the table's true name at its far end */
+  .sect { padding-top: 30px; scroll-margin-top: 64px; }
+  .sect-head { display: flex; align-items: center; gap: 14px; font: 500 10px/1.5 var(--mono); letter-spacing: .3em; text-transform: uppercase; color: var(--ink-3); }
+  .sect-head::after { content: ""; order: 1; flex: 1; height: 1px; background: var(--hair); }
+  .sect-head .tbl { order: 2; letter-spacing: .06em; text-transform: none; font-size: 12px; color: var(--ink-4); }
+  .sect-head .tag { order: 3; color: var(--ink-4); letter-spacing: .24em; }
+  .sect-doc, .sect-note { max-width: 700px; margin-top: 10px; font: 400 13px/1.6 var(--mono); color: var(--ink-2); text-wrap: pretty; }
+  .sect-note { color: var(--ink-3); padding-left: 12px; border-left: 1px solid var(--ink-4); }
+  .sect.off .sect-head .t, .sect.off .sect-doc { color: var(--ink-4); }
+  .more { margin-top: 10px; min-height: 32px; font: 500 10px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--ink-4); }
+  .more:hover { color: var(--ink); }
+  .more b { font-weight: 500; color: var(--ink); padding-bottom: 2px; border-bottom: 1px solid var(--ink-4); }
+
+  /* a setting is not a card: its true key, one line of why, a white value */
+  .field { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 300px); gap: 6px 28px; align-items: start; padding: 13px 0 13px 14px; margin-left: -15px; border-left: 1px solid transparent; border-bottom: 1px solid color-mix(in srgb, var(--st) 10%, transparent); scroll-margin-top: 80px; }
+  .field.feature { border-bottom-color: var(--hair); }
+  .field.staged { border-left-color: var(--st); box-shadow: -9px 0 12px -11px var(--st); }
+  .field.bad { border-left-color: var(--st-error); box-shadow: -9px 0 12px -11px var(--st-error); }
+  .field.target { background: color-mix(in srgb, var(--st) 8%, transparent); }
+  .keyline { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+  .key { font: 400 14px/1.4 var(--mono); color: var(--ink); text-decoration: none; overflow-wrap: anywhere; }
+  .key .pre { color: var(--ink-4); }
+  .key:hover { text-decoration: underline; text-underline-offset: 4px; text-decoration-color: var(--ink-4); }
+  .mark { font: 500 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--ink-4); }
+  .mark.staged { color: var(--st); }
+  .doc { display: block; width: 100%; margin-top: 4px; text-align: left; font: 400 12px/1.6 var(--mono); color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .doc:hover { color: var(--ink-2); }
+  .doc[aria-expanded="true"] { white-space: normal; color: var(--ink-2); text-wrap: pretty; overflow-wrap: anywhere; }
+  .ctl { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; min-width: 0; }
+  .ctl > * { max-width: 100%; }
+  .field input[type="text"] { width: 100%; }
+  .field input.num { width: 132px; text-align: right; font-variant-numeric: tabular-nums; }
+  .field select { width: 100%; }
+  .field input[aria-invalid="true"] { border-color: var(--st-error); }
+
+  /* the switch: two hairline segments; the side that is true is lit */
+  .switch { display: inline-flex; }
+  .switch span, .seg button {
+    display: flex; align-items: center; justify-content: center;
+    min-width: 52px; min-height: 32px; padding: 0 12px;
+    border: 1px solid color-mix(in srgb, var(--ink-4) 55%, transparent);
+    font: 500 10.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--ink-4);
+  }
+  .switch span + span, .seg button + button { margin-left: -1px; }
+  .switch[aria-checked="true"] .on, .switch[aria-checked="false"] .offs, .seg button[aria-pressed="true"] {
+    position: relative; z-index: 1; color: var(--st); border-color: var(--st);
+    background: color-mix(in srgb, var(--st) 9%, transparent); box-shadow: 0 0 14px -5px var(--st);
+  }
+  .switch[aria-checked="false"] .offs { color: var(--ink-2); border-color: var(--ink-3); background: none; box-shadow: none; }
+  .switch:hover span, .seg button:hover { color: var(--ink); }
+  .feature .switch span { min-width: 64px; min-height: 38px; }
+  .seg { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; }
+  .seg button { text-transform: none; letter-spacing: .06em; font-size: 12px; min-width: 0; }
+
+  .list { width: 100%; display: flex; flex-direction: column; gap: 5px; }
+  .list .item { display: flex; gap: 5px; }
+  .list .item input { flex: 1; }
+  .list .rm, .list .add { min-width: 34px; min-height: 34px; border: 1px solid color-mix(in srgb, var(--ink-4) 55%, transparent); color: var(--ink-3); font: 400 15px/1 var(--mono); }
+  .list .add { align-self: flex-end; padding: 0 12px; font: 500 10px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; }
+  .list .rm:hover, .list .add:hover { border-color: var(--ink); color: var(--ink); }
+  .list .none { font: 400 12px/1.6 var(--mono); color: var(--ink-4); text-align: right; }
+
+  .ro { width: 100%; text-align: right; font: 400 13px/1.5 var(--mono); color: var(--ink-2); overflow-wrap: anywhere; white-space: pre-wrap; }
+  .ro .lock { font: 500 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--ink-4); margin-right: 10px; white-space: nowrap; }
+  .reason { width: 100%; text-align: right; font: 400 11.5px/1.5 var(--mono); color: var(--ink-4); text-wrap: pretty; }
+  .sub { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 2px 14px; font: 400 11.5px/1.5 var(--mono); color: var(--ink-4); overflow-wrap: anywhere; text-align: right; }
+  .sub:empty { display: none; }
+  .sub button { font: 500 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--ink-3); min-height: 20px; padding-bottom: 2px; border-bottom: 1px solid var(--ink-4); }
+  .sub button:hover { color: var(--ink); border-bottom-color: var(--ink); }
+  .err { width: 100%; text-align: right; font: 400 12px/1.5 var(--mono); color: var(--st-error); }
+  .err:empty { display: none; }
+
+  /* the pending bar: the rule wears a label, the way the Chart's composer does */
+  #bar { position: relative; flex: none; border-top: 1px solid var(--rule); background: #03090dcc; box-shadow: 0 -1px 28px -12px var(--st); }
+  #barlabel { position: absolute; left: 50%; top: -12px; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 6px 14px; background: var(--void); font: 500 10px/1 var(--mono); letter-spacing: .26em; text-transform: uppercase; color: var(--st); white-space: nowrap; }
+  #barlabel .lamp { width: 7px; height: 7px; border-radius: 50%; background: var(--st); box-shadow: 0 0 10px var(--st); flex: none; }
+  #barrow { display: flex; align-items: center; gap: 10px 16px; flex-wrap: wrap; max-width: 1180px; margin: 0 auto; padding: 18px 28px calc(14px + env(safe-area-inset-bottom)); }
+  #barmsg { flex: 1 1 260px; font: 400 12.5px/1.5 var(--mono); color: var(--ink-2); overflow-wrap: anywhere; }
+  #barmsg.error { color: var(--st-error); }
+  #baracts { display: flex; gap: 8px; flex-wrap: wrap; }
+  #save:not(:disabled) { color: var(--st); border-color: var(--st); }
+  #save:hover:not(:disabled) { box-shadow: 0 0 16px -4px var(--st); }
+  #review { max-width: 1180px; margin: 0 auto; padding: 20px 28px 0; max-height: 38vh; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--hair) transparent; }
+  #review .chg { display: grid; grid-template-columns: minmax(0, 260px) minmax(0, 1fr) auto; gap: 4px 18px; align-items: baseline; padding: 7px 0; border-bottom: 1px solid color-mix(in srgb, var(--st) 10%, transparent); font: 400 13px/1.5 var(--mono); }
+  #review .chg a { color: var(--ink); text-decoration: none; overflow-wrap: anywhere; }
+  #review .chg a:hover { text-decoration: underline; text-underline-offset: 4px; }
+  #review .was { color: var(--ink-4); overflow-wrap: anywhere; }
+  #review .was b { font-weight: 400; color: var(--ink); }
+  #review .was i { font-style: normal; color: var(--st); padding: 0 8px; }
+  #review .chg .err { grid-column: 1 / -1; text-align: left; }
+  #review .chg button { font: 500 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--ink-3); min-height: 24px; border-bottom: 1px solid var(--ink-4); }
+  #review .chg button:hover { color: var(--ink); border-bottom-color: var(--ink); }
+
+  @media (max-width: 760px) {
+    header { padding: 13px 16px 0; gap: 8px 12px; letter-spacing: .24em; }
+    .chip { font-size: 10px; letter-spacing: .16em; padding: 0 10px; }
+    #machine { padding: 12px 16px 0; letter-spacing: .16em; gap: 4px 14px; }
+    #machine .tally { margin-left: 0; width: 100%; }
+    #conn { padding: 9px 16px; letter-spacing: .16em; }
+    #work { grid-template-columns: minmax(0, 1fr); margin-top: 6px; }
+    #index { display: none; }
+    #pane { padding: 0 16px 40px; }
+    #jump { display: block; flex: 1 1 100%; min-height: 44px; }
+    #q { min-height: 44px; flex-basis: 160px; font-size: 16px; } /* 16px: iOS zooms anything smaller on focus */
+    #tools .chip { min-height: 44px; }
+    #count { flex-basis: 100%; }
+    .field { grid-template-columns: minmax(0, 1fr); padding: 14px 0 14px 12px; margin-left: -13px; }
+    .ctl { align-items: stretch; }
+    .field input, .field select { min-height: 44px; font-size: 16px; }
+    .field input.num { width: 100%; text-align: left; }
+    .switch { display: flex; } .switch span { flex: 1; min-height: 44px; }
+    .feature .switch span { min-height: 44px; }
+    .seg { justify-content: flex-start; } .seg button { min-height: 44px; flex: 1 0 auto; }
+    .list .rm { min-width: 44px; min-height: 44px; } .list .add { min-height: 44px; align-self: stretch; }
+    .ro, .reason, .err, .list .none { text-align: left; }
+    .sub { justify-content: flex-start; text-align: left; } .sub button { min-height: 32px; }
+    .doc { padding: 4px 0; }
+    #barrow { padding: 18px 16px calc(12px + env(safe-area-inset-bottom)); }
+    #baracts { width: 100%; } #baracts .chip { flex: 1; justify-content: center; min-height: 44px; }
+    #review { padding: 18px 16px 0; }
+    #review .chg { grid-template-columns: minmax(0, 1fr) auto; } #review .was { grid-column: 1; grid-row: 2; } #review .chg button { min-height: 32px; }
+  }
+  /* a short window keeps its room for the settings: the tools scroll away with the page */
+  @media (max-height: 620px) { #tools { position: static; } #machine .tally { display: none; } #review { max-height: 30vh; } }
+  @media (prefers-reduced-motion: reduce) {
+    body { transition: none; }
+    #conn .dot { animation: none; }
+  }
+</style>
+</head>
+<body data-state="idle">
+
+<header>
+  <div class="brand">Ciel · settings</div>
+  <div class="controls">
+    <a class="chip" href="/" title="Back to the conversation">CHART</a>
+  </div>
+  <span id="srstatus" class="sr" aria-live="assertive"></span>
+  <span id="srnote" class="sr" role="status" aria-live="polite"></span>
+</header>
+
+<div id="machine" aria-label="Whose settings these are"></div>
+
+<div id="conn"><span class="dot"></span><span id="connlabel">connecting to Ciel</span>
+  <form id="tokenform" autocomplete="off">
+    <input id="tokenin" type="password" placeholder="hub token" aria-label="hub token" autocomplete="off">
+    <button id="tokenbtn" type="submit">CONNECT</button>
+  </form>
+</div>
+
+<div id="work">
+  <nav id="index" aria-label="Sections"></nav>
+  <main id="pane">
+    <div id="tools" role="search">
+      <select id="jump" aria-label="Jump to a section"></select>
+      <input id="q" type="text" placeholder="search name, key, or description   /" aria-label="Search settings" autocomplete="off" spellcheck="false" enterkeyhint="search">
+      <button class="chip" id="onlyset" aria-pressed="false" title="Only what differs from the defaults: set in the file, set by the environment, or staged here">SET</button>
+      <span id="count" aria-live="polite"></span>
+    </div>
+    <div id="blank">reading the settings</div>
+    <div id="sections"></div>
+  </main>
+</div>
+
+<div id="bar" hidden>
+  <div id="barlabel"><span class="lamp"></span><span id="barlabeltext"></span></div>
+  <div id="review" hidden aria-label="Staged changes"></div>
+  <div id="barrow">
+    <div id="barmsg"></div>
+    <div id="baracts">
+      <button class="chip" id="reviewbtn" aria-expanded="false" aria-controls="review">REVIEW</button>
+      <button class="chip" id="discard" aria-pressed="false"><span id="discardlabel">DISCARD</span></button>
+      <button class="chip" id="save">SAVE</button>
+      <button class="chip" id="reload">RELOAD</button>
+      <button class="chip" id="restart" aria-pressed="false" title="Restart Ciel — waits for the current exchange to finish, then relaunches"><span aria-hidden="true">↻</span><span id="restartlabel">RESTART</span></button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const FIXTURE = location.protocol === "file:" || new URLSearchParams(location.search).has("fixture");
+
+let snap = null;                 // the last snapshot the server gave
+const byKey = new Map();         // key -> { f, sec }
+const staged = new Map();        // key -> value; null means "remove the line"
+const invalid = new Map();       // key -> what the page itself could not parse
+const errors = new Map();        // key -> what the server refused
+const rows = new Map();          // key -> the row's element, for the rows on screen
+const opened = new Set();        // sections whose feature is off but the user unfolded
+let scope = "all", backScope = "";  // "all" or a group id; where a cleared filter returns to
+let query = "", onlySet = false;
+let online = false, stale = false, saving = false, failed = "", restarting = false, reviewOpen = false;
+
+// ---------------------------------------------------------------- small things
+function el(tag, cls, text, attrs) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  if (attrs) for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+}
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const clip = (s, n) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+function say(text, loud) { $(loud ? "srstatus" : "srnote").textContent = text; }
+// Docstrings arrive as data. ``literal`` spans become <code>; nothing is parsed as markup.
+function prose(node, text) {
+  String(text).split(/``([^`]+)``/).forEach((part, i) => { if (part) node.append(i % 2 ? el("code", null, part) : part); });
+  return node;
+}
+function show(v, f) {
+  if (f && f.state === "secret") return f.set ? "set" : "not set";
+  if (v === null || v === undefined) return "unset";
+  if (f && f.kind === "other") return JSON.stringify(v);
+  if (typeof v === "boolean") return v ? "on" : "off";
+  if (Array.isArray(v)) return v.length ? v.map((s) => JSON.stringify(s)).join(", ") : "empty list";
+  if (typeof v === "string") return v === "" ? '""' : v;
+  return String(v);
+}
+const editable = (f, sec) => f.state === "editable" && f.source !== "env" && !sec.locked && f.kind !== "other";
+const effective = (f) => staged.has(f.key) ? (staged.get(f.key) === null ? f.default : staged.get(f.key)) : f.value;
+const isSet = (f) => f.source !== "default" || staged.has(f.key);
+const groupOf = (name) => (snap.groups.find((g) => g.sections.includes(name)) || snap.groups[0]).id;
+const featureOf = (sec) => sec.fields.find((f) => f.name === "enabled" && f.kind === "bool");
+
+// ---------------------------------------------------------------- staging
+function stage(key, value) {
+  const { f } = byKey.get(key);
+  if (value !== null && eq(value, f.value)) staged.delete(key);
+  else if (value === null && f.source === "default") staged.delete(key);
+  else staged.set(key, value);
+  invalid.delete(key); errors.delete(key); failed = "";
+  afterStage(key);
+}
+function afterStage(key) {
+  const row = rows.get(key);
+  if (row) row.sync();
+  if (key.endsWith(".enabled")) syncFeature(byKey.get(key).sec);
+  renderIndex(); renderBar(); renderTally();
+}
+function unstage(key) { staged.delete(key); invalid.delete(key); errors.delete(key); redraw(key); }
+function resetToDefault(key) { invalid.delete(key); stage(key, null); redraw(key); }
+function redraw(key) {
+  const row = rows.get(key);
+  if (row) { const fresh = buildField(byKey.get(key).f, byKey.get(key).sec, row.classList.contains("feature")); row.replaceWith(fresh); const c = fresh.querySelector(".ctl button, .ctl input, .ctl select"); if (c) c.focus(); }
+  afterStage(key);
+}
+// A fresh snapshot keeps what is staged where it still means something.
+function reconcile() {
+  for (const [key, v] of [...staged]) {
+    const hit = byKey.get(key);
+    if (!hit || !editable(hit.f, hit.sec) || (v !== null && eq(v, hit.f.value)) || (v === null && hit.f.source === "default")) staged.delete(key);
+  }
+  for (const key of [...invalid.keys()]) if (!byKey.has(key)) invalid.delete(key);
+}
+
+// ---------------------------------------------------------------- snapshot in
+function load(data) {
+  snap = data;
+  const grouped = new Set(snap.groups.flatMap((g) => g.sections));
+  const loose = snap.sections.filter((s) => !grouped.has(s.name)).map((s) => s.name);
+  if (loose.length) snap.groups = [...snap.groups, { id: "_other", title: "Other", sections: loose }];
+  byKey.clear();
+  for (const sec of snap.sections) for (const f of sec.fields) byKey.set(f.key, { f, sec });
+  reconcile();
+  if (scope !== "all" && !snap.groups.some((g) => g.id === scope)) scope = snap.groups[0] ? snap.groups[0].id : "all";
+  renderAll();
+}
+function renderAll() { renderMachine(); renderTally(); renderJump(); renderPane(); renderIndex(); renderBar(); }
+
+function renderMachine() {
+  const m = snap.machine, box = $("machine");
+  box.replaceChildren(el("b", null, m.role), el("span", null, "·"), el("b", null, m.host), el("span", null, "·"), el("span", "path", m.path), el("span", "tally", null, { id: "tally" }));
+  box.title = "Each machine keeps its own file. These are the settings of " + m.host + ".";
+}
+function renderTally() {
+  if (!snap || !$("tally")) return;
+  let total = 0, set = 0;
+  for (const { f } of byKey.values()) { total++; if (isSet(f)) set++; }
+  $("tally").textContent = total + " settings · " + set + " set";
+  $("onlyset").textContent = "SET · " + set;
+}
+
+// ---------------------------------------------------------------- what is on screen
+function matches(f, sec) {
+  if (onlySet && !isSet(f)) return false;
+  if (!query) return true;
+  const hay = (f.key + " " + f.name + " " + sec.title + " " + f.doc + " " + (f.env_name || "")).toLowerCase();
+  return query.toLowerCase().split(/\s+/).filter(Boolean).every((t) => hay.includes(t));
+}
+const filtering = () => onlySet || query !== "";
+function sectionsInScope() {
+  const names = scope === "all" ? snap.groups.flatMap((g) => g.sections) : (snap.groups.find((g) => g.id === scope) || { sections: [] }).sections;
+  return names.map((n) => snap.sections.find((s) => s.name === n)).filter(Boolean);
+}
+
+function renderIndex() {
+  if (!snap) return;
+  const nav = $("index"), keep = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.nav : null;
+  nav.replaceChildren();
+  const add = (cls, label, id, n, current, extra) => {
+    const b = el("button", cls + (extra || ""), null, { "data-nav": id, "aria-current": current ? "true" : "false" });
+    b.append(el("span", null, label), el("span", "n" + (n ? "" : " zero"), String(n)));
+    b.addEventListener("click", () => navigate(id));
+    nav.append(b);
+  };
+  let all = 0;
+  const per = new Map();
+  for (const sec of snap.sections) {
+    const n = sec.fields.filter((f) => filtering() ? matches(f, sec) : isSet(f)).length;
+    per.set(sec.name, n); all += n;
+  }
+  add("grp", "All settings", "all", all, scope === "all");
+  for (const g of snap.groups) {
+    add("grp", g.title, "g:" + g.id, 0, scope === g.id);
+    for (const name of g.sections) {
+      const sec = snap.sections.find((s) => s.name === name); if (!sec) continue;
+      const dirty = sec.fields.some((f) => staged.has(f.key));
+      add("sec", name, "s:" + name, per.get(name), false, (filtering() && !per.get(name) ? " none" : "") + (dirty ? " dirty" : ""));
+    }
+  }
+  nav.title = filtering() ? "Counts are matches" : "Counts are settings that differ from the default";
+  if (keep) { const again = nav.querySelector('[data-nav="' + CSS.escape(keep) + '"]'); if (again) again.focus(); }
+}
+function renderJump() {
+  const sel = $("jump"); sel.replaceChildren();
+  sel.append(el("option", null, "All settings", { value: "all" }));
+  for (const g of snap.groups) {
+    const og = el("optgroup", null, null, { label: g.title });
+    og.append(el("option", null, g.title + " · everything", { value: "g:" + g.id }));
+    for (const name of g.sections) og.append(el("option", null, name, { value: "s:" + name }));
+    sel.append(og);
+  }
+  sel.value = scope === "all" ? "all" : "g:" + scope;
+}
+function navigate(id) {
+  if (id === "all") scope = "all";
+  else if (id.startsWith("g:")) scope = id.slice(2);
+  else { scope = groupOf(id.slice(2)); }
+  backScope = "";
+  renderPane(); renderIndex(); $("jump").value = id;
+  const target = id.startsWith("s:") ? $("s-" + id.slice(2)) : null;
+  if (target) target.scrollIntoView({ block: "start" }); else $("pane").scrollTop = 0;
+}
+
+function renderPane() {
+  const host = $("sections"); host.replaceChildren(); rows.clear();
+  if (!snap) return;
+  let shown = 0, total = 0;
+  for (const sec of sectionsInScope()) {
+    const hits = sec.fields.filter((f) => matches(f, sec));
+    total += sec.fields.length;
+    if (!hits.length) continue;
+    shown += hits.length;
+    host.append(buildSection(sec, hits));
+  }
+  const blank = $("blank");
+  blank.hidden = shown > 0; blank.className = "";
+  if (!shown) {
+    blank.replaceChildren(query ? "nothing matches" : onlySet ? "nothing is set here" : "no settings here");
+    blank.append(el("span", "why", query ? "No name, key, or description holds “" + query + "”. Esc clears the search." : onlySet ? "Every setting in view sits at its default." : ""));
+  }
+  $("count").textContent = filtering() ? shown + " of " + total : "";
+}
+
+function buildSection(sec, hits) {
+  const box = el("section", "sect", null, { id: "s-" + sec.name, "aria-labelledby": "h-" + sec.name });
+  const head = el("h2", "sect-head", null, { id: "h-" + sec.name });
+  head.append(el("span", "t", sec.title), el("span", "tbl", "[" + sec.name + "]"));
+  if (sec.locked) head.append(el("span", "tag", "view only"));
+  else if (sec.where === "room") head.append(el("span", "tag", "room"));
+  box.append(head);
+  if (sec.doc) box.append(prose(el("p", "sect-doc"), sec.doc));
+  if (sec.locked) box.append(prose(el("p", "sect-note"), sec.lock_reason || "Changed in " + snap.machine.path + " by hand, on purpose."));
+  if (sec.where === "room" && snap.machine.role === "hub") box.append(el("p", "sect-note", "Read by the room's machine, from its own file. Edits made here stay on " + snap.machine.host + " and do not reach the room."));
+  const feature = featureOf(sec);
+  const body = el("div", "fields");
+  for (const f of hits) {
+    const row = buildField(f, sec, f === feature);
+    if (f === feature) box.append(row); else body.append(row);
+  }
+  const more = el("button", "more", null, { "aria-expanded": "false" });
+  more.addEventListener("click", () => { opened.add(sec.name); syncFeature(sec); const first = body.querySelector("a, button, input, select"); if (first) first.focus(); });
+  box.append(more, body);
+  box._parts = { body, more, feature };
+  applyFeature(box, sec);
+  return box;
+}
+// A section whose feature is off reads as one line and an offer, until asked or searched into.
+function applyFeature(box, sec) {
+  const { body, more, feature } = box._parts;
+  const off = !!feature && effective(feature) === false;
+  const fold = off && !filtering() && !opened.has(sec.name) && body.children.length > 0;
+  box.classList.toggle("off", off);
+  body.hidden = fold; more.hidden = !fold;
+  more.replaceChildren(body.children.length + " more settings, idle while this is off · ", el("b", null, "SHOW"));
+}
+function syncFeature(sec) { const box = $("s-" + sec.name); if (box && box._parts) applyFeature(box, sec); }
+
+// ---------------------------------------------------------------- one setting
+function buildField(f, sec, isFeature) {
+  const can = editable(f, sec);
+  const row = el("div", "field" + (isFeature ? " feature" : ""), null, { id: "f-" + f.key });
+  const meta = el("div", "meta"), keyline = el("div", "keyline");
+  const key = el("a", "key", null, { href: "#" + f.key, title: "Link to this setting" });
+  const dot = f.key.lastIndexOf(".");
+  key.append(el("span", "pre", f.key.slice(0, dot + 1)), f.key.slice(dot + 1));
+  keyline.append(key);
+  if (f.source === "file") keyline.append(el("span", "mark", "file", { title: "Written in " + snap.machine.path }));
+  if (f.source === "env") keyline.append(el("span", "mark", "env", { title: (f.env_name || "An environment variable") + " wins over the file" }));
+  const stagedMark = el("span", "mark staged", "staged"); keyline.append(stagedMark);
+  meta.append(keyline);
+  if (f.doc) {
+    const doc = prose(el("button", "doc", null, { "aria-expanded": "false", title: "Show the whole description" }), f.doc);
+    doc.addEventListener("click", () => doc.setAttribute("aria-expanded", doc.getAttribute("aria-expanded") === "true" ? "false" : "true"));
+    meta.append(doc);
+  }
+  const ctl = el("div", "ctl"), sub = el("div", "sub"), err = el("div", "err", null, { role: "alert", id: "e-" + f.key });
+  const label = f.key;
+  if (can) ctl.append(buildControl(f, label, err.id));
+  else {
+    const ro = el("div", "ro", null, { tabindex: "0", "aria-label": label + ", " + show(f.value, f) + ", read only" });
+    ro.append(el("span", "lock", f.state === "secret" ? "secret" : f.source === "env" ? "env" : "locked"), f.source === "env" && f.env_name && f.state !== "secret" ? f.env_name + " = " + show(f.value, f) : show(f.value, f));
+    ctl.append(ro);
+    if (f.reason && !(sec.locked && f.state === "locked")) ctl.append(el("div", "reason", f.reason));
+  }
+  ctl.append(sub, err);
+  row.append(meta, ctl);
+
+  row.sync = () => {
+    const isStaged = staged.has(f.key), problem = invalid.get(f.key) || errors.get(f.key) || "";
+    row.classList.toggle("staged", isStaged && !problem);
+    row.classList.toggle("bad", !!problem);
+    stagedMark.hidden = !isStaged;
+    err.textContent = problem;
+    sub.replaceChildren();
+    if (!can) { if (f.state !== "secret" && !eq(f.value, f.default)) sub.append(el("span", null, "default " + clip(show(f.default, f), 64))); return; }
+    const now = effective(f);
+    if (isStaged) sub.append(el("span", null, (staged.get(f.key) === null ? "back to default · was " : "was ") + clip(show(f.value, f), 64)));
+    else if (!eq(now, f.default)) sub.append(el("span", null, "default " + clip(show(f.default, f), 64)));
+    if (isStaged || invalid.has(f.key)) { const u = el("button", null, "undo", { title: "Drop this staged change" }); u.addEventListener("click", () => unstage(f.key)); sub.append(u); }
+    if (f.source === "file" && staged.get(f.key) !== null) { const r = el("button", null, "reset", { title: "Remove the line from the file; the default (" + clip(show(f.default, f), 40) + ") applies" }); r.addEventListener("click", () => resetToDefault(f.key)); sub.append(r); }
+  };
+  row.sync();
+  rows.set(f.key, row);
+  return row;
+}
+
+function buildControl(f, label, errId) {
+  const value = effective(f);
+  if (f.kind === "bool") {
+    const b = el("button", "switch", null, { role: "switch", "aria-checked": String(value === true), "aria-label": label, "aria-describedby": errId });
+    b.append(el("span", "on", "on"), el("span", "offs", "off"));
+    b.addEventListener("click", () => { const next = b.getAttribute("aria-checked") !== "true"; b.setAttribute("aria-checked", String(next)); stage(f.key, next); });
+    return b;
+  }
+  if (f.kind === "choice") {
+    // null on the wire means "remove the line", so "unset" is only an honest choice when unset is the default
+    const choices = f.choices.filter((c) => c !== null || f.default === null);
+    if (choices.length <= 4) {
+      const g = el("div", "seg", null, { role: "group", "aria-label": label });
+      for (const c of choices) {
+        const b = el("button", null, c === null ? "unset" : c, { "aria-pressed": String(eq(c, value)) });
+        b.addEventListener("click", () => { for (const o of g.children) o.setAttribute("aria-pressed", String(o === b)); stage(f.key, c); });
+        g.append(b);
+      }
+      return g;
+    }
+    const s = el("select", null, null, { "aria-label": label, "aria-describedby": errId });
+    choices.forEach((c, i) => s.append(el("option", null, c === null ? "unset" : c, { value: String(i) })));
+    s.value = String(choices.findIndex((c) => eq(c, value)));
+    s.addEventListener("change", () => stage(f.key, choices[Number(s.value)]));
+    return s;
+  }
+  if (f.kind === "list") return buildList(f, label);
+  const numeric = f.kind === "int" || f.kind === "float";
+  const input = el("input", numeric ? "num" : null, null, { type: "text", "aria-label": label, "aria-describedby": errId, autocomplete: "off", spellcheck: "false", autocapitalize: "off" });
+  if (numeric) input.setAttribute("inputmode", f.kind === "int" ? "numeric" : "decimal");
+  input.value = value === null || value === undefined ? "" : String(value);
+  if (f.nullable && f.default === null) input.placeholder = "unset";
+  input.addEventListener("input", () => {
+    const raw = input.value.trim();
+    let problem = "", parsed = input.value;
+    if (numeric) {
+      if (raw === "") { if (f.nullable && f.default === null) parsed = null; else problem = "needs a number"; }
+      else if (f.kind === "int" && !/^[+-]?\d+$/.test(raw)) problem = "a whole number";
+      else if (!Number.isFinite(Number(raw))) problem = "a number";
+      else parsed = Number(raw);
+    }
+    input.setAttribute("aria-invalid", String(!!problem));
+    if (problem) { invalid.set(f.key, problem); errors.delete(f.key); afterStage(f.key); }
+    else stage(f.key, parsed);
+  });
+  return input;
+}
+
+function buildList(f, label) {
+  const box = el("div", "list", null, { role: "group", "aria-label": label });
+  let items = [...(effective(f) || [])];
+  const commit = () => stage(f.key, items.map((s) => s.trim()).filter(Boolean));
+  const draw = (focusAt) => {
+    box.replaceChildren();
+    if (!items.length) box.append(el("div", "none", "empty list"));
+    items.forEach((text, i) => {
+      const line = el("div", "item");
+      const input = el("input", null, null, { type: "text", "aria-label": label + ", item " + (i + 1), autocomplete: "off", spellcheck: "false" });
+      input.value = text;
+      input.addEventListener("input", () => { items[i] = input.value; commit(); });
+      input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); items.splice(i + 1, 0, ""); draw(i + 1); } });
+      const rm = el("button", "rm", "×", { "aria-label": "Remove item " + (i + 1) + " from " + label, title: "Remove" });
+      rm.addEventListener("click", () => { items.splice(i, 1); commit(); draw(Math.min(i, items.length - 1)); });
+      line.append(input, rm); box.append(line);
+    });
+    const add = el("button", "add", "+ add", { "aria-label": "Add an item to " + label });
+    add.addEventListener("click", () => { items.push(""); draw(items.length - 1); });
+    box.append(add);
+    if (focusAt !== undefined) { const t = box.querySelectorAll("input")[focusAt] || add; t.focus(); }
+  };
+  draw();
+  return box;
+}
+
+// ---------------------------------------------------------------- the pending bar
+function mood() {
+  document.body.dataset.state = failed ? "error" : (staged.size || invalid.size || stale || (snap && snap.restart_needed)) ? "thinking" : "idle";
+}
+function renderBar() {
+  mood();
+  const dirty = staged.size > 0 || invalid.size > 0, owed = !!(snap && snap.restart_needed);
+  const bar = $("bar"), msg = $("barmsg");
+  bar.hidden = !(dirty || owed || stale || failed);
+  if (bar.hidden) { reviewOpen = false; return; }
+  const n = staged.size, path = snap ? snap.machine.path : "the file";
+  msg.className = failed ? "error" : "";
+  let label, text;
+  if (stale) { label = "file changed"; text = path + " changed underneath. Reload to read it again; what you staged stays staged where it still applies."; }
+  else if (dirty) {
+    label = n ? n + (n === 1 ? " change" : " changes") : "to fix";
+    text = failed ? failed
+      : invalid.size ? invalid.size + " to fix before saving"
+      : !online ? "offline · your changes are kept on this page"
+      : saving ? "writing " + path
+      : "staged, not yet written to " + path + (owed ? " · an earlier save still waits for a restart" : "");
+  } else if (owed) {
+    label = "restart to apply";
+    text = restarting ? "restart asked · waiting for Ciel to come back"
+      : snap.can_restart ? "Saved. The running Ciel still holds the old values until it restarts."
+      : "Saved. Restart Ciel on " + snap.machine.host + " to apply; this page cannot do it from here.";
+  } else { label = "not saved"; text = failed; }
+  $("barlabeltext").textContent = label;
+  msg.textContent = text;
+  $("reviewbtn").hidden = $("discard").hidden = $("save").hidden = !dirty || stale;
+  $("reload").hidden = !stale;
+  $("restart").hidden = dirty || stale || !owed || !snap.can_restart;
+  $("save").disabled = !online || saving || invalid.size > 0 || n === 0;
+  $("restart").disabled = !online || restarting;
+  $("reviewbtn").disabled = n === 0;
+  if (!n || stale) reviewOpen = false;
+  $("reviewbtn").setAttribute("aria-expanded", String(reviewOpen));
+  $("reviewbtn").classList.toggle("lit", reviewOpen);
+  renderReview();
+}
+function renderReview() {
+  const box = $("review");
+  box.hidden = !reviewOpen;
+  if (!reviewOpen) return;
+  box.replaceChildren();
+  for (const [key, v] of staged) {
+    const { f } = byKey.get(key), line = el("div", "chg");
+    const was = el("span", "was");
+    was.append(clip(show(f.value, f), 80), el("i", null, "→"), el("b", null, v === null ? "default · " + clip(show(f.default, f), 80) : clip(show(v, f), 80)));
+    const undo = el("button", null, "undo", { "aria-label": "Drop the change to " + key });
+    undo.addEventListener("click", () => { unstage(key); if (staged.size) $("reviewbtn").focus(); });
+    line.append(el("a", null, key, { href: "#" + key }), was, undo);
+    if (errors.has(key)) line.append(el("span", "err", errors.get(key)));
+    box.append(line);
+  }
+}
+
+// Two presses, like the Chart's restart: the first arms, the second means it.
+function armed(btn, labelEl, question, spoken, fire) {
+  const rest = labelEl.textContent; let timer = null, at = 0;
+  const disarm = () => { if (timer !== null) clearTimeout(timer); timer = null; btn.classList.remove("arming"); btn.setAttribute("aria-pressed", "false"); btn.style.minWidth = ""; labelEl.textContent = rest; };
+  btn.addEventListener("click", () => {
+    if (timer === null) {
+      btn.style.minWidth = btn.offsetWidth + "px";
+      btn.classList.add("arming"); btn.setAttribute("aria-pressed", "true");
+      labelEl.textContent = question; say(spoken, true); at = Date.now();
+      timer = setTimeout(() => { disarm(); say("", true); }, 4000);
+      return;
+    }
+    if (Date.now() - at < 350) return; // a bounce, not a decision
+    if (fire() !== false) { disarm(); say("", true); }
+  });
+  return disarm;
+}
+const disarmRestart = armed($("restart"), $("restartlabel"), "SURE?", "Armed — press again to restart Ciel", () => {
+  if (!sendRestart()) return false;
+  restarting = true; say("Restart asked."); renderBar();
+  // a restart that never drops the socket was refused or is waiting on a long turn; stop claiming it
+  setTimeout(() => { if (restarting && online) { restarting = false; renderBar(); } }, 30000);
+});
+armed($("discard"), $("discardlabel"), "SURE?", "Armed — press again to discard every staged change", () => {
+  staged.clear(); invalid.clear(); errors.clear(); failed = ""; reviewOpen = false;
+  renderPane(); renderIndex(); renderBar(); renderTally(); say("Staged changes discarded.");
+});
+$("reviewbtn").addEventListener("click", () => { reviewOpen = !reviewOpen; renderBar(); });
+$("reload").addEventListener("click", () => read());
+$("save").addEventListener("click", save);
+
+async function save() {
+  if (saving || !staged.size || invalid.size) return;
+  saving = true; failed = ""; errors.clear(); renderBar();
+  const sent = new Map(staged);
+  let res;
+  try { res = await request("write", { revision: snap.revision, changes: Object.fromEntries(sent) }); }
+  catch (e) { saving = false; failed = e.message + " · the save may or may not have landed; reload to see."; stale = true; renderBar(); say(failed); return; }
+  saving = false;
+  if (res.ok) {
+    // what was typed while the write was in flight stays staged
+    for (const [k, v] of sent) if (staged.has(k) && eq(staged.get(k), v)) staged.delete(k);
+    const n = (res.data.changed || []).length;
+    stale = false; reviewOpen = false;
+    load(res.data);
+    say(n + (n === 1 ? " setting" : " settings") + " saved. Restart Ciel to apply.");
+    return;
+  }
+  const d = res.data || {};
+  if (d.stale) { stale = true; failed = ""; renderBar(); say("The file changed underneath. Reload before saving."); return; }
+  failed = res.error || "The save was refused.";
+  for (const k in (d.errors || {})) errors.set(k, d.errors[k]);
+  for (const k of errors.keys()) { const r = rows.get(k); if (r) r.sync(); }
+  renderBar(); say(failed + " " + errors.size + " to fix.");
+  const first = [...errors.keys()][0];
+  if (first) reveal(first, false);
+}
+
+async function read() {
+  let res;
+  try { res = await request("read", {}); }
+  catch (e) { if (!snap) unavailable(e.message); return; }
+  if (!res.ok) { if (!snap) unavailable(res.error || "This Ciel did not give its settings."); else { failed = res.error || "reload refused"; renderBar(); } return; }
+  const came = restarting && !res.data.restart_needed;
+  stale = false; failed = ""; restarting = false;
+  load(res.data);
+  if (came) say("Ciel restarted. The saved settings are live.");
+  if (location.hash.length > 1 && !read.linked) { read.linked = true; reveal(decodeURIComponent(location.hash.slice(1)), true); }
+}
+function unavailable(why) {
+  const blank = $("blank"); blank.hidden = false; blank.className = "error";
+  blank.replaceChildren("settings unavailable", el("span", "why", why));
+  const again = el("button", "chip", "TRY AGAIN"); again.addEventListener("click", () => { blank.className = ""; blank.textContent = "reading the settings"; read(); });
+  blank.append(again);
+}
+
+// ---------------------------------------------------------------- finding things
+function reveal(name, fromLink) {
+  if (!snap) return;
+  const hit = byKey.get(name), sec = hit ? hit.sec : snap.sections.find((s) => s.name === name);
+  if (!sec) return;
+  if (hit && !(rows.has(name) && !rows.get(name).closest("[hidden]"))) {
+    query = ""; $("q").value = ""; onlySet = false; $("onlyset").setAttribute("aria-pressed", "false");
+    opened.add(sec.name); scope = groupOf(sec.name); renderPane(); renderIndex(); $("jump").value = "g:" + scope;
+  } else if (!hit) { scope = groupOf(sec.name); query = ""; $("q").value = ""; renderPane(); renderIndex(); }
+  const node = hit ? rows.get(name) : $("s-" + sec.name);
+  if (!node) return;
+  node.scrollIntoView({ block: hit ? "center" : "start" });
+  if (hit) {
+    node.classList.add("target"); setTimeout(() => node.classList.remove("target"), 2400);
+    const doc = node.querySelector(".doc"); if (doc && fromLink) doc.setAttribute("aria-expanded", "true");
+    const focus = node.querySelector(fromLink ? ".key" : ".ctl input, .ctl button, .ctl select"); if (focus) focus.focus({ preventScroll: true });
+  }
+}
+window.addEventListener("hashchange", () => { if (location.hash.length > 1) reveal(decodeURIComponent(location.hash.slice(1)), true); });
+
+function setFilter() {
+  // a filter looks across everything; clearing it returns to where you were
+  if (filtering() && scope !== "all" && !backScope) { backScope = scope; scope = "all"; }
+  if (!filtering() && backScope) { scope = backScope; backScope = ""; }
+  renderPane(); renderIndex(); $("jump").value = scope === "all" ? "all" : "g:" + scope; $("pane").scrollTop = 0;
+}
+$("q").addEventListener("input", () => { query = $("q").value.trim(); if (snap) setFilter(); });
+$("q").addEventListener("keydown", (ev) => { if (ev.key === "Escape") { ev.stopPropagation(); if ($("q").value) { $("q").value = ""; query = ""; if (snap) setFilter(); } else $("q").blur(); } });
+$("onlyset").addEventListener("click", () => { onlySet = !onlySet; $("onlyset").setAttribute("aria-pressed", String(onlySet)); if (snap) setFilter(); });
+$("jump").addEventListener("change", () => navigate($("jump").value));
+document.addEventListener("keydown", (ev) => {
+  const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(ev.target.tagName);
+  if (ev.key === "/" && !typing && !ev.metaKey && !ev.ctrlKey && !ev.altKey) { ev.preventDefault(); $("q").focus(); $("q").select(); }
+  else if (ev.key === "Escape" && reviewOpen) { reviewOpen = false; renderBar(); $("reviewbtn").focus(); }
+});
+window.addEventListener("beforeunload", (ev) => { if (staged.size || invalid.size) { ev.preventDefault(); ev.returnValue = ""; } });
+
+// ---------------------------------------------------------------- the wire
+// The same socket, hello, token and close codes as the Chart (nutrition.html
+// speaks the same frames); the token is the Chart's, remembered per origin.
+let ws = null, retryMs = 500, attempts = 0;
+const waiting = new Map();
+const rid = () => "set-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+function hubToken() { try { return localStorage.getItem("hubToken") || ""; } catch { return ""; } }
+function clientId() {
+  try { let id = localStorage.getItem("settingsId"); if (!id) { id = "settings-" + Math.random().toString(36).slice(2, 10); localStorage.setItem("settingsId", id); } return id; }
+  catch { return "settings"; }
+}
+function request(operation, extra) {
+  if (FIXTURE) return fixtureRequest(operation, extra);
+  return new Promise((resolve, reject) => {
+    if (!online || !ws || ws.readyState !== WebSocket.OPEN) return reject(new Error("Disconnected."));
+    const request_id = rid();
+    const timer = setTimeout(() => { waiting.delete(request_id); reject(new Error("No answer from Ciel. It may be older than this page.")); }, 15000);
+    waiting.set(request_id, { resolve, reject, timer });
+    ws.send(JSON.stringify({ type: "settings.request", request_id, operation, ...extra }));
+  });
+}
+function sendRestart() {
+  if (FIXTURE) return fixtureRestart();
+  if (!online || !ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify({ type: "restart" }));
+  return true;
+}
+function setOnline(on) { online = on; document.body.classList.toggle("disconnected", !on); if (snap) renderBar(); }
+
+function connect() {
+  const socket = new WebSocket((location.protocol === "https:" ? "wss" : "ws") + "://" + location.host + "/ws");
+  ws = socket;
+  socket.onopen = () => {
+    retryMs = 500; attempts = 0;
+    const hello = { type: "hello", v: 1, role: "chart", client_id: clientId() };
+    const token = hubToken(); if (token) hello.token = token;
+    socket.send(JSON.stringify(hello));
+  };
+  socket.onmessage = (ev) => {
+    if (ws !== socket) return;
+    let f; try { f = JSON.parse(ev.data); } catch { return; }
+    if (f.type === "hello") { document.body.classList.remove("needtoken"); setOnline(true); read(); }
+    else if (f.type === "settings.result") {
+      const p = waiting.get(f.request_id); if (!p) return;
+      waiting.delete(f.request_id); clearTimeout(p.timer); p.resolve(f);
+    }
+  };
+  socket.onclose = (ev) => {
+    if (ws !== socket) return;
+    for (const p of waiting.values()) { clearTimeout(p.timer); p.reject(new Error("Connection lost before the receipt")); }
+    waiting.clear();
+    attempts += 1; setOnline(false); disarmRestart();
+    if (ev && ev.code === 4401) {
+      $("connlabel").textContent = hubToken() ? "hub token refused" : "hub token needed";
+      document.body.classList.add("needtoken");
+      if (!snap) $("blank").textContent = "waiting for the hub token";
+      $("tokenin").focus();
+      return;
+    }
+    $("connlabel").textContent = (restarting ? "Ciel is restarting" : "reconnecting to Ciel") + (attempts > 1 ? " · attempt " + attempts : "") + (staged.size ? " · staged changes are kept" : "");
+    setTimeout(connect, retryMs);
+    retryMs = Math.min(retryMs * 2, 8000);
+  };
+  socket.onerror = () => socket.close();
+}
+$("tokenform").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const t = $("tokenin").value.trim(); if (!t) return;
+  try { localStorage.setItem("hubToken", t); } catch {}
+  $("tokenin").value = ""; document.body.classList.remove("needtoken");
+  $("connlabel").textContent = "connecting to Ciel";
+  connect();
+});
+
+// ---------------------------------------------------------------- the fixture
+// A hub's file, seen from the hub: enough of every kind, state and source to
+// review the page without a server. ?fixture&stale refuses the first save as
+// stale; ?fixture&down answers the read with ok:false.
+let FX = null, fxStaleOnce = new URLSearchParams(location.search).has("stale");
+function fixture() {
+  const F = (name, kind, value, def, doc, x) => ({ name, kind, choices: [], nullable: false, value, default: def, source: eq(value, def) ? "default" : "file", env_name: "", state: "editable", set: false, reason: "", doc, ...(x || {}) });
+  const P = (name, value, doc) => F(name, "path", value, value, doc, { state: "locked", reason: "Paths are changed in the file by hand: moving one moves what lives there." });
+  const S = (name, title, doc, x, fields) => ({ name, title, doc, where: "", locked: false, lock_reason: "", ...x, fields: fields.map((f) => ({ key: name + "." + f.name, ...f })) });
+  const byHand = "Security-bearing. Changed in ~/.ciel/config.toml by hand, on purpose: a page that can be reached from a phone does not get to widen what Ciel may do.";
+  const lockAll = (fields) => fields.map((f) => ({ ...f, state: f.state === "secret" ? "secret" : "locked", reason: f.reason || "Part of a view-only section." }));
+  const efforts = ["low", "medium", "high", "xhigh", "max", null];
+  return {
+    machine: { host: "ciel-hub", role: "hub", path: "~/.ciel/config.toml" },
+    revision: "9f2c41d07a", restart_needed: false, can_restart: true,
+    groups: [
+      { id: "general", title: "General", sections: ["general"] },
+      { id: "voice", title: "Voice and hearing", sections: ["audio", "wake", "gestures", "stt", "tts"] },
+      { id: "mind", title: "Mind", sections: ["brain", "memory"] },
+      { id: "work", title: "Work", sections: ["projects"] },
+      { id: "connections", title: "Connections", sections: ["spotify", "mail"] },
+      { id: "surfaces", title: "Surfaces", sections: ["web", "hub"] },
+      { id: "safety", title: "Safety", sections: ["shell"] },
+    ],
+    sections: [
+      S("general", "General", "The few choices that belong to no subsystem.", {}, [
+        F("timezone", "str", "America/Los_Angeles", "", "An IANA zone name. Empty means the machine's own zone, which on a cloud VM is UTC and almost never what you meant: a hub that thinks in UTC tells you about tomorrow's meetings this evening."),
+        F("log_level", "choice", "INFO", "INFO", "How much the log says. ``DEBUG`` is for an afternoon of chasing something, not for leaving on.", { choices: ["DEBUG", "INFO", "WARNING", "ERROR"] }),
+        P("state_dir", "~/.ciel", "Where runtime state, tokens, recordings, and models live. Nothing from here is ever committed."),
+      ]),
+      S("audio", "Audio", "The microphone, the speaker, and how an utterance is cut out of a room.", { where: "room" }, [
+        F("backend", "choice", "apple", "portaudio", "``apple`` opens the microphone through the system's voice processing, which cancels Ciel's own voice out of what it hears. ``portaudio`` is the plain path and the only one off a Mac. ``webrtc`` runs the canceller in-process.", { choices: ["portaudio", "apple", "webrtc"] }),
+        F("apple_ducking", "choice", "min", "min", "How far the system lowers other audio while the voice-processing microphone is open.", { choices: ["min", "mid", "max"] }),
+        F("input_device", "str", null, null, "A device index or a name fragment; unset takes the system default.", { nullable: true }),
+        F("silence_ms", "int", 650, 500, "How long a pause ends an utterance. Raise it if Ciel cuts you off mid-thought; lower it if it feels slow to answer."),
+        F("followup_ms", "int", 5000, 5000, "After Ciel finishes speaking, how long the microphone stays open for a reply without the wake word."),
+        F("max_utterance_s", "float", 30, 30, "The longest single utterance before the recorder gives up and sends what it has."),
+        F("barge_in", "bool", false, false, "Let speech over Ciel's voice interrupt it. Only sane with an echo-cancelled backend; otherwise Ciel interrupts itself."),
+        F("dangling_words", "list", ["and", "but", "so", "because", "um"], ["and", "but", "so", "because", "um"], "An utterance that ends on one of these is given ``filler_extend_ms`` more before it is cut: a trailing “and” is a breath, not an ending."),
+      ]),
+      S("wake", "Wake", "How Ciel decides it's being addressed.", { where: "room" }, [
+        F("mode", "choice", "wakeword", "wakeword", "``hotkey`` is the reliable fallback and how the pipeline gets tested before the microphone is trusted. ``always`` skips waking entirely and responds to any speech — only sane alone in a quiet room.", { choices: ["wakeword", "hotkey", "always"] }),
+        F("model", "str", "hey_jarvis", "hey_jarvis", "An openWakeWord pretrained name, or a path to a custom ``.onnx``. The pretrained default answers to “hey jarvis”; a trained model dropped in as a path answers to the name."),
+        F("threshold", "float", 0.55, 0.5, "0-1. Raise it if the TV sets Ciel off; lower it if it ignores you."),
+        F("vad_threshold", "float", 0, 0, "openWakeWord's own Silero gate, 0–1; 0 leaves it off. It runs after the wake model on every frame, not before it, and only zeroes a score whose preceding half-second held no speech: a little resistance to non-speech false wakes for a fifth more CPU on the always-on path (measured 2026-09-12: 5 of 38 ms per second). The speech gate in ``stt.speech_threshold`` already keeps a false wake from becoming a turn."),
+        F("ack", "bool", true, true, "Speak a brief acknowledgement when the wake fires, so you know Ciel is listening without looking at the indicator."),
+        F("ack_phrases", "list", ["Yes?", "Hm?"], ["Uh huh?", "Yes?", "Hm?"], "Acknowledgements to pick from at random. Keep them to a syllable or two: the microphone is drained while one plays, so a long phrase eats the opening of a command spoken in the same breath as the wake word."),
+        F("snap", "bool", true, false, "A finger snap addresses Ciel the way the phrase does: the same acknowledgement, the same listening window. Tune the ear in ``[gestures]``."),
+        F("double_clap", "choice", "play", "off", "What two claps within the pair window do. ``wake`` addresses Ciel like the snap; ``play`` starts ``double_clap_plays`` in Spotify without waking, the way a switch on the wall starts music.", { choices: ["off", "wake", "play"] }),
+        F("double_clap_plays", "str", "spotify:artist:0du5cEVh5yTK9QJze8zA0C", "", "The Spotify URI two claps start when ``double_clap = \"play\"``."),
+      ]),
+      S("gestures", "Gestures", "The ear for snaps and claps: a transient detector beside the wake model. Tune by WAV replay, not by hand.", { where: "room" }, [
+        F("min_peak", "float", 0.01, 0.01, "The quietest transient worth looking at."),
+        F("noise_ratio", "float", 6, 6, "How far above the running noise floor a transient must stand."),
+        F("double_max_ms", "int", 800, 800, "The longest gap between two claps that still reads as a pair."),
+        F("keyboard_veto_ms", "int", 300, 300, "A keypress this recently vetoes a snap: typing is a field of small transients."),
+        F("log_candidates", "bool", false, false, "Write every candidate transient to the log with its measurements. For a tuning afternoon."),
+      ]),
+      S("stt", "Speech to text", "Turning an utterance into words, on this machine.", { where: "room" }, [
+        F("engine", "choice", "mlx-whisper", "mlx-whisper", "``mlx-whisper`` on Apple silicon; ``faster-whisper`` everywhere else.", { choices: ["faster-whisper", "mlx-whisper"] }),
+        F("mlx_model", "str", "mlx-community/whisper-small.en-mlx", "mlx-community/whisper-small.en-mlx", "A Hugging Face repository holding MLX weights."),
+        F("language", "str", "en", "en", "A language code, or unset to let Whisper guess each time, which costs a little and sometimes guesses Welsh.", { nullable: true }),
+        F("beam_size", "int", 1, 1, "1 is greedy and fast. More is slower and rarely better on short commands."),
+        F("speech_threshold", "float", 0.5, 0.5, "Silero's peak speech probability an utterance must reach before Whisper is asked at all. Whisper given silence or typing invents sentences; this is what stops a false wake from becoming a turn."),
+      ]),
+      S("tts", "Voice", "How Ciel speaks.", { where: "room" }, [
+        F("engine", "choice", "piper", "piper", "``say`` is macOS's built-in; ``piper`` is the neural voice and runs anywhere; ``native`` is the Swift helper.", { choices: ["say", "piper", "native"] }),
+        F("piper_voice", "str", "en_GB-alan-medium", "en_US-lessac-medium", "A piper voice name; fetched into ``piper_voice_dir`` on first use."),
+        P("piper_voice_dir", "~/.ciel/piper", "Where piper voices are kept."),
+        F("piper_speed", "float", 1.05, 1, "1.0 is the voice as trained. Above is faster."),
+        F("rate", "int", 190, 190, "Words per minute, for the ``say`` engine only."),
+        F("effect", "choice", "jarvis", "none", "A speaker treatment applied after synthesis.", { choices: ["none", "jarvis"], source: "env", env_name: "CIEL_TTS_EFFECT", reason: "CIEL_TTS_EFFECT is set in the environment and wins over the file." }),
+      ]),
+      S("brain", "Brain", "The model behind the voice, and how it thinks aloud.", {}, [
+        F("model", "str", "claude-opus-5", "claude-opus-5", "The model that answers a turn."),
+        F("personality", "choice", "jarvis", "jarvis", "The persona the system prompt wears.", { choices: ["jarvis", "ciel"] }),
+        F("effort", "choice", "low", "low", "How hard an ordinary turn thinks. Unset leaves it to the model's own default. Speech wants low: every second of thought is a second of silence in the room.", { choices: efforts, nullable: true }),
+        F("deep_effort", "choice", "xhigh", "high", "The same, for work handed to the deep lane, where nobody is standing in the room waiting.", { choices: efforts, nullable: true }),
+        F("allowed_tools", "list", ["WebSearch", "WebFetch"], ["WebSearch", "WebFetch"], "Built-in tools the agent may use without asking.", { state: "locked", reason: "What the agent may do without asking is changed in the file by hand." }),
+        F("ack_phrases", "list", ["Hmm.", "Let me see.", "Let me think about that."], ["Hmm.", "Let me see.", "Let me think about that."], "Said when a turn is taking longer than ``ack_delay_s``, so silence never reads as deafness."),
+        F("ack_delay_s", "float", 0.6, 0.6, "How long a turn may be silent before an acknowledgement fills it."),
+        F("speak_thinking", "bool", true, true, "Read the model's working notes aloud, under its breath."),
+        F("max_turns", "int", null, null, "A ceiling on agent steps per turn; unset means none.", { nullable: true }),
+        F("mcp_servers", "other", { calendar: { command: "uvx", args: ["mcp-calendar"] } }, {}, "External tool servers, by name.", { state: "locked", reason: "A table of tables: edited in the file." }),
+      ]),
+      S("memory", "Memory", "What Ciel keeps between conversations, as files you can read.", {}, [
+        F("enabled", "bool", true, true, "Keep and consult memory."),
+        P("dir", "~/.ciel/memory", "One markdown file per memory, and an index."),
+        F("max_index_entries", "int", 200, 200, "The index is loaded into every turn; past this it is pruned oldest-first."),
+      ]),
+      S("projects", "Projects", "The Atlas: which folders are projects, and what Ciel may read of them.", {}, [
+        F("enabled", "bool", false, false, "Bind folders as projects and answer questions about them."),
+        F("roots", "list", [], [], "Folders whose children are projects.", { state: "locked", reason: "Which folders Ciel may read is changed in the file by hand." }),
+        F("max_reading_chars", "int", 24000, 24000, "How much of a project a single reading may hold."),
+        F("reading_keep_days", "float", 14, 14, "Readings older than this are dropped."),
+      ]),
+      S("spotify", "Spotify", "Playback on your own account.", {}, [
+        F("enabled", "bool", true, false, "Offer the music tools."),
+        F("confirm_controls", "bool", false, false, "Ask before play, pause, and skip. Off by default: a wrong song is not a regret."),
+        F("client_id", "str", null, "", "The app's client id from Spotify's developer dashboard.", { state: "secret", set: true, source: "file", reason: "Never sent to a page. Set it in the file." }),
+        P("token_file", "~/.ciel/spotify.json", "Where the refresh token is kept, owner-only."),
+        F("redirect_port", "int", 8888, 8888, "The loopback port the one-time authorization listens on."),
+        F("timeout_s", "float", 15, 15, "How long a Spotify call may take before Ciel says so."),
+      ]),
+      S("mail", "Mail", "An address Ciel can send from, to you and nobody else.", {}, [
+        F("enabled", "bool", false, false, "Offer the mail tools."),
+        F("address", "str", "", "", "The From address."),
+        F("owner", "str", "", "", "The only recipient Ciel may write to without a grant.", { state: "locked", reason: "Who Ciel may write to is changed in the file by hand." }),
+        F("smtp_host", "str", "smtp.mx.cloudflare.net", "smtp.mx.cloudflare.net", ""),
+        F("smtp_port", "int", 465, 465, ""),
+        F("token", "str", null, "", "The SMTP credential.", { state: "secret", set: false, source: "default", reason: "Never sent to a page. Set it in the file." }),
+      ]),
+      S("web", "Web", "The Chart and the pages beside it.", { locked: true, lock_reason: byHand }, lockAll([
+        F("enabled", "bool", true, false, "Serve the Chart."),
+        F("host", "str", "127.0.0.1", "127.0.0.1", "The interface to bind. Loopback unless a tunnel stands in front."),
+        F("port", "int", 8765, 8765, ""),
+        F("max_upload_bytes", "int", 8388608, 8388608, "The largest file the Chart may hand to a turn."),
+        F("state_feed", "bool", true, false, "Publish the mark's state, and nothing else, to the public relay."),
+      ])),
+      S("hub", "Hub", "The door other machines come in by.", { locked: true, lock_reason: byHand }, lockAll([
+        F("bind", "str", "127.0.0.1:8770", "", "Where spokes connect."),
+        F("require_token", "bool", true, false, "Refuse a hello without the token, even from loopback."),
+        F("token", "str", null, "", "The shared secret.", { state: "secret", set: true, source: "file", reason: "Never sent to a page." }),
+        F("origins", "list", ["https://ciel.yunhan.me"], [], "Origins a browser may connect from."),
+        F("hello_timeout_s", "float", 5, 5, "How long a socket may stay silent before it is closed."),
+      ])),
+      S("shell", "Shell", "Running commands on your behalf, behind the confirmation broker.", { locked: true, lock_reason: byHand }, lockAll([
+        F("enabled", "bool", false, false, "Offer the shell tool at all."),
+        F("auto_allow", "list", ["ls", "pwd", "git status", "git diff"], ["ls", "pwd", "git status", "git diff"], "Commands that run without asking: read-only, and only these exact prefixes."),
+        F("deny_extra", "list", [], [], "Refused outright, on top of the built-in list."),
+        F("confirm_timeout_ms", "int", 8000, 8000, "An unanswered question is a no."),
+        F("command_timeout_s", "float", 120, 120, ""),
+      ])),
+    ],
+  };
+}
+function fixtureRequest(operation, extra) {
+  return new Promise((resolve) => setTimeout(() => {
+    const copy = () => JSON.parse(JSON.stringify(FX));
+    if (operation === "read") {
+      if (new URLSearchParams(location.search).has("down")) return resolve({ ok: false, error: "settings are not served by this process (fixture)" });
+      return resolve({ ok: true, data: copy() });
+    }
+    if (fxStaleOnce) { fxStaleOnce = false; FX.revision = "b71e"; return resolve({ ok: false, error: "the file changed", data: { errors: {}, stale: true } }); }
+    const errs = {};
+    for (const k in extra.changes) if (k.endsWith(".threshold") && extra.changes[k] !== null && extra.changes[k] > 1) errs[k] = "must be between 0 and 1";
+    if (Object.keys(errs).length) return resolve({ ok: false, error: "nothing was written", data: { errors: errs, stale: false } });
+    for (const sec of FX.sections) for (const f of sec.fields) if (f.key in extra.changes) {
+      const v = extra.changes[f.key];
+      if (v === null) { f.value = JSON.parse(JSON.stringify(f.default)); f.source = "default"; } else { f.value = v; f.source = "file"; }
+    }
+    FX.revision = Math.random().toString(16).slice(2, 12); FX.restart_needed = true;
+    resolve({ ok: true, data: { ...copy(), changed: Object.keys(extra.changes) } });
+  }, 250));
+}
+function fixtureRestart() {
+  setTimeout(() => { $("connlabel").textContent = "Ciel is restarting"; setOnline(false); }, 300);
+  setTimeout(() => { FX.restart_needed = false; setOnline(true); read(); }, 1900);
+  return true;
+}
+
+if (FIXTURE) { FX = fixture(); online = true; read(); } else connect();
+</script>
+</body>
+</html>

@@ -69,6 +69,8 @@ SAMPLES: dict[str, dict] = {
     'task.request': {'request_id': 'r', 'operation': 'list'},
     'task.result': {'request_id': 'r', 'ok': True, 'data': {}},
     'task.changed': {},
+    'settings.request': {'request_id': 'r', 'operation': 'read'},
+    'settings.result': {'request_id': 'r', 'ok': True, 'data': {}},
     'nutrition.request': {'request_id': 'meal-1', 'operation': 'day', 'data': {}},
     'nutrition.question': {'data': {'confirm_id':'question','digest':'review','operation':'bulk_apply'}},
     'nutrition.question_end': {'confirm_id':'question'},
@@ -110,6 +112,7 @@ SAMPLES: dict[str, dict] = {
 
 def probe_codec() -> None:
     check('note text and receipts never enter the replay ring', not {'note.save', 'note.result'} & wire.BROADCAST_TYPES)
+    check('a settings snapshot is one page\'s answer and never enters the replay ring', 'settings.result' not in wire.BROADCAST_TYPES)
     check('task payloads and invalidation never enter the replay ring', not {'task.result', 'task.changed'} & wire.BROADCAST_TYPES)
     check('Chart controls need the revision they rendered', refused(json.dumps({'type': 'task.request', 'request_id': 'r', 'operation': 'pause', 'task_id': 't'}), 'c2h'))
     check('task request identities are bounded', refused(json.dumps({'type': 'task.request', 'request_id': 'r' * 257, 'operation': 'list'}), 'c2h'))
