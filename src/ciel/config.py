@@ -1480,6 +1480,20 @@ class WebConfig:
     scaled down by the page before they leave it; other files arrive as
     they are and are saved owner-only under the brain's workspace."""
 
+    state_feed: bool = False
+    """Serve ``GET /state``: a read-only event stream of the indicator's
+    state word and nothing else, with no token asked. It exists so marks
+    on other pages (yunhan.me, through its Door) can listen when Ciel
+    listens. Off by default because it is a statement about the room:
+    whoever can read it knows when someone is talking to Ciel. How the
+    listening was reached, who spoke, and what was said never travel on
+    it."""
+
+    state_feed_max: int = 8
+    """Open ``/state`` streams allowed at once; further ones are refused.
+    The intended reader is one relay, not the public, so a small number
+    is the whole defence against a page that opens streams in a loop."""
+
     max_files_per_turn: int = 8
     """Files one message may carry; more are dropped with the page told so."""
 

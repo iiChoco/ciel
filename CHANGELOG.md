@@ -60,6 +60,43 @@ dressed as a fault, and it was ugly.
 and the mute wire is as it was. Checked by eye at 800×600, 375×812, and
 900×500, with the ask bar open, by click and by keyboard.
 
+## 2026-09-20 — When Ciel listens, every mark listens
+
+**Why.** The marks across yunhan.me looked alike and moved alone: only the
+Chart knew what Ciel was doing, because the state left the hub on one socket
+behind the owner's gates. The wish was the plain one — say "hey Ciel" and
+watch every mark on every page turn to listening.
+
+**What.**
+
+- *The hub can say one word to anyone.* `[web] state_feed` (off by default)
+  adds `GET /state`, a server-sent event stream of the indicator's word: on
+  arrival, on each change, and repeated every twenty seconds so a reader
+  that missed one is corrected. No token and no Origin gate, because the
+  path is read-only and the vocabulary is closed (`STATE_WORDS`); a word
+  outside it is said as `idle`. The source of a listening state never
+  travels here. A reader that fell behind gets the newest word, not the
+  backlog, and `state_feed_max` (8) refuses streams past the limit with a
+  Retry-After, since the intended reader is one relay.
+- *Public by decision.* The owner chose on 2026-09-20 that everyone may see
+  it: a visitor to yunhan.me can tell when Ciel is being spoken to. That is
+  the whole disclosure, and the reason the switch is a config field rather
+  than a default.
+- *The website repeats it.* In `~/Projects/yunhan.me`, Door follows the feed
+  over the tailnet and serves `/api/ciel/state` on every hostname;
+  `brand-mark.js` has every mark follow it, the landing page's included.
+  The interview room's marks keep following the interviewer.
+
+**Probes.** `probe_web.py` 67 → 75: the feed is off until asked for; it is
+an uncacheable event stream; a reader hears where the room is on arrival;
+listening travels as the word alone; a slow reader hears only the newest
+word; an unknown word is said as idle; streams past the limit get 503 with
+Retry-After; a closed stream gives its place back. Seen in a browser against
+a stand-in hub through a local Door: the landing page's large mark and
+header glyph went to thinking and then speaking with the feed. Not
+exercised: the real hub's feed end to end, which needs `state_feed = true`
+in the hub's config and `ciel_state` in Door's, both on the VM.
+
 ## 2026-09-20 — One mark on every page
 
 **Why.** The Chart and yunhan.me's landing page wore the living mark; the

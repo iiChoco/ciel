@@ -178,6 +178,10 @@ it reconnects and the hello replay catches it up."""
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
+STATE_WORDS = frozenset({"idle", "listening", "thinking", "reasoning", "speaking", "error"})
+"""The indicator vocabulary, and everything ``/state`` will ever say."""
+
+
 def origin_allowed(
     origin: str | None, port: int, hosts: tuple[str, ...] = ()
 ) -> bool:
@@ -397,6 +401,10 @@ class WebLink:
         drains its queue in order — a shared broadcast that awaited every
         socket would let the slowest tab pace the pipeline."""
         self._writers: set[asyncio.Task[None]] = set()
+        self._state_feeds: set[asyncio.Queue[str]] = set()
+        """One queue per open ``/state`` stream; each holds only the
+        newest word, because a reader that fell behind wants where the
+        room is, not where it has been."""
         self._state = "idle"
         self._source: str | None = None
         """How a listening state was reached — "spoken", "snap", "clap
@@ -784,7 +792,13 @@ class WebLink:
     def note_state(self, state: str, source: str | None = None) -> None:
         if (state, source) == (self._state, self._source):
             return
+        changed = state != self._state
         self._state, self._source = state, source
+        if changed:
+            for feed in self._state_feeds:
+                while not feed.empty():
+                    feed.get_nowait()
+                feed.put_nowait(state)
         frame: dict[str, Any] = {"type": "state", "state": state}
         if source:
             frame["source"] = source
@@ -912,6 +926,8 @@ class WebLink:
         app.router.add_get("/", self._serve_page)
         app.router.add_get("/nutrition", self._serve_nutrition_page)
         app.router.add_get("/ws", self._serve_ws)
+        if self._config.state_feed:
+            app.router.add_get("/state", self._serve_state)
         if self._interview is not None:
             await self._interview.start()
             self._interview.register(app.router)
@@ -987,6 +1003,39 @@ class WebLink:
             content_type="text/html",
             headers={"Cache-Control": "no-store"},
         )
+
+    async def _serve_state(self, request: Any) -> Any:
+        """The state word as a server-sent event stream, for marks on other
+        pages. No token and no Origin gate, on purpose: nothing can be sent
+        up this path, and what comes down is one of six words. The source
+        of a listening state stays on the Chart's socket."""
+        from aiohttp import web
+
+        if len(self._state_feeds) >= max(0, self._config.state_feed_max):
+            raise web.HTTPServiceUnavailable(headers={"Retry-After": "30"})
+        response = web.StreamResponse(headers={
+            "Content-Type": "text/event-stream", "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        })
+        await response.prepare(request)
+        feed: asyncio.Queue[str] = asyncio.Queue()
+        self._state_feeds.add(feed)
+        try:
+            state = self._state
+            while True:
+                word = state if state in STATE_WORDS else "idle"
+                await response.write(f"data: {word}\n\n".encode())
+                try:
+                    state = await asyncio.wait_for(feed.get(), timeout=20.0)
+                except asyncio.TimeoutError:
+                    # Said again rather than a bare comment: a relay that
+                    # missed a word is corrected within one heartbeat.
+                    state = self._state
+        except ConnectionResetError:
+            pass
+        finally:
+            self._state_feeds.discard(feed)
+        return response
 
     async def _serve_ws(self, request: Any) -> Any:
         from aiohttp import web

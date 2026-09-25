@@ -26,6 +26,14 @@ the name, the size, the type from the bytes (an image) or the suffix (a
 text-shaped claim, held to the same rule) — so a say naming one finds
 it, a retry of the same upload answers with the record and rewrites
 nothing, and the keep window still prunes what is old before recall.
+
+The state feed is off until asked for. On, it is an uncacheable event
+stream that tells a reader where the room is as it arrives and then each
+change, as one of the six indicator words and nothing else: how a
+listening was reached stays on the Chart's socket, a reader that fell
+behind hears only the newest word, a word outside the vocabulary is said
+as idle, streams past the limit are refused with a Retry-After, and a
+closed stream gives its place back.
 """
 from __future__ import annotations
 
@@ -568,6 +576,45 @@ async def live(port: int | None = None, require_token: str | None = None) -> Non
 # ── entry ────────────────────────────────────────────────────────────────────
 
 
+async def probe_state_feed() -> None:
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    print("\nthe state feed")
+    check("the state feed is off until the config asks for it", WebConfig().state_feed is False)
+    link = WebLink(replace(WebConfig(), state_feed=True, state_feed_max=2))
+    app = web.Application()
+    app.router.add_get("/state", link._serve_state)
+
+    async def word(stream: Any) -> str:
+        return (await asyncio.wait_for(stream.content.readuntil(b"\n\n"), 5)).decode()
+
+    async with TestClient(TestServer(app)) as client:
+        first = await client.get("/state")
+        check("the feed is an event stream nobody may cache", first.status == 200 and first.headers["Content-Type"].startswith("text/event-stream") and first.headers["Cache-Control"] == "no-store")
+        check("a reader is told where the room is as it arrives", await word(first) == "data: idle\n\n")
+        link.note_state("listening", "snap")
+        check("listening travels as the word alone, never how it was reached", await word(first) == "data: listening\n\n")
+        link.note_state("listening", "spoken")
+        link.note_state("thinking")
+        link.note_state("speaking")
+        check("a reader that fell behind hears only the newest word", await word(first) == "data: speaking\n\n")
+        link.note_state("dreaming")
+        check("a word outside the vocabulary is said as idle", await word(first) == "data: idle\n\n")
+        second = await client.get("/state")
+        await word(second)
+        third = await client.get("/state")
+        check("streams past the limit are refused with a time to come back", third.status == 503 and third.headers.get("Retry-After") == "30")
+        second.close()
+        for _ in range(50):
+            if len(link._state_feeds) < 2:
+                break
+            link.note_state("idle" if link._state != "idle" else "thinking")
+            await asyncio.sleep(0.05)
+        check("a closed stream gives its place back", len(link._state_feeds) == 1)
+        first.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", help="serve the page and echo")
@@ -585,6 +632,8 @@ def main() -> None:
         with contextlib.suppress(KeyboardInterrupt):
             asyncio.run(live(args.port, args.require_token))
         return
+
+    asyncio.run(probe_state_feed())
 
     from ciel.remote.web import Admission
     link = WebLink(WebConfig())

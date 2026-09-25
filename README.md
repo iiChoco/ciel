@@ -622,11 +622,24 @@ uv sync --extra web
 enabled = true
 # port = 8765        # the page lives at http://127.0.0.1:8765
 # max_upload_bytes = 8388608   # the largest file the page may send with a message
+# state_feed = false         # serve GET /state: the state word alone, no token, for marks on other pages
+# state_feed_max = 8           # open /state streams allowed at once
 # max_files_per_turn = 8       # files one message may carry
 # upload_keep_days = 14.0      # the Chart's own uploads older than this are pruned; 0 keeps all
 # max_inline_chars = 16000     # a text file this small is quoted into the prompt as data
 # image_prompt_chars = 900000  # the base64 budget for images shown to the model in one turn
 ```
+
+**The state feed** lets marks elsewhere listen when Ciel listens. With
+`state_feed = true` the Chart's server answers `GET /state` with an event
+stream of the indicator's word — `idle`, `listening`, `thinking`,
+`reasoning`, `speaking`, `error` — on arrival, on every change, and again
+every twenty seconds. It asks for no token because nothing can be sent up
+it and only those six words come down: how a listening was reached, who
+spoke, and what was said stay on the Chart's socket. It is still a
+statement about the room, which is why it is off by default; yunhan.me's
+Door reads it over the tailnet and repeats it to the site's marks, and that
+is its one intended reader, so `state_feed_max` is small.
 
 **Mute** is the reason this exists. While muted, Ciel holds its tongue
 *and* shuts its ear: nothing leaves the speakers (greeting, timer rings, and
